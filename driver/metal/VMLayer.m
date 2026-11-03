@@ -17,6 +17,7 @@
 #import <QuartzCore/CAMetalLayer.h>
 #import <objc/runtime.h>
 #import <dlfcn.h>
+#import <TargetConditionals.h>
 
 static void TSDisableCAGenericShaders(void) {
     if (getenv("TSMTL_GENERIC_SHADERS") || getenv("CA_DISABLE_GENERIC_SHADERS") || getenv("CA_FORCE_GENERIC_SHADERS")) return;
@@ -61,7 +62,12 @@ static id (*gNextDrawable)(id, SEL);
 static id TSNextDrawable(CAMetalLayer *self, SEL _cmd) {
     if (gTSMtlTraceOn)
         TSMtlTraceOnce(@"CAMetalLayer %p: %.0fx%.0f drawables %lu displaySync %d withTransaction %d opaque %d fmt %lu", self,
-                       self.drawableSize.width, self.drawableSize.height, (unsigned long)self.maximumDrawableCount, self.displaySyncEnabled,
+                       self.drawableSize.width, self.drawableSize.height, (unsigned long)self.maximumDrawableCount,
+#if TARGET_OS_OSX
+                       self.displaySyncEnabled,
+#else
+                       1,
+#endif
                        self.presentsWithTransaction, self.opaque, (unsigned long)self.pixelFormat);
     if (!gTSMtlStatsOn) return gNextDrawable(self, _cmd);
     uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
@@ -84,7 +90,9 @@ static void TSSetDevice(CAMetalLayer *self, SEL _cmd, id device) {
     gSetDevice(self, _cmd, device);
     if (![device isKindOfClass:[VMDevice class]]) return;
     if (self.maximumDrawableCount < TSMinDrawables()) gSetMaxDrawables(self, @selector(setMaximumDrawableCount:), TSMinDrawables());
+#if TARGET_OS_OSX
     if (TSDisplaySync() >= 0) self.displaySyncEnabled = TSDisplaySync() != 0;
+#endif
 }
 
 void TSMtlInstallLayerTuning(void) {

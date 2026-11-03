@@ -200,8 +200,10 @@ static NSDictionary<NSString *, NSNumber *> *VMLimitOffsets(Ivar ivar, size_t *s
 - (uint64_t)sharedMemorySize { return vmg_device_get_info(_vmg)->video_memory; }
 - (BOOL)metalAssertionsEnabled { return NO; }
 - (void)setMetalAssertionsEnabled:(BOOL)enabled {}
+#if TARGET_OS_OSX
 - (MTLDeviceLocation)location { return MTLDeviceLocationBuiltIn; }
 - (NSUInteger)locationNumber { return 0; }
+#endif
 - (BOOL)isLowPower { return YES; }
 - (BOOL)isHeadless { return NO; }
 - (BOOL)isRemovable { return NO; }

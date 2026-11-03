@@ -1,6 +1,7 @@
 // Viva Metal - render command encoder. Each call is recorded in order and replayed on the GPU queue as vmg_cmd_*
 // (Metal state applies to the draws that follow it).
 #import "VMPrivate.h"
+#import <TargetConditionals.h>
 
 #define VM_CATCH_ALL(cls) + (void)initialize { if (self == [cls class]) TSMtlInstallCatchAll(self); }
 
@@ -268,13 +269,16 @@ VM_CATCH_ALL(VMRenderEncoder)
 
 #pragma mark Barriers and residency
 
-- (void)textureBarrier {
+- (void)recordBarrier {
     VMDevice *d = _device;
     [_cb recordCommand:^{ vmg_cmd_barrier(d.vmg); }];
 }
-- (void)memoryBarrierWithScope:(MTLBarrierScope)scope afterStages:(MTLRenderStages)after beforeStages:(MTLRenderStages)before { [self textureBarrier]; }
+#if TARGET_OS_OSX
+- (void)textureBarrier { [self recordBarrier]; }
+#endif
+- (void)memoryBarrierWithScope:(MTLBarrierScope)scope afterStages:(MTLRenderStages)after beforeStages:(MTLRenderStages)before { [self recordBarrier]; }
 - (void)memoryBarrierWithResources:(const id<MTLResource> __unsafe_unretained *)resources count:(NSUInteger)count
-                       afterStages:(MTLRenderStages)after beforeStages:(MTLRenderStages)before { [self textureBarrier]; }
+                       afterStages:(MTLRenderStages)after beforeStages:(MTLRenderStages)before { [self recordBarrier]; }
 - (void)useResource:(id<MTLResource>)resource usage:(MTLResourceUsage)usage {}
 - (void)useResource:(id<MTLResource>)resource usage:(MTLResourceUsage)usage stages:(MTLRenderStages)stages {}
 - (void)useResources:(const id<MTLResource> __unsafe_unretained *)resources count:(NSUInteger)count usage:(MTLResourceUsage)usage {}
