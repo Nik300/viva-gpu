@@ -1,7 +1,7 @@
 // CoreAnimation's own Metal renderer (CARenderer, the engine of iOS's render server in backboardd) on the Viva
 // driver: a layer tree typical of iOS UI is composed on our device (llvmpipe or Panfrost-on-mock) and on the Mac's
 // real GPU, and the two frames are compared. PNGs go to /tmp/vmg-ca-{viva,ref}.png.
-// Usage: ca [frames]          (phone: writes /tmp/vmg-ca-viva.png only)
+// Usage: ca [frames [OUT.png]]          (phone: writes only our frame, default /tmp/vmg-ca-viva.png)
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/QuartzCore.h>
@@ -136,7 +136,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     ref = nil;   // on the phone the system device is ours: only our frame, to look at
 #endif
     printf("viva: %s / reference: %s\n", viva.name.UTF8String, ref.name.UTF8String);
-    NSData *a = render(viva, frames, @"/tmp/vmg-ca-viva.png");
+    NSData *a = render(viva, frames, argc > 2 ? [NSString stringWithUTF8String:argv[2]] : @"/tmp/vmg-ca-viva.png");
     NSData *b = ref ? render(ref, frames, @"/tmp/vmg-ca-ref.png") : nil;
     if (!b) { printf("no reference device\n"); return 0; }
     const uint8_t *pa = a.bytes, *pb = b.bytes;

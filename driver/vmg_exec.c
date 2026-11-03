@@ -324,6 +324,13 @@ void vmg_cmd_set_buffer_offset(vmg_device *dev, enum vmg_stage stage, unsigned s
 void vmg_cmd_set_texture(vmg_device *dev, enum vmg_stage stage, unsigned slot, vmg_texture *tex)
 {
     if (slot >= VMG_MAX_TEXTURES) return;
+    static int trace = -1;
+    if (trace < 0) trace = getenv("VMG_TRACE") != NULL;
+    if (trace && tex)
+        fprintf(stderr, "vmg: stage %d texture %u: %ux%u %s levels %u %s%s\n", stage, slot, tex->res->width0, tex->res->height0,
+                util_format_short_name(tex->res->format), tex->res->last_level + 1,
+                tex->buffer ? "buffer-copy" : tex->surface_copy ? "surface-copy" : tex->surface_id ? "surface" : "plain",
+                tex->parent ? " (view)" : "");
     dev->stage[stage].textures[slot] = tex;
     dev->stage[stage].dirty_textures |= 1u << slot;
 }
