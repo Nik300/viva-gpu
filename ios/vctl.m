@@ -4,6 +4,7 @@
 //   vctl tap X Y                     one finger, X Y in 0..1 of the screen (portrait, origin top left)
 //   vctl swipe X1 Y1 X2 Y2 [MS]      drag (default 300 ms)
 //   vctl home                        the home button
+//   vctl unlock                      unlock (no passcode) through FrontBoard
 // Touches are digitizer events dispatched into backboardd's HID event system (private IOKit HID API, entitlement
 // com.apple.private.hid.client.event-dispatch, see vctl.entitlements); apps open through SpringBoardServices.
 #import <Foundation/Foundation.h>
@@ -78,7 +79,29 @@ static void key(uint32_t page, uint32_t usage) {
     send(IOHIDEventCreateKeyboardEvent(kCFAllocatorDefault, mach_absolute_time(), page, usage, false, 0));
 }
 
+// FrontBoard's open service also unlocks a phone without passcode (__UnlockDevice).
+static int open_frontboard(NSString *bundle) {
+    dlopen("/System/Library/PrivateFrameworks/FrontBoardServices.framework/FrontBoardServices", RTLD_NOW);
+    Class svc = NSClassFromString(@"FBSOpenApplicationService"), opt = NSClassFromString(@"FBSOpenApplicationOptions");
+    if (!svc || !opt || ![svc respondsToSelector:@selector(serviceWithDefaultShellEndpoint)]) return -1;
+    id s = [svc performSelector:@selector(serviceWithDefaultShellEndpoint)];
+    id o = [opt performSelector:@selector(optionsWithDictionary:) withObject:@{ @"__UnlockDevice": @YES, @"__ActivateSuspended": @NO }];
+    __block int result = 1;
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    SEL open = NSSelectorFromString(@"openApplication:withOptions:completion:");
+    if (![s respondsToSelector:open]) return -1;
+    void (^completion)(id, NSError *) = ^(id process, NSError *e) {
+        if (e) fprintf(stderr, "FBSOpenApplicationService: %s\n", e.description.UTF8String);
+        result = e ? 1 : 0;
+        dispatch_semaphore_signal(done);
+    };
+    ((void (*)(id, SEL, id, id, id))[s methodForSelector:open])(s, open, bundle, o, completion);
+    dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC));
+    return result;
+}
+
 static int open_app(NSString *bundle) {
+    if (open_frontboard(bundle) == 0) return 0;
     void *sbs = dlopen("/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices", RTLD_NOW);
     int (*launch)(CFStringRef, Boolean) = sbs ? (int (*)(CFStringRef, Boolean))dlsym(sbs, "SBSLaunchApplicationWithIdentifier") : NULL;
     if (launch) {
@@ -106,6 +129,7 @@ int main(int argc, char **argv) { @autoreleasepool {
         usleep(100000);
         return 0;
     }
+    if (!strcmp(cmd, "unlock")) return open_frontboard(@"com.apple.springboard") == 0 ? 0 : open_app(@"com.apple.Preferences");
     if (!strcmp(cmd, "home")) { key(0x0c, 0x40); return 0; }   // consumer page, Menu (the home button)
     fprintf(stderr, "vctl: unknown command %s\n", cmd);
     return 2;
