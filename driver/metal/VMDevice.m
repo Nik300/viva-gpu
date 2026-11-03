@@ -13,13 +13,33 @@
 - (id<MTLLibrary>)newLibraryWithURL:(NSURL *)url error:(NSError **)error;
 @end
 
-// MTLDeviceFeatureProfile (probed by metal-shim on macOS: 10001 = Mac2 + Common1..3). iOS 16 / Apple4: to be probed
-// on the phone (G0 question 2); until then the Mac value is used on the Mac only.
+// MTLDeviceFeatureProfile. macOS: 10001 = Mac2 + Common1..3 (probed by metal-shim). iOS 16: the profile of an A11
+// (Apple4) is chosen at runtime as the one whose feature sets include iOS GPU family 4 but not family 5
+// (+[_MTLDevice featureProfile:supportsFeatureSet:], present in iOS 16's Metal); VMG_FEATURE_PROFILE overrides.
+@interface _MTLDevice (VMProfiles)
++ (BOOL)featureProfile:(unsigned long long)profile supportsFeatureSet:(MTLFeatureSet)set;
+@end
+static unsigned long long VMFeatureProfileValue(void) {
+    static unsigned long long profile;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        const char *env = getenv("VMG_FEATURE_PROFILE");
+        if (env) { profile = strtoull(env, NULL, 0); return; }
 #if TARGET_OS_IPHONE
-enum { VMFeatureProfile = 4 };          // placeholder: Apple4 (A11); confirm with getSupportedFamilies on iOS 16
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        if ([_MTLDevice respondsToSelector:@selector(featureProfile:supportsFeatureSet:)])
+            for (unsigned long long p = 0; p < 64; p++)
+                if ([_MTLDevice featureProfile:p supportsFeatureSet:MTLFeatureSet_iOS_GPUFamily4_v2] &&
+                    ![_MTLDevice featureProfile:p supportsFeatureSet:MTLFeatureSet_iOS_GPUFamily5_v1]) { profile = p; break; }
+#pragma clang diagnostic pop
+        if (!profile) TSMtlWarn(@"no Apple4 feature profile found; set VMG_FEATURE_PROFILE");
 #else
-enum { VMFeatureProfile = 10001 };
+        profile = 10001;
 #endif
+    });
+    return profile;
+}
 
 @interface VMHeap : TSMtlInert <MTLHeap>
 - (instancetype)initWithDevice:(VMDevice *)device descriptor:(MTLHeapDescriptor *)desc;
@@ -81,52 +101,84 @@ static const void *const VMGPUQueueKey = &VMGPUQueueKey;
     atomic_fetch_add_explicit(&gTSMtlAllocatedBytes, delta, memory_order_relaxed);
 }
 
-// Writes the base class _limits struct (layout checked at runtime, as in metal-shim).
-- (void)fillLimits {
-    Ivar limitsIvar = class_getInstanceVariable([_MTLDevice class], "_limits");
-    Ivar nextIvar = class_getInstanceVariable([_MTLDevice class], "_serialQueue");
-    if (!limitsIvar || !nextIvar || ivar_getOffset(nextIvar) - ivar_getOffset(limitsIvar) != sizeof(TSMtlLimits)) {
-        TSMtlWarn(@"_MTLDevice _limits layout changed, limits not written");
-        return;
+// The base class answers several limit queries from its _limits struct, whose fields differ between OS versions
+// (iOS 16 lacks macOS's maxAccelerationStructureLevels, and _supportedGPUFamilies follows it there). The field
+// offsets are read from the ivar's type encoding ({?="name"I"name"f..."name"Q}), so fields are set by name.
+static NSDictionary<NSString *, NSNumber *> *VMLimitOffsets(Ivar ivar, size_t *size) {
+    const char *enc = ivar_getTypeEncoding(ivar);
+    NSMutableDictionary *d = [NSMutableDictionary dictionary];
+    const char *p = enc ? strchr(enc, '=') : NULL;
+    size_t off = 0;
+    while (p && *++p == '"') {
+        const char *end = strchr(p + 1, '"');
+        if (!end) return nil;
+        NSString *name = [[NSString alloc] initWithBytes:p + 1 length:(NSUInteger)(end - p - 1) encoding:NSUTF8StringEncoding];
+        char t = end[1];
+        size_t sz = t == 'Q' || t == 'q' || t == 'd' ? 8 : t == 'I' || t == 'i' || t == 'f' ? 4 : 0;
+        if (!sz) return nil;
+        off = (off + sz - 1) & ~(sz - 1);
+        d[name] = @((off << 4) | sz);
+        off += sz;
+        p = end + 1;
     }
+    if (size) *size = (off + 7) & ~(size_t)7;
+    return d;
+}
+
+- (void)fillLimits {
+    Ivar ivar = class_getInstanceVariable([_MTLDevice class], "_limits");
+    size_t size = 0;
+    NSDictionary<NSString *, NSNumber *> *offsets = ivar ? VMLimitOffsets(ivar, &size) : nil;
+    if (!offsets.count) { TSMtlWarn(@"_MTLDevice _limits not found or not parsable, limits not written"); return; }
+    uint8_t *base = (uint8_t *)(__bridge void *)self + ivar_getOffset(ivar);
+    memset(base, 0, size);
     const vmg_device_info *info = vmg_device_get_info(_vmg);
-    TSMtlLimits *l = (TSMtlLimits *)((uint8_t *)(__bridge void *)self + ivar_getOffset(limitsIvar));
-    memset(l, 0, sizeof *l);
-    l->maxColorAttachments = 8;
-    l->maxVertexAttributes = 31;
-    l->maxVertexBuffers = l->maxFragmentBuffers = l->maxComputeBuffers = 31;
-    l->maxVertexTextures = l->maxFragmentTextures = l->maxComputeTextures = 31;
-    l->maxVertexSamplers = l->maxFragmentSamplers = l->maxComputeSamplers = 16;
-    l->maxVertexInlineDataSize = l->maxFragmentInlineDataSize = l->maxComputeInlineDataSize = 4096;
-    l->maxInterpolants = 31;
-    l->maxInterpolatedComponents = 124;
-    l->maxComputeLocalMemorySizes = l->maxComputeThreadgroupMemory = info->max_shared_memory;
-    l->maxTotalComputeThreadsPerThreadgroup = info->max_threads_per_group;
-    l->maxComputeThreadgroupMemoryAlignmentBytes = 16;
-    l->maxLineWidth = 1;
-    l->maxPointSize = 511;
-    l->maxVisibilityQueryOffset = 65528;
-    l->minConstantBufferAlignmentBytes = 4;
-    l->minBufferNoCopyAlignmentBytes = 16384;
-    l->maxTextureWidth1D = l->maxTextureWidth2D = l->maxTextureHeight2D = info->max_texture_2d;
-    l->maxTextureWidth3D = l->maxTextureHeight3D = l->maxTextureDepth3D = info->max_texture_3d;
-    l->maxTextureDimensionCube = info->max_texture_cube;
-    l->maxTextureLayers = info->max_texture_layers;
-    l->linearTextureAlignmentBytes = l->linearTextureArrayAlignmentBytes = 64;
-    l->iosurfaceTextureAlignmentBytes = l->iosurfaceReadOnlyTextureAlignmentBytes = 64;
-    l->deviceLinearTextureAlignmentBytes = l->deviceLinearReadOnlyTextureAlignmentBytes = 64;
-    l->maxFunctionConstantIndices = 65536;
-    l->maxTessellationFactor = 16;
-    l->maxIndirectBuffers = 31; l->maxIndirectTextures = 31; l->maxIndirectSamplers = 16;
-    l->maxIndirectSamplersPerDevice = 1024;
-    l->maxFenceInstances = 16384;
-    l->maxViewportCount = 1;
-    l->maxVertexAmplificationFactor = l->maxVertexAmplificationCount = 1;
-    l->maxTextureBufferWidth = 1 << 27;
-    l->maxComputeAttributes = 31;
-    l->maxIOCommandsInFlight = 16;
-    l->maxConstantBufferArguments = 31;
-    l->maxBufferLength = self.maxBufferLength;
+    void (^set)(NSString *, double) = ^(NSString *name, double v) {
+        NSNumber *n = offsets[name];
+        if (!n) return;
+        size_t off = n.unsignedLongValue >> 4, sz = n.unsignedLongValue & 15;
+        if ([name isEqualToString:@"maxLineWidth"] || [name isEqualToString:@"maxPointSize"]) { float f = (float)v; memcpy(base + off, &f, 4); }
+        else if (sz == 8) { uint64_t q = (uint64_t)v; memcpy(base + off, &q, 8); }
+        else { uint32_t u = (uint32_t)v; memcpy(base + off, &u, 4); }
+    };
+    set(@"maxColorAttachments", 8);
+    set(@"maxVertexAttributes", 31);
+    for (NSString *stage in @[@"Vertex", @"Fragment", @"Compute"]) {
+        set([NSString stringWithFormat:@"max%@Buffers", stage], 31);
+        set([NSString stringWithFormat:@"max%@Textures", stage], 31);
+        set([NSString stringWithFormat:@"max%@Samplers", stage], 16);
+        set([NSString stringWithFormat:@"max%@InlineDataSize", stage], 4096);
+    }
+    set(@"maxInterpolants", 31);
+    set(@"maxInterpolatedComponents", 124);
+    set(@"maxComputeLocalMemorySizes", info->max_shared_memory);
+    set(@"maxComputeThreadgroupMemory", info->max_shared_memory);
+    set(@"maxTotalComputeThreadsPerThreadgroup", info->max_threads_per_group);
+    set(@"maxComputeThreadgroupMemoryAlignmentBytes", 16);
+    set(@"maxLineWidth", 1);
+    set(@"maxPointSize", 511);
+    set(@"maxVisibilityQueryOffset", 65528);
+    set(@"minConstantBufferAlignmentBytes", 4);
+    set(@"minBufferNoCopyAlignmentBytes", 16384);
+    for (NSString *f in @[@"maxTextureWidth1D", @"maxTextureWidth2D", @"maxTextureHeight2D"]) set(f, info->max_texture_2d);
+    for (NSString *f in @[@"maxTextureWidth3D", @"maxTextureHeight3D", @"maxTextureDepth3D"]) set(f, info->max_texture_3d);
+    set(@"maxTextureDimensionCube", info->max_texture_cube);
+    set(@"maxTextureLayers", info->max_texture_layers);
+    for (NSString *f in @[@"linearTextureAlignmentBytes", @"linearTextureArrayAlignmentBytes", @"iosurfaceTextureAlignmentBytes",
+                          @"iosurfaceReadOnlyTextureAlignmentBytes", @"deviceLinearTextureAlignmentBytes",
+                          @"deviceLinearReadOnlyTextureAlignmentBytes"]) set(f, 64);
+    set(@"maxFunctionConstantIndices", 65536);
+    set(@"maxTessellationFactor", 16);
+    set(@"maxIndirectBuffers", 31); set(@"maxIndirectTextures", 31); set(@"maxIndirectSamplers", 16);
+    set(@"maxIndirectSamplersPerDevice", 1024);
+    set(@"maxFenceInstances", 16384);
+    set(@"maxViewportCount", 1);
+    set(@"maxVertexAmplificationFactor", 1); set(@"maxVertexAmplificationCount", 1);
+    set(@"maxTextureBufferWidth", 1 << 27);
+    set(@"maxComputeAttributes", 31);
+    set(@"maxIOCommandsInFlight", 16);
+    set(@"maxConstantBufferArguments", 31);
+    set(@"maxBufferLength", (double)self.maxBufferLength);
 }
 
 #pragma mark Identity and limits
@@ -135,7 +187,7 @@ static const void *const VMGPUQueueKey = &VMGPUQueueKey;
 - (NSString *)familyName { return @"Mali"; }
 - (NSString *)productName { return _name; }
 - (NSString *)vendorName { return @"ARM"; }
-- (unsigned long long)featureProfile { return VMFeatureProfile; }
+- (unsigned long long)featureProfile { return VMFeatureProfileValue(); }
 // The IOAcceleratorES service's id on iOS; a stable synthetic one when there is no service (tests on the Mac).
 - (uint64_t)registryID {
     uint64_t id = 0;

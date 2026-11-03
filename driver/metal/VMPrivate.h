@@ -52,6 +52,7 @@
 - (instancetype)initWithDevice:(id)device depthStencilDescriptor:(MTLDepthStencilDescriptor *)desc;
 @end
 
+// (Viva: VMDevice.m sets _limits by field name from the ivar's type encoding; this struct is metal-shim's macOS view.)
 // Layout of -[_MTLDevice _limits] (ivar at offset 8, 264 bytes), generated from the
 // runtime type encoding. Checked against the live ivar offsets in TSMtlDevice.
 typedef struct {
