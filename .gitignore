@@ -12,3 +12,4 @@ mesa/out/
 *.dSYM/
 .DS_Store
 vgpu/out/
+mesa/ninja.log
