@@ -5,6 +5,7 @@
 //   vctl swipe X1 Y1 X2 Y2 [MS]      drag (default 300 ms)
 //   vctl home                        the home button
 //   vctl shot PATH                   the render server's framebuffers as PATH-N.png
+//   vctl burst PATH N MS [CMD ...]   N frames MS apart (changed framebuffers, 1:3) while CMD runs
 //   vctl ls DIR                      directory listing, newest first (iOS has no ls)
 //   vctl unlock                      unlock (no passcode) through FrontBoard
 // Touches are digitizer events dispatched into backboardd's HID event system (private IOKit HID API, entitlement
@@ -183,6 +184,58 @@ static int shot(const char *path) {
     return found ? 0 : 1;
 }
 
+// burst PATH N MS [ACTION ARGS...]: while ACTION runs (tap/swipe/open/home), N captures MS apart of the screen-sized
+// surfaces whose seed changed (downsampled 1:3, BGRA), written afterwards as PATH-NNN.png: animation frames.
+static int dispatch_action(int argc, char **argv);
+static int burst(const char *path, int n, int ms, int argc, char **argv) {
+    IOSurfaceRef surf[4]; int ns = 0;
+    for (IOSurfaceID sid = 1; sid < 8192 && ns < 4; sid++) {
+        IOSurfaceRef sf = IOSurfaceLookup(sid);
+        if (!sf) continue;
+        if (IOSurfaceGetWidth(sf) == 1125 && IOSurfaceGetHeight(sf) == 2436) surf[ns++] = sf; else CFRelease(sf);
+    }
+    if (!ns) { fprintf(stderr, "vctl: no framebuffer surface\n"); return 1; }
+    enum { DW = 375, DH = 812 };
+    uint8_t **frames = calloc(n, sizeof *frames);
+    double *when = calloc(n, sizeof *when);
+    uint32_t seen[4] = {0};
+    __block int done = 0;
+    double t0 = CFAbsoluteTimeGetCurrent();
+    if (argc > 0) dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ dispatch_action(argc, argv); done = 1; });
+    int got = 0;
+    for (int i = 0; i < n * 4 && got < n; i++) {
+        for (int k = 0; k < ns && got < n; k++) {
+            uint32_t seed = IOSurfaceGetSeed(surf[k]);
+            if (seed == seen[k]) continue;
+            seen[k] = seed;
+            IOSurfaceLock(surf[k], kIOSurfaceLockReadOnly, NULL);
+            const uint8_t *src = IOSurfaceGetBaseAddress(surf[k]);
+            size_t bpr = IOSurfaceGetBytesPerRow(surf[k]);
+            uint8_t *dst = frames[got] = malloc(DW * DH * 4);
+            for (int y = 0; y < DH; y++)
+                for (int x = 0; x < DW; x++) memcpy(dst + (y * DW + x) * 4, src + (y * 3) * bpr + (x * 3) * 4, 4);
+            IOSurfaceUnlock(surf[k], kIOSurfaceLockReadOnly, NULL);
+            when[got++] = CFAbsoluteTimeGetCurrent() - t0;
+        }
+        usleep(ms * 1000 / 4);
+    }
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    for (int i = 0; i < got; i++) {
+        CGContextRef c = CGBitmapContextCreate(frames[i], DW, DH, 8, DW * 4, cs, kCGImageAlphaNoneSkipFirst | kCGBitmapByteOrder32Little);
+        CGImageRef img = CGBitmapContextCreateImage(c);
+        NSString *out = [NSString stringWithFormat:@"%s-%03d.png", path, i];
+        CGImageDestinationRef d = CGImageDestinationCreateWithURL((__bridge CFURLRef)[NSURL fileURLWithPath:out], CFSTR("public.png"), 1, NULL);
+        CGImageDestinationAddImage(d, img, NULL);
+        CGImageDestinationFinalize(d);
+        CFRelease(d); CGImageRelease(img); CGContextRelease(c); free(frames[i]);
+        printf("%s %.0f ms\n", out.UTF8String, when[i] * 1000);
+    }
+    CGColorSpaceRelease(cs);
+    for (int k = 0; k < ns; k++) CFRelease(surf[k]);
+    while (argc > 0 && !done) usleep(10000);
+    return got ? 0 : 1;
+}
+
 // iOS has no /bin/ls: newest first, size and date.
 static int ls(const char *dir) {
     NSFileManager *fm = NSFileManager.defaultManager;
@@ -210,6 +263,13 @@ int main(int argc, char **argv) { @autoreleasepool {
         fprintf(stderr, "usage: vctl open BUNDLE | tap X Y | swipe X1 Y1 X2 Y2 [MS] | home | unlock | shot PATH | ls DIR   (X Y in 0..1)\n");
         return 2;
     }
+    if (!strcmp(argv[1], "burst") && argc >= 5) return burst(argv[2], atoi(argv[3]), atoi(argv[4]), argc - 5, argv + 5);
+    return dispatch_action(argc - 1, argv + 1);
+} }
+
+// One command: argv[0] is its name.
+static int dispatch_action(int argc, char **argv) { @autoreleasepool {
+    argc++; argv--;   // the parsing below counts the program name
     const char *cmd = argv[1];
     if (!strcmp(cmd, "open") && argc == 3) return open_app(@(argv[2]));
     if (!strcmp(cmd, "tap") && argc == 4) { drag(atof(argv[2]), atof(argv[3]), atof(argv[2]), atof(argv[3]), 0); usleep(100000); return 0; }
