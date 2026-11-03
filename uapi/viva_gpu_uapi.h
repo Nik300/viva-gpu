@@ -9,13 +9,18 @@
 // IOConnectCallStructMethod(selector, &args, sizeof args, &args, &size): the structure goes in and comes back
 // updated (output fields filled). A BO is mapped with IOConnectMapMemory64(conn, memoryType = BO handle, ...).
 // Errors: the kernel returns kIOReturn*; vgpu translates them to -errno.
+//
+// Fast path (minor >= 1): IOConnectTrap2(conn, VGPU_TRAP_CALL, selector, &args) does the same as the struct method
+// (the kernel reads the structure from the caller with copyin and writes it back with copyout) without a Mach
+// message. vgpu uses it for every selector when the kernel offers it.
 #pragma once
 #include <stdint.h>
 
 #define VGPU_SERVICE_CLASS   "VivaGPUAccelerator"   // subclass of IOAcceleratorES (Metal matches that class)
 #define VGPU_CLIENT_TYPE     0x76677075u           // 'vgpu'
 #define VGPU_UAPI_MAJOR      1
-#define VGPU_UAPI_MINOR      0
+#define VGPU_UAPI_MINOR      1
+#define VGPU_TRAP_CALL       0                     // IOConnectTrap2 index (minor >= 1)
 
 // GPU virtual addresses: Mesa's Panfrost (panfrost_kmod) assumes the Linux driver's range, [32 MiB, 4 GiB) per
 // connection, with VA management in the kernel. Every offset the kernel returns lies in it.

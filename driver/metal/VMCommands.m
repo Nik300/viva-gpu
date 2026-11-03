@@ -5,6 +5,7 @@
 #import "VMPrivate.h"
 #import <mach/mach_time.h>
 #import <objc/runtime.h>
+#import <unistd.h>
 
 #define VM_CATCH_ALL(cls) + (void)initialize { if (self == [cls class]) TSMtlInstallCatchAll(self); }
 
@@ -239,6 +240,7 @@ enum { VMInlineChunk = 64 << 10, VMInlineAlign = 16 };
     BOOL _writesSurface;
     VMBuffer *_inline;
     NSUInteger _inlineUsed;
+    NSMutableArray<VMBuffer *> *_inlineChunks;   // back to the device's pool at completion
 }
 VM_CATCH_ALL(VMCommandBuffer)
 
@@ -278,8 +280,9 @@ VM_CATCH_ALL(VMCommandBuffer)
     NSUInteger aligned = (length + VMInlineAlign - 1) & ~(NSUInteger)(VMInlineAlign - 1);
     [_lock lock];
     if (!_inline || _inlineUsed + aligned > VMInlineChunk) {
-        _inline = (VMBuffer *)[device newBufferWithLength:VMInlineChunk options:MTLResourceStorageModeShared];
-        [_keep addObject:_inline];
+        _inline = [device takeInlineChunk:VMInlineChunk];
+        if (!_inlineChunks) _inlineChunks = [NSMutableArray array];
+        [_inlineChunks addObject:_inline];
         _inlineUsed = 0;
     }
     VMBuffer *chunk = _inline;
@@ -319,8 +322,12 @@ static void VMSurfaceUse(const void *value, void *ctx) {
 - (void)releaseKept {
     [_lock lock];
     [_keep removeAllObjects];
+    NSArray<VMBuffer *> *chunks = _inlineChunks;
+    _inlineChunks = nil;
     _inline = nil;
     [_lock unlock];
+    VMDevice *device = (VMDevice *)self.device;
+    for (VMBuffer *chunk in chunks) [device returnInlineChunk:chunk];   // the GPU has read them
 }
 
 - (id<MTLRenderCommandEncoder>)renderCommandEncoderWithDescriptor:(MTLRenderPassDescriptor *)desc {
@@ -402,7 +409,16 @@ VM_CATCH_ALL(VMCommandQueue)
     return [[VMCommandBuffer alloc] initWithQueue:self retainedReferences:desc.retainedReferences];
 }
 
-// GPU queue: reports completion once the fence has signalled; polls without blocking the queue.
+static void VMDidComplete(VMDevice *device, VMCommandQueue *queue, VMCommandBuffer *cb, vmg_fence *fence, uint64_t start) {
+    vmg_fence_release(device.vmg, fence);
+    [cb endSurfaceUse];
+    [cb releaseKept];
+    [queue commandBufferDidComplete:cb startTime:start completionTime:mach_absolute_time() error:nil];
+}
+
+// VMG_POLL_COMPLETION=1 (comparisons): the GPU queue polls the fence every 100 us without blocking. Each poll is a
+// kernel call on the GPU queue, between the replays of the next command buffers, and completion comes up to a poll
+// period (plus timer slack) late.
 static void VMPollCompletion(VMDevice *device, VMCommandQueue *queue, VMCommandBuffer *cb, vmg_fence *fence, uint64_t start) {
     if (!vmg_fence_wait(device.vmg, fence, 0)) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_USEC), device.gpuQueue, ^{
@@ -410,10 +426,26 @@ static void VMPollCompletion(VMDevice *device, VMCommandQueue *queue, VMCommandB
         });
         return;
     }
-    vmg_fence_release(device.vmg, fence);
-    [cb endSurfaceUse];
-    [cb releaseKept];
-    [queue commandBufferDidComplete:cb startTime:start completionTime:mach_absolute_time() error:nil];
+    VMDidComplete(device, queue, cb, fence, start);
+}
+
+// Completion: the device's completion queue sleeps in the kernel on each fence, in commit order, and reports it from
+// there (handlers run off the GPU queue, as Metal's own completion thread does). Only visibility results need the
+// pipe_context: those are resolved on the GPU queue first.
+static void VMWaitCompletion(VMDevice *device, VMCommandQueue *queue, VMCommandBuffer *cb, vmg_fence *fence, uint64_t start) {
+    static int poll = -1;
+    if (poll < 0) poll = getenv("VMG_POLL_COMPLETION") != NULL;
+    if (poll) { VMPollCompletion(device, queue, cb, fence, start); return; }
+    dispatch_async(device.completionQueue, ^{
+        for (;;) {
+            uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+            if (vmg_fence_wait_gpu(device.vmg, fence, NSEC_PER_SEC)) break;
+            // An error answered at once (not a timeout): retry like the poll did, without spinning.
+            if (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0 < NSEC_PER_MSEC) usleep(1000);
+        }
+        if (vmg_fence_has_results(fence)) [device gpuSync:^{ vmg_fence_wait(device.vmg, fence, 0); }];
+        VMDidComplete(device, queue, cb, fence, start);
+    });
 }
 
 // Called by -[_MTLCommandQueue] once command buffers are committed, in order.
@@ -439,7 +471,7 @@ static void VMPollCompletion(VMDevice *device, VMCommandQueue *queue, VMCommandB
             vmg_flush(device.vmg, &fence);
             // "Scheduled" after the flush: presentDrawable hands the IOSurface to the compositor from there.
             [cb didScheduleWithStartTime:start endTime:mach_absolute_time() error:nil];
-            VMPollCompletion(device, self, cb, fence, start);
+            VMWaitCompletion(device, self, cb, fence, start);
         });
     }
 }

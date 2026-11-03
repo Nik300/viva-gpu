@@ -247,6 +247,11 @@ void vmg_cmd_barrier(vmg_device *dev);
 void vmg_flush(vmg_device *dev, vmg_fence **fence);
 // timeout_ns: 0 = poll; UINT64_MAX = forever. Returns true when signalled.
 bool vmg_fence_wait(vmg_device *dev, vmg_fence *fence, uint64_t timeout_ns);
+// Any thread: waits for the GPU only. Visibility results are written by vmg_fence_wait, on the GPU queue, when
+// vmg_fence_has_results says there are some.
+bool vmg_fence_wait_gpu(vmg_device *dev, vmg_fence *fence, uint64_t timeout_ns);
+bool vmg_fence_has_results(vmg_fence *fence);
+// Any thread once vmg_fence_has_results is false (else the GPU queue).
 void vmg_fence_release(vmg_device *dev, vmg_fence *fence);
 
 #ifdef __cplusplus

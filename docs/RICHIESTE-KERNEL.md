@@ -6,6 +6,30 @@ serve a me per verificarla.
 
 ## Bloccanti per G7
 
+### K0h. Submit a lotti e contatore di completamento condiviso (2026-11-04, analisi userspace)
+Dopo le ottimizzazioni userspace (vedi FINDINGS, 2026-11-04 sera) per frame restano ~100 SUBMIT e ~50 WAIT_BO. Le
+WAIT_BO rimaste sono quasi tutte sul BO del pool di un batch dello stesso frame: userspace non può sapere che il suo
+ultimo job è finito senza chiederlo. Le SUBMIT sono 2 per pass (job vertex/tiler + job fragment, slot diversi su JM).
+- Serve:
+  1. un selettore `SUBMIT_BATCH`: un array di `vgpu_submit` in una chiamata, eseguiti in ordine come N SUBMIT (stesse
+     dipendenze implicite). libdrm-xnu accoderebbe le submit e le invierebbe insieme prima di ogni attesa, mappatura o
+     fence (2 x N chiamate -> 1 per command buffer);
+  2. una pagina in sola lettura mappata nel processo con il numero dell'ultimo job completato della connessione, e il
+     numero del job restituito da SUBMIT: WAIT_BO con timeout 0 e il controllo dei fence diventano una lettura di
+     memoria in libdrm-xnu.
+- Per verificare: `VGPU_STATS=1 VMG_CA_TIME=1 VMG_CA_SETTINGS=1 ca 61` (chiamate e tempo per selettore all'uscita).
+
+### K0i. Fence "promessa" per le IOSurface prima della submit (2026-11-04, analisi userspace)
+I command buffer che scrivono una IOSurface vengono rieseguiti e sottomessi prima che `commit` ritorni (altrimenti
+SpringBoard legge snapshot a metà: chi legge aspetta solo i job che il kernel conosce). Così il thread di CA non può
+preparare il frame dopo mentre la coda GPU riesegue il precedente.
+- Serve: un selettore che, dati gli id delle IOSurface scritte, crei un fence non ancora segnalato e lo metta come
+  `busy` sulle superfici (lo vedono IOSurfaceLock, K0c e le dipendenze implicite di altri processi); la SUBMIT
+  successiva che lo indica (es. come out_sync) lo sostituisce con il fence del suo ultimo job. Con un timeout di
+  sicurezza se la submit non arriva. Allora `commit` torna subito e la riesecuzione resta asincrona.
+- Per verificare: `vctl burst` all'apertura di un'app e gli snapshot di SplashBoard (come per la scheda nera).
+
+
 ### K0g. Costo delle ioctl SUBMIT e WAIT_BO (2026-11-03, dopo 0117)
 Con 0117 la GPU non è più il limite: scena Settings di `ca` a 950 MHz, job sull'hardware **24 us** in media, GPU
 occupata l'1%, latenza di avvio 13-47 us (K0e ok). Il frame (oggi **18 ms**, era 28,5) è limitato dalla coda GPU del
@@ -232,3 +256,21 @@ static int iokit_ioctl(void *conn, enum vgpu_selector sel, void *arg, size_t siz
     return errno_for(IOConnectCallStructMethod(c->conn, sel, arg, size, arg, &out));
 }
 ```
+
+## Risposte del kernel (2026-11-04, patch 0119 di `fork/`, da provare sul telefono; UAPI minor 2)
+Strutture e commenti in `viva_gpu_uapi.h` della patch (copiate qui sotto l'essenziale). Tutto vale anche via trap
+(`IOConnectTrap2(conn, 0, selector, &args)`, 0118).
+
+| Richiesta | Stato | Note per userspace |
+|---|---|---|
+| K0h.1 | `VGPU_SEL_SUBMIT_BATCH` (21): `struct vgpu_submit_batch { u64 submits; u32 count, stride; u32 done, pad; }`, count <= 64, stride = `sizeof(struct vgpu_submit)`. In ordine, sotto un solo gate, identico a N SUBMIT (stesse dipendenze implicite, out_sync, ecc.). Tutti gli array vengono letti prima: un puntatore sbagliato fa fallire tutto senza accodare nulla; altrimenti si ferma al primo che fallisce, `done` = quanti accodati, la chiamata ritorna l'errore di quello. | Va mandato prima di ogni attesa, mappatura CPU, export di fence o promessa (K0i). |
+| K0h.2 | `vgpu_submit.pad` diventa `seq` (out): numero del job nella connessione (anche negli elementi del batch). Pagina: `IOConnectMapMemory64(conn, 0x10000 /* VGPU_MAP_COMPLETION */, ...)`, sola lettura, `struct vgpu_completion { u32 completed, submitted; u64 completed64, submitted64; }`. **Soglia**: ogni job con seq <= completed è finito (bene o male), come direbbe il suo fence. Confronto: `(int32_t)(completed - seq) >= 0`. Aggiornata nel kernel prima che il fence segnali. | Non copre i job di **altri processi** sulle IOSurface condivise: per i BO importati da IOSurface resta WAIT_BO. Un job fallito conta come finito. |
+| K0i | `VGPU_SEL_SURFACE_PROMISE` (22): `struct vgpu_surface_promise { u64 surface_ids; u32 count, syncobj; u32 timeout_ms, pad; }`, count <= 16. Il kernel mette un fence nuovo non segnalato in `syncobj` e lo rende l'ultimo fence delle superfici: lo aspettano IOSurfaceLock, il display (K0c), WAIT_BO e i job di **altri** processi. I job e le WAIT_BO **della vostra connessione** su quelle superfici non lo aspettano (aspettano quello che c'era prima): niente auto-deadlock durante la riesecuzione. | **Differenza dalla vostra proposta**: la risoluzione non è automatica alla prima SUBMIT con quell'out_sync, perché Panfrost usa un solo syncobj (`ctx->syncobj`) come out_sync di ogni submit: la promessa si chiuderebbe al primo job. Va fatta così: syncobj dedicato per la promessa; dopo l'ultima submit della riesecuzione `SYNCOBJ_TRANSFER(src = ctx->syncobj, dst = syncobj della promessa)` (oppure usare quel syncobj come out_sync dell'ultima submit). Allora la promessa segnala quando segnala quel fence. RESET/SIGNAL/DESTROY del syncobj o chiusura della connessione = segnala subito. Timeout (0 = 1000 ms, max 5000): segnala con errore e un log `surface promise not resolved in time`. |
+
+Avvertenze K0i:
+- Un `IOSurfaceLock` fatto **dal vostro stesso processo** su una superficie promessa aspetta la promessa (il kernel
+  non sa chi chiama). Non fatelo sul thread che deve risolverla, o aspetta fino al timeout.
+- Se due processi scrivono la stessa superficie mentre c'è una promessa, i job dell'altro la aspettano ma non la
+  sostituiscono come ultimo fence: chi legge dopo la risoluzione potrebbe non aspettare il job dell'altro. Per CA (un
+  solo scrittore per superficie) non succede.
+- Contatori: `cmd gpu calls` (righe `submit_batch`, `surf_promise` e `surface promises: made, pending, timed out`).

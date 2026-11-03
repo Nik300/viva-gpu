@@ -7,6 +7,7 @@
 
 typedef struct {
     io_connect_t conn;
+    bool trap;               // kernel minor >= 1: calls through IOConnectTrap2 (no Mach message)
     pthread_mutex_t lock;
     // CPU mappings: IOConnectUnmapMemory64 needs the memory type (= BO handle) back.
     struct { mach_vm_address_t addr; uint32_t type; } *maps;
@@ -49,6 +50,7 @@ static int iokit_open(void **out)
         free(c);
         return kr != kIOReturnSuccess ? errno_for(kr) : -EPROTO;
     }
+    c->trap = v.minor >= 1 && !getenv("VGPU_NO_TRAP");   // VGPU_NO_TRAP=1: struct methods (Mach messages) as before
     *out = c;
     return 0;
 }
@@ -64,6 +66,7 @@ static void iokit_close(void *conn)
 static int iokit_ioctl(void *conn, enum vgpu_selector sel, void *arg, size_t size)
 {
     IOKitConn *c = conn;
+    if (c->trap) return errno_for(IOConnectTrap2(c->conn, VGPU_TRAP_CALL, (uintptr_t)sel, (uintptr_t)arg));
     size_t out = size;
     return errno_for(IOConnectCallStructMethod(c->conn, sel, arg, size, arg, &out));
 }

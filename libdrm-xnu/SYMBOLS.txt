@@ -14,7 +14,9 @@ drmSyncobjDestroy	libpanfrost.a:pan_context.c.o, libpanfrost.a:pan_fence.c.o, li
 drmSyncobjExportSyncFile	libpanfrost.a:pan_context.c.o, libpanfrost.a:pan_fence.c.o, libpankmod_lib.a:panthor_kmod.c.o
 drmSyncobjFDToHandle	libpanfrost.a:pan_fence.c.o
 drmSyncobjImportSyncFile	libpanfrost-v10.a:pan_csf.c.o, libpanfrost-v12.a:pan_csf.c.o, libpanfrost-v13.a:pan_csf.c.o, libpanfrost-v14.a:pan_csf.c.o, libpanfrost-v4.a:pan_jm.c.o, libpanfrost-v5.a:pan_jm.c.o, libpanfrost-v6.a:pan_jm.c.o, libpanfrost-v7.a:pan_jm.c.o, libpanfrost-v9.a:pan_jm.c.o, libpanfrost.a:pan_fence.c.o, libpankmod_lib.a:panthor_kmod.c.o
+drmSyncobjReleaseXNU	libpanfrost.a:pan_fence.c.o
 drmSyncobjReset	libpankmod_lib.a:panthor_kmod.c.o
+drmSyncobjSnapshotXNU	libpanfrost.a:pan_fence.c.o
 drmSyncobjTimelineWait	libpanfrost-v10.a:pan_csf.c.o, libpanfrost-v12.a:pan_csf.c.o, libpanfrost-v13.a:pan_csf.c.o, libpanfrost-v14.a:pan_csf.c.o, libpankmod_lib.a:panthor_kmod.c.o
 drmSyncobjTransfer	libpanfrost-v10.a:pan_csf.c.o, libpanfrost-v12.a:pan_csf.c.o, libpanfrost-v13.a:pan_csf.c.o, libpanfrost-v14.a:pan_csf.c.o, libpankmod_lib.a:panthor_kmod.c.o
 drmSyncobjWait	libpanfrost-v10.a:pan_csf.c.o, libpanfrost-v12.a:pan_csf.c.o, libpanfrost-v13.a:pan_csf.c.o, libpanfrost-v14.a:pan_csf.c.o, libpanfrost-v4.a:pan_jm.c.o, libpanfrost-v5.a:pan_jm.c.o, libpanfrost-v6.a:pan_jm.c.o, libpanfrost-v7.a:pan_jm.c.o, libpanfrost-v9.a:pan_jm.c.o, libpanfrost.a:pan_fence.c.o

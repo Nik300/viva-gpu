@@ -60,6 +60,7 @@ static unsigned long long VMFeatureProfileValue(void) {
     NSString *_name;
     _Atomic int64_t _allocated;
     io_service_t _accelerator;
+    NSMutableArray<VMBuffer *> *_inlineChunks;
 }
 
 static const void *const VMGPUQueueKey = &VMGPUQueueKey;
@@ -81,8 +82,12 @@ static const void *const VMGPUQueueKey = &VMGPUQueueKey;
     }
     const vmg_device_info *info = vmg_device_get_info(_vmg);
     _name = [NSString stringWithUTF8String:info->name];
-    _gpuQueue = dispatch_queue_create("com.viva.metal.gpu", DISPATCH_QUEUE_SERIAL);
+    // Every frame's replay and submits run here: interactive work (it ran at whatever QoS the blocks carried).
+    _gpuQueue = dispatch_queue_create("com.viva.metal.gpu",
+        dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0));
     dispatch_queue_set_specific(_gpuQueue, VMGPUQueueKey, (__bridge void *)self, NULL);
+    _completionQueue = dispatch_queue_create("com.viva.metal.completion",
+        dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0));
     [self fillLimits];
     [self initGPUFamilySupport];
     TSMtlInstallLayerTuning();
@@ -107,6 +112,19 @@ static const void *const VMGPUQueueKey = &VMGPUQueueKey;
 - (BOOL)isOnGPUQueue { return dispatch_get_specific(VMGPUQueueKey) == (__bridge void *)self; }
 - (void)gpuSync:(dispatch_block_t)block { if (self.isOnGPUQueue) block(); else dispatch_sync(_gpuQueue, block); }
 - (void)gpuAsync:(dispatch_block_t)block { dispatch_async(_gpuQueue, block); }
+- (VMBuffer *)takeInlineChunk:(NSUInteger)length {
+    @synchronized (self) {
+        VMBuffer *chunk = _inlineChunks.lastObject;
+        if (chunk && chunk.length == length) { [_inlineChunks removeLastObject]; return chunk; }
+    }
+    return (VMBuffer *)[self newBufferWithLength:length options:MTLResourceStorageModeShared];
+}
+- (void)returnInlineChunk:(VMBuffer *)chunk {
+    @synchronized (self) {
+        if (!_inlineChunks) _inlineChunks = [NSMutableArray array];
+        if (_inlineChunks.count < 16) [_inlineChunks addObject:chunk];
+    }
+}
 - (void)trackAllocation:(int64_t)delta {
     atomic_fetch_add(&_allocated, delta);
     atomic_fetch_add_explicit(&gTSMtlAllocatedBytes, delta, memory_order_relaxed);

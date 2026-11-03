@@ -4,7 +4,9 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 #include <TargetConditionals.h>
 
@@ -98,12 +100,46 @@ int vgpu_close(int fd)
     return 0;
 }
 
+// VGPU_STATS=1: kernel calls per selector, and the time spent in them, printed at exit.
+static _Atomic uint64_t g_stat_calls[VGPU_SEL_COUNT], g_stat_ns[VGPU_SEL_COUNT];
+static const char *const g_stat_names[VGPU_SEL_COUNT] = {
+    [VGPU_SEL_GET_VERSION] = "GET_VERSION", [VGPU_SEL_GET_PARAM] = "GET_PARAM", [VGPU_SEL_CREATE_BO] = "CREATE_BO",
+    [VGPU_SEL_MMAP_BO] = "MMAP_BO", [VGPU_SEL_GET_BO_OFFSET] = "GET_BO_OFFSET", [VGPU_SEL_GEM_CLOSE] = "GEM_CLOSE",
+    [VGPU_SEL_SUBMIT] = "SUBMIT", [VGPU_SEL_WAIT_BO] = "WAIT_BO", [VGPU_SEL_MADVISE] = "MADVISE",
+    [VGPU_SEL_SYNCOBJ_CREATE] = "SYNCOBJ_CREATE", [VGPU_SEL_SYNCOBJ_DESTROY] = "SYNCOBJ_DESTROY",
+    [VGPU_SEL_SYNCOBJ_WAIT] = "SYNCOBJ_WAIT", [VGPU_SEL_SYNCOBJ_RESET] = "SYNCOBJ_RESET",
+    [VGPU_SEL_SYNCOBJ_SIGNAL] = "SYNCOBJ_SIGNAL", [VGPU_SEL_IMPORT_IOSURFACE] = "IMPORT_IOSURFACE",
+    [VGPU_SEL_SYNC_BO] = "SYNC_BO", [VGPU_SEL_QUERY_BO_INFO] = "QUERY_BO_INFO", [VGPU_SEL_JM_CTX_CREATE] = "JM_CTX_CREATE",
+    [VGPU_SEL_JM_CTX_DESTROY] = "JM_CTX_DESTROY", [VGPU_SEL_SYNCOBJ_TRANSFER] = "SYNCOBJ_TRANSFER",
+    [VGPU_SEL_IMPORT_USERPTR] = "IMPORT_USERPTR",
+};
+static int g_stats = -1;
+
+static void print_stats(void)
+{
+    fprintf(stderr, "vgpu stats (calls, total ms, us per call):\n");
+    for (unsigned i = 0; i < VGPU_SEL_COUNT; i++) {
+        uint64_t n = g_stat_calls[i], ns = g_stat_ns[i];
+        if (n) fprintf(stderr, "  %-17s %8llu %9.1f %7.1f\n", g_stat_names[i] ? g_stat_names[i] : "?", (unsigned long long)n,
+                       ns / 1e6, ns / 1e3 / n);
+    }
+}
+
 int vgpu_ioctl(int fd, enum vgpu_selector sel, void *arg)
 {
     void *conn = lookup(fd);
     if (!conn) return -EBADF;
     if ((unsigned)sel >= VGPU_SEL_COUNT || !arg) return -EINVAL;
-    return backend()->ioctl(conn, sel, arg, selector_size[sel]);
+    if (g_stats < 0) {
+        g_stats = getenv("VGPU_STATS") != NULL;
+        if (g_stats) atexit(print_stats);
+    }
+    if (!g_stats) return backend()->ioctl(conn, sel, arg, selector_size[sel]);
+    uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    int r = backend()->ioctl(conn, sel, arg, selector_size[sel]);
+    g_stat_ns[sel] += clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0;
+    g_stat_calls[sel]++;
+    return r;
 }
 
 void *vgpu_mmap(int fd, uint64_t token, size_t size)

@@ -36,13 +36,21 @@ struct vmg_texture {
     // writes, on the GPU queue.
     uint32_t surface_id; unsigned plane;
     bool surface_copy;
+    void *surface;                    // IOSurfaceRef of a copied surface texture (retained: a lookup is a kernel call)
+    uint32_t surface_seed;            // seed after the last copy (CPU writers bump it at unlock): unchanged = no copy-in
+    bool surface_seed_valid;
     // Linear textures over a buffer the driver cannot alias (Panfrost: no user memory): same, from/to the buffer.
     vmg_resource *buffer; size_t buffer_offset, buffer_bpr;
     uint64_t copy_epoch;              // dev->copy_epoch at the last copy (see vmg_texture_sync)
+    bool copy_out_pending;            // the GPU wrote it this command buffer; copied out at the flush (vmg_flush)
 };
 
 // Copied textures (surface_copy): IOSurface/buffer -> texture (to_texture) or back.
 void vmg_texture_sync(vmg_device *dev, vmg_texture *t, bool to_texture);
+// After the GPU wrote a copied texture: copy-out now (buffers) or at the flush (surfaces, vmg_flush).
+void vmg_texture_written(vmg_device *dev, vmg_texture *t);
+// A texture going away: its pending copy-out is made now.
+void vmg_texture_forget(vmg_device *dev, vmg_texture *t);
 
 struct vmg_sampler { void *cso; struct pipe_sampler_state state; };
 struct vmg_dsa { void *cso; };
@@ -80,6 +88,12 @@ struct vmg_stage_bindings {
     vmg_texture *textures[VMG_MAX_TEXTURES];
     vmg_sampler *samplers[VMG_MAX_SAMPLERS];
     uint32_t dirty_buffers, dirty_textures, dirty_samplers;
+    // What the pipe_context has bound for this stage (bind_stage skips identical calls: Panfrost re-emits the
+    // descriptors at every set). Valid inside a pass only.
+    bool bound_valid;
+    struct pipe_sampler_view *bound_views[VMG_MAX_TEXTURES]; unsigned bound_view_count;
+    void *bound_samplers[32]; unsigned bound_sampler_count;
+    struct pipe_shader_buffer bound_ssbo[VMG_MAX_BUFFERS]; unsigned bound_ssbo_count; uint32_t bound_ssbo_written;
 };
 
 struct vmg_device {
@@ -100,6 +114,7 @@ struct vmg_device {
     // VMG_TRACE_CB: fragment shaders drawn by the current command buffer (printed at the flush when the set changes)
     const char *cb_fs[24]; unsigned cb_fs_count, cb_draws; char cb_last[512];
     uint64_t copy_epoch;               // bumped by every vmg_flush and every copy-out of a copied texture
+    vmg_texture **copy_out; unsigned copy_out_count, copy_out_cap;   // surface textures written, copied out at the flush
     struct pipe_rasterizer_state raster;
     void *raster_cso; bool raster_dirty;
     struct hash_table *raster_cache;  // pipe_rasterizer_state -> cso
@@ -129,5 +144,8 @@ bool vmg_format_is_integer(unsigned mtl_format), vmg_format_is_signed_integer(un
 // VGPU_SEL_IMPORT_IOSURFACE (so Panfrost's resource_from_handle needs no change).
 int vmg_drm_surface_fd(int device_fd, uint32_t surface_id, unsigned plane);
 void vmg_drm_surface_fd_close(int fd);
+// An fd standing for one of this process's BOs (GEM handle): Panfrost's import of it finds the BO it already has.
+// Closed with vmg_drm_surface_fd_close.
+int vmg_drm_bo_fd(int device_fd, uint32_t handle);
 
 char *vmg_strdup_printf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));

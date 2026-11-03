@@ -17,6 +17,7 @@
 #include "util/format/u_format.h"
 #include "util/xmlconfig.h"
 #include "util/driconf.h"
+#include "drm-uapi/drm_fourcc.h"
 #include "panfrost/pan_public.h"
 #if VMG_HAVE_LLVMPIPE
 #include "llvmpipe/lp_public.h"
@@ -173,6 +174,7 @@ void vmg_device_destroy(vmg_device *dev)
     if (dev->velems_empty) dev->pipe->delete_vertex_elements_state(dev->pipe, dev->velems_empty);
     if (dev->blend_default) dev->pipe->delete_blend_state(dev->pipe, dev->blend_default);
     pipe_sampler_view_reference(&dev->null_view, NULL);
+    free(dev->copy_out);
     dev->pipe->destroy(dev->pipe);
     dev->screen->destroy(dev->screen);
     if (dev->fd >= 0) vgpu_close(dev->fd);
@@ -296,7 +298,19 @@ vmg_texture *vmg_texture_create(vmg_device *dev, const vmg_texture_desc *d)
     struct pipe_resource templ;
     texture_template(dev, d, &templ);
     if (templ.format == PIPE_FORMAT_NONE) return NULL;
-    struct pipe_resource *res = dev->screen->resource_create(dev->screen, &templ);
+    struct pipe_resource *res = NULL;
+    // VMG_NO_AFBC_UPLOAD=1 (to measure on the phone): textures only sampled (filled by the CPU: replaceRegion, blit
+    // from a buffer) get the u-interleaved layout instead of AFBC. Panfrost uploads AFBC through a staging texture and
+    // a GPU blit submitted at once (an extra batch per upload); u-interleaved is tiled by the CPU, but a partial update
+    // of a texture the GPU is still reading waits for it.
+    static int no_afbc = -1;
+    if (no_afbc < 0) no_afbc = getenv("VMG_NO_AFBC_UPLOAD") != NULL;
+    if (no_afbc && dev->panfrost && dev->screen->resource_create_with_modifiers && !d->render_target && !d->shader_write &&
+        !d->memoryless && templ.target == PIPE_TEXTURE_2D && !templ.nr_samples) {
+        uint64_t mod = DRM_FORMAT_MOD_ARM_16X16_BLOCK_U_INTERLEAVED;
+        res = dev->screen->resource_create_with_modifiers(dev->screen, &templ, &mod, 1);
+    }
+    if (!res) res = dev->screen->resource_create(dev->screen, &templ);
     return res ? texture_wrap(res, d) : NULL;
 }
 
@@ -340,6 +354,7 @@ vmg_texture *vmg_texture_create_iosurface(vmg_device *dev, const vmg_texture_des
             if (!res) return NULL;
             vmg_texture *t = texture_wrap(res, d);
             t->surface_id = surface_id; t->plane = plane; t->surface_copy = true;
+            t->surface = (void *)IOSurfaceLookup(surface_id);
             return t;
         }
     } else {
@@ -366,6 +381,7 @@ vmg_texture *vmg_texture_create_iosurface(vmg_device *dev, const vmg_texture_des
             if (!res) return NULL;
             vmg_texture *t = texture_wrap(res, d);
             t->surface_id = surface_id; t->plane = plane; t->surface_copy = true;
+            t->surface = (void *)IOSurfaceLookup(surface_id);
             return t;
         }
     }
@@ -384,7 +400,7 @@ vmg_texture *vmg_texture_create_buffer(vmg_device *dev, const vmg_texture_desc *
     if (templ.format == PIPE_FORMAT_NONE) return NULL;
     templ.bind |= PIPE_BIND_LINEAR;
     struct pipe_resource *res = NULL;
-    if (buffer->map && dev->screen->resource_from_user_memory && !getenv("VMG_NO_ALIAS")) {   // VMG_NO_ALIAS: Panfrost's copy path on llvmpipe
+    if (buffer->map && dev->screen->resource_from_user_memory && !getenv("VMG_NO_ALIAS")) {   // VMG_NO_ALIAS: the copy path
         res = dev->screen->resource_from_user_memory(dev->screen, &templ, (uint8_t *)buffer->map + offset);
         uint64_t stride = 0;
         if (res && dev->screen->resource_get_param &&
@@ -392,7 +408,38 @@ vmg_texture *vmg_texture_create_buffer(vmg_device *dev, const vmg_texture_desc *
             stride != bpr)
             pipe_resource_reference(&res, NULL);
     }
+    // Panfrost: a linear texture over the buffer's own BO (Valhall wants offset and row pitch aligned to 64 bytes,
+    // the alignment the device reports to Metal). The copy below was made at every command buffer that sampled the
+    // texture, reading the write-combined buffer: CoreAnimation's images, glyphs and gradients, every frame.
+    static int no_alias = -1;
+    if (no_alias < 0) no_alias = getenv("VMG_NO_ALIAS") != NULL;
+    uint64_t last_row = (uint64_t)util_format_get_stride(templ.format, templ.width0);
+    uint64_t need = (uint64_t)offset + (uint64_t)bpr * (util_format_get_nblocksy(templ.format, templ.height0) - 1) + last_row;
+    if (!res && dev->panfrost && !no_alias && !(offset & 63) && bpr && !(bpr & 63) && bpr >= last_row &&
+        need <= buffer->res->width0 && templ.target == PIPE_TEXTURE_2D && templ.last_level == 0 && templ.array_size == 1 &&
+        !templ.nr_samples && !util_format_is_compressed(templ.format)) {
+        struct winsys_handle kms = { .type = WINSYS_HANDLE_TYPE_KMS };
+        if (dev->screen->resource_get_handle(dev->screen, dev->pipe, buffer->res, &kms, 0)) {
+            struct winsys_handle wh = {0};
+            wh.type = WINSYS_HANDLE_TYPE_FD;
+            int fd = vmg_drm_bo_fd(dev->fd, kms.handle);
+            if (fd >= 0) {
+                wh.handle = (unsigned)fd;
+                wh.stride = (unsigned)bpr;
+                wh.offset = (unsigned)offset;
+                wh.modifier = 0;   // DRM_FORMAT_MOD_LINEAR
+                res = dev->screen->resource_from_handle(dev->screen, &templ, &wh, 0);
+                vmg_drm_surface_fd_close(fd);
+            }
+        }
+    }
     if (res) return texture_wrap(res, d);
+    static int logged;
+    if (dev->panfrost && logged < 16) {
+        logged++;
+        fprintf(stderr, "vmg: buffer texture %ux%u %s offset %zu bpr %zu: copied at each command buffer that samples it\n",
+                templ.width0, templ.height0, util_format_short_name(templ.format), offset, bpr);
+    }
     res = dev->screen->resource_create(dev->screen, &templ);
     if (!res) return NULL;
     vmg_texture *t = texture_wrap(res, d);
@@ -424,6 +471,7 @@ vmg_texture *vmg_texture_create_view(vmg_device *dev, vmg_texture *parent, unsig
     static const uint8_t map[6] = { PIPE_SWIZZLE_0, PIPE_SWIZZLE_1, PIPE_SWIZZLE_X, PIPE_SWIZZLE_Y, PIPE_SWIZZLE_Z, PIPE_SWIZZLE_W };
     for (unsigned i = 0; i < 4; i++) t->swizzle[i] = swizzle ? map[MIN2(swizzle[i], 5)] : parent->swizzle[i];
     t->surface_id = parent->surface_id; t->plane = parent->plane; t->surface_copy = parent->surface_copy;
+    if (parent->surface) t->surface = (void *)CFRetain(parent->surface);
     t->buffer = parent->buffer; t->buffer_offset = parent->buffer_offset; t->buffer_bpr = parent->buffer_bpr;
     return t;
 }
@@ -431,11 +479,13 @@ vmg_texture *vmg_texture_create_view(vmg_device *dev, vmg_texture *parent, unsig
 void vmg_texture_release(vmg_device *dev, vmg_texture *t)
 {
     if (!t) return;
+    vmg_texture_forget(dev, t);
     if (t->view) {
         if (dev->pipe->sampler_view_release) dev->pipe->sampler_view_release(dev->pipe, t->view);
         else pipe_sampler_view_reference(&t->view, NULL);
     }
     pipe_resource_reference(&t->res, NULL);
+    if (t->surface) CFRelease(t->surface);
     free(t);
 }
 

@@ -1,0 +1,226 @@
+XNU: Panfrost fences in one IOKit call (pooled syncobj + transfer instead of emulated sync files), and
+panfrost_bo_wait without WAIT_BO when the BO's last submit is known complete (submit sequence numbers).
+diff --git a/src/gallium/drivers/panfrost/pan_bo.c b/src/gallium/drivers/panfrost/pan_bo.c
+--- a/src/gallium/drivers/panfrost/pan_bo.c
++++ b/src/gallium/drivers/panfrost/pan_bo.c
+@@ -155,17 +155,46 @@
+          return true;
+    }
+ 
++#ifdef __APPLE__
++   /* The last submit using this BO is complete: idle (BOs shared with other
++    * processes may have their jobs too, they still ask the kernel). */
++   if (!(bo->flags & PAN_BO_SHARED) && bo->dev->xnu_idle_seq &&
++       bo->xnu_seq <= p_atomic_read(&bo->dev->xnu_done_seq)) {
++      bo->gpu_access = 0;
++      return true;
++   }
++#endif
++
+    if (pan_kmod_bo_wait(bo->kmod_bo, timeout_ns, !wait_readers)) {
+       /* Set gpu_access to 0 so that the next call to bo_wait()
+        * doesn't have to call the WAIT_BO ioctl.
+        */
+       bo->gpu_access = 0;
++#ifdef __APPLE__
++      /* Its last job is complete, and so is every earlier one. */
++      if (wait_readers)
++         panfrost_xnu_seq_done(bo->dev, bo->xnu_seq);
++#endif
+       return true;
+    }
+ 
+    return false;
+ }
+ 
++#ifdef __APPLE__
++void
++panfrost_xnu_seq_done(struct panfrost_device *dev, uint64_t seq)
++{
++   uint64_t cur = p_atomic_read(&dev->xnu_done_seq);
++   while (cur < seq) {
++      uint64_t prev = p_atomic_cmpxchg(&dev->xnu_done_seq, cur, seq);
++      if (prev == cur)
++         break;
++      cur = prev;
++   }
++}
++#endif
++
+ /* Helper to calculate the bucket index of a BO */
+ 
+ static unsigned
+diff --git a/src/gallium/drivers/panfrost/pan_bo.h b/src/gallium/drivers/panfrost/pan_bo.h
+--- a/src/gallium/drivers/panfrost/pan_bo.h
++++ b/src/gallium/drivers/panfrost/pan_bo.h
+@@ -91,6 +91,11 @@
+     */
+    uint32_t gpu_access;
+ 
++#ifdef __APPLE__
++   /* Number of the last submit that listed this BO (pan_device.h). */
++   uint64_t xnu_seq;
++#endif
++
+    /* Driver-provided human-readable description of the BO for debugging.
+     * Consists of a BO name and optional additional information, like
+     * pixel format or buffer modifiers.
+@@ -115,6 +120,11 @@
+ 
+ bool panfrost_bo_wait(struct panfrost_bo *bo, int64_t timeout_ns,
+                       bool wait_readers);
++
++#ifdef __APPLE__
++/* Submits up to seq are complete (pan_device.h). */
++void panfrost_xnu_seq_done(struct panfrost_device *dev, uint64_t seq);
++#endif
+ void panfrost_bo_reference(struct panfrost_bo *bo);
+ void panfrost_bo_unreference(struct panfrost_bo *bo);
+ struct panfrost_bo *panfrost_bo_create(struct panfrost_device *dev, size_t size,
+diff --git a/src/gallium/drivers/panfrost/pan_context.h b/src/gallium/drivers/panfrost/pan_context.h
+--- a/src/gallium/drivers/panfrost/pan_context.h
++++ b/src/gallium/drivers/panfrost/pan_context.h
+@@ -131,6 +131,10 @@
+ 
+    /* Sync obj used to keep track of in-flight jobs. */
+    uint32_t syncobj;
++#ifdef __APPLE__
++   /* Number of this context's last submit (pan_device.h): what ->syncobj covers. */
++   uint64_t xnu_last_seq;
++#endif
+ 
+    /* Set of 32 batches. When the set is full, the LRU entry (the batch
+     * with the smallest seqnum) is flushed to free a slot.
+diff --git a/src/gallium/drivers/panfrost/pan_device.c b/src/gallium/drivers/panfrost/pan_device.c
+--- a/src/gallium/drivers/panfrost/pan_device.c
++++ b/src/gallium/drivers/panfrost/pan_device.c
+@@ -105,6 +105,10 @@
+    }
+ 
+    pthread_mutex_init(&dev->submit_lock, NULL);
++#ifdef __APPLE__
++   pthread_mutex_init(&dev->xnu_seq_lock, NULL);
++   dev->xnu_idle_seq = !getenv("VGPU_NO_IDLE_SEQ");
++#endif
+ 
+    /* Done once on init */
+    dev->sample_positions = panfrost_bo_create(
+diff --git a/src/gallium/drivers/panfrost/pan_device.h b/src/gallium/drivers/panfrost/pan_device.h
+--- a/src/gallium/drivers/panfrost/pan_device.h
++++ b/src/gallium/drivers/panfrost/pan_device.h
+@@ -152,6 +152,19 @@
+     */
+    pthread_mutex_t submit_lock;
+ 
++#ifdef __APPLE__
++   /* XNU: every submit lists sample_positions, and the Viva kernel makes each
++    * job wait for the last job on each of its BOs, so jobs complete in submit
++    * order. Submits are numbered; once a submit is known complete (a fence or
++    * WAIT_BO said so), every BO last used by an earlier submit is idle and
++    * panfrost_bo_wait answers without a WAIT_BO ioctl (an IOKit call).
++    * VGPU_NO_IDLE_SEQ=1 turns it off. */
++   bool xnu_idle_seq;
++   pthread_mutex_t xnu_seq_lock;
++   uint64_t xnu_submit_seq;
++   uint64_t xnu_done_seq;
++#endif
++
+    /* Sample positions are preloaded into a write-once constant buffer,
+     * such that they can be referenced fore free later. Needed
+     * unconditionally on Bifrost, and useful for sharing with Midgard */
+diff --git a/src/gallium/drivers/panfrost/pan_fence.c b/src/gallium/drivers/panfrost/pan_fence.c
+--- a/src/gallium/drivers/panfrost/pan_fence.c
++++ b/src/gallium/drivers/panfrost/pan_fence.c
+@@ -24,7 +24,11 @@
+    struct pipe_fence_handle *old = *ptr;
+ 
+    if (pipe_reference(&old->reference, &fence->reference)) {
++#ifdef __APPLE__
++      drmSyncobjReleaseXNU(panfrost_device_fd(dev), old->syncobj);
++#else
+       drmSyncobjDestroy(panfrost_device_fd(dev), old->syncobj);
++#endif
+       free(old);
+    }
+ 
+@@ -49,6 +53,10 @@
+                         abs_timeout, DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL, NULL);
+ 
+    fence->signaled = (ret >= 0);
++#ifdef __APPLE__
++   if (fence->signaled && fence->xnu_seq)
++      panfrost_xnu_seq_done(dev, fence->xnu_seq);
++#endif
+    return fence->signaled;
+ }
+ 
+@@ -111,6 +119,29 @@
+    struct panfrost_device *dev = pan_device(ctx->base.screen);
+    int fd = -1, ret;
+ 
++#ifdef __APPLE__
++   /* XNU has no sync files: libdrm-xnu emulates the export/import pair with 5
++    * IOKit calls. A syncobj from its pool takes the context syncobj's current
++    * fence in one (VGPU_SYNCFILE_FENCES=1: the generic path). */
++   static int syncfile = -1;
++   if (syncfile < 0)
++      syncfile = getenv("VGPU_SYNCFILE_FENCES") != NULL;
++   if (!syncfile) {
++      struct pipe_fence_handle *xf = calloc(1, sizeof(*xf));
++      if (!xf)
++         return NULL;
++      if (drmSyncobjSnapshotXNU(panfrost_device_fd(dev), ctx->syncobj,
++                                &xf->syncobj)) {
++         mesa_loge("syncobj snapshot failed\n");
++         free(xf);
++         return NULL;
++      }
++      pipe_reference_init(&xf->reference, 1);
++      xf->xnu_seq = ctx->xnu_last_seq;
++      return xf;
++   }
++#endif
++
+    /* Snapshot the last rendering out fence. We'd rather have another
+     * syncobj instead of a sync file, but this is all we get.
+     * (HandleToFD/FDToHandle just gives you another syncobj ID for the
+diff --git a/src/gallium/drivers/panfrost/pan_fence.h b/src/gallium/drivers/panfrost/pan_fence.h
+--- a/src/gallium/drivers/panfrost/pan_fence.h
++++ b/src/gallium/drivers/panfrost/pan_fence.h
+@@ -13,6 +13,9 @@
+    struct pipe_reference reference;
+    uint32_t syncobj;
+    bool signaled;
++#ifdef __APPLE__
++   uint64_t xnu_seq;   /* submits this fence covers (pan_device.h); 0 = unknown */
++#endif
+ };
+ 
+ void panfrost_fence_reference(struct pipe_screen *pscreen,
+diff --git a/src/gallium/drivers/panfrost/pan_jm.c b/src/gallium/drivers/panfrost/pan_jm.c
+--- a/src/gallium/drivers/panfrost/pan_jm.c
++++ b/src/gallium/drivers/panfrost/pan_jm.c
+@@ -150,11 +150,23 @@
+       panfrost_bo_handle(dev->sample_positions);
+ 
+    submit.bo_handles = (uint64_t)(uintptr_t)bo_handles;
++#ifdef __APPLE__
++   /* Number the submit (pan_device.h); numbering and submitting under one lock
++    * keeps the numbers in kernel order. */
++   pthread_mutex_lock(&dev->xnu_seq_lock);
++   uint64_t seq = ++dev->xnu_submit_seq;
++   for (unsigned i = 0; i < submit.bo_handle_count; i++)
++      pan_lookup_bo(dev, bo_handles[i])->xnu_seq = seq;
++   ctx->xnu_last_seq = seq;
++#endif
+    if (ctx->is_noop)
+       ret = 0;
+    else
+       ret = pan_kmod_ioctl(panfrost_device_fd(dev), DRM_IOCTL_PANFROST_SUBMIT,
+                            &submit);
++#ifdef __APPLE__
++   pthread_mutex_unlock(&dev->xnu_seq_lock);
++#endif
+    free(bo_handles);
+ 
+    if (ret)

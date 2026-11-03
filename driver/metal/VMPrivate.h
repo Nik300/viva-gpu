@@ -175,15 +175,22 @@ void TSMtlInstallLayerTuning(void);
 @property (readonly) id<MTLDevice> device;
 @end
 
+@class VMBuffer;
+
 // The device. One vmg device (pipe_screen + pipe_context) driven from a serial GPU queue.
 @interface VMDevice : _MTLDevice <MTLDevice>
 @property (readonly) vmg_device *vmg;
 @property (readonly) dispatch_queue_t gpuQueue;   // the only place vmg_cmd_* / maps run
+@property (readonly) dispatch_queue_t completionQueue;   // waits for command buffers in the kernel, in commit order
 - (instancetype)initWithDriver:(const char *)driver;
 - (void)gpuSync:(dispatch_block_t)block;
 - (void)gpuAsync:(dispatch_block_t)block;
 - (BOOL)isOnGPUQueue;
 - (void)trackAllocation:(int64_t)delta;
+// Command buffers' setBytes chunks, reused once the command buffer that used one has completed (a new buffer per
+// command buffer cost a buffer creation, and a dispatch_sync on the GPU queue, at every frame).
+- (VMBuffer *)takeInlineChunk:(NSUInteger)length;
+- (void)returnInlineChunk:(VMBuffer *)chunk;
 @end
 
 @interface VMBuffer : _MTLObjectWithLabel <MTLBuffer>

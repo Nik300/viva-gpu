@@ -20,12 +20,26 @@ static mesa_shader_stage gl_stage(enum vmg_stage s)
 
 // ---- IOSurface/buffer copies (when the driver cannot alias the memory) -------------------------------------------------
 
+static bool copy_in_allowed(vmg_device *dev, vmg_texture *t);
+
 void vmg_texture_sync(vmg_device *dev, vmg_texture *t, bool to_texture)
 {
     if (!t || !t->surface_copy || (!t->surface_id && !t->buffer)) return;
     // dev->copy_epoch changes at every command buffer and every copy-out (some surface/buffer changed): a texture
     // copies in once per change, not at every draw that samples it; after its own copy-out it is up to date.
     if (to_texture && t->copy_epoch == dev->copy_epoch) return;
+    if (to_texture && dev->copy_out_count && !copy_in_allowed(dev, t)) return;
+    // A surface whose seed has not moved since our last copy has the same contents: every CPU writer bumps it at
+    // unlock, and a GPU writer of a surface with this pitch (any process) goes through a copied texture too, whose
+    // copy-out writes under a lock. CoreAnimation samples unchanged layer surfaces at every frame: the copy (a full
+    // texture upload) was made once per command buffer. VMG_SURFACE_RECOPY=1: copy them every time, as before.
+    static int recopy = -1;
+    if (recopy < 0) recopy = getenv("VMG_SURFACE_RECOPY") != NULL;
+    if (to_texture && t->surface && t->surface_seed_valid && !recopy &&
+        IOSurfaceGetSeed((IOSurfaceRef)t->surface) == t->surface_seed) {
+        t->copy_epoch = dev->copy_epoch;
+        return;
+    }
     if (!to_texture) dev->copy_epoch++;
     t->copy_epoch = dev->copy_epoch;
     IOSurfaceRef s = NULL;
@@ -35,14 +49,15 @@ void vmg_texture_sync(vmg_device *dev, vmg_texture *t, bool to_texture)
         base = (uint8_t *)t->buffer->map + t->buffer_offset;
         bpr = t->buffer_bpr;
     } else {
-        s = IOSurfaceLookup(t->surface_id);
+        s = t->surface ? (IOSurfaceRef)CFRetain(t->surface) : IOSurfaceLookup(t->surface_id);
         if (!s) return;
         bool planar = IOSurfaceGetPlaneCount(s) > 0;
         base = planar ? IOSurfaceGetBaseAddressOfPlane(s, t->plane) : IOSurfaceGetBaseAddress(s);
         bpr = planar ? IOSurfaceGetBytesPerRowOfPlane(s, t->plane) : IOSurfaceGetBytesPerRow(s);
     }
     uint32_t w = t->res->width0, h = t->res->height0;
-    if (s) IOSurfaceLock(s, to_texture ? kIOSurfaceLockReadOnly : 0, NULL);
+    uint32_t lock_seed = 0;
+    if (s) IOSurfaceLock(s, to_texture ? kIOSurfaceLockReadOnly : 0, &lock_seed);
     // VMG_TRACE_SURF=1: every copy of a surface-backed texture (surface id, seed, how much of it is still zero).
     static int trace_surf = -1;
     if (trace_surf < 0) trace_surf = getenv("VMG_TRACE_SURF") != NULL;
@@ -83,10 +98,71 @@ void vmg_texture_sync(vmg_device *dev, vmg_texture *t, bool to_texture)
         }
     }
     if (s) {
-        IOSurfaceUnlock(s, to_texture ? kIOSurfaceLockReadOnly : 0, NULL);
+        uint32_t unlock_seed = 0;
+        IOSurfaceUnlock(s, to_texture ? kIOSurfaceLockReadOnly : 0, &unlock_seed);
+        // Copy-in: the seed the copied contents had (a writer that unlocks meanwhile moves it on, so we copy again).
+        // Copy-out: the seed includes our own write, whose contents the texture already holds.
+        t->surface_seed = to_texture ? lock_seed : unlock_seed;
+        t->surface_seed_valid = true;
         CFRelease(s);
     }
 }
+
+// Copy-out after GPU writes. A copy-out maps the texture for reading, which submits and waits for the GPU: after every
+// pass that rendered into a copied surface, the replay stopped until the GPU caught up. Surfaces are copied out once,
+// at the flush (one wait for all of them); their contents only leave this command buffer from there. Until then a
+// copy-in of the same surface into a texture with this resource is skipped (the resource is newer), and into another
+// resource first copies the pending one out. Buffers stay immediate (the CPU may read a buffer between commands).
+// VMG_EAGER_COPY_OUT=1: after every pass, as before.
+void vmg_texture_written(vmg_device *dev, vmg_texture *t)
+{
+    if (!t || !t->surface_copy) return;
+    static int eager = -1;
+    if (eager < 0) eager = getenv("VMG_EAGER_COPY_OUT") != NULL;
+    if (eager || t->buffer || !t->surface_id) { vmg_texture_sync(dev, t, false); return; }
+    if (t->copy_out_pending) return;
+    if (dev->copy_out_count == dev->copy_out_cap) {
+        dev->copy_out_cap = dev->copy_out_cap ? dev->copy_out_cap * 2 : 16;
+        dev->copy_out = realloc(dev->copy_out, dev->copy_out_cap * sizeof *dev->copy_out);
+    }
+    dev->copy_out[dev->copy_out_count++] = t;
+    t->copy_out_pending = true;
+}
+
+static void copy_out_one(vmg_device *dev, unsigned i)
+{
+    vmg_texture *t = dev->copy_out[i];
+    dev->copy_out[i] = dev->copy_out[--dev->copy_out_count];
+    t->copy_out_pending = false;
+    vmg_texture_sync(dev, t, false);
+}
+
+static void copy_out_all(vmg_device *dev)
+{
+    while (dev->copy_out_count) copy_out_one(dev, dev->copy_out_count - 1);
+}
+
+void vmg_texture_forget(vmg_device *dev, vmg_texture *t)
+{
+    if (!t || !t->copy_out_pending) return;
+    for (unsigned i = 0; i < dev->copy_out_count; i++)
+        if (dev->copy_out[i] == t) { copy_out_one(dev, i); return; }
+}
+
+// Before a copy-in of t: false when a pending copy-out holds newer contents of the same resource; pending copy-outs
+// of the same surface from other resources are made first.
+static bool copy_in_allowed(vmg_device *dev, vmg_texture *t)
+{
+    for (unsigned i = 0; i < dev->copy_out_count;) {
+        vmg_texture *o = dev->copy_out[i];
+        if (o->res == t->res) return false;
+        if (o->surface_id == t->surface_id && o->plane == t->plane) { copy_out_one(dev, i); continue; }
+        i++;
+    }
+    return true;
+}
+
+static void bound_reset(vmg_device *dev);
 
 // ---- Render passes --------------------------------------------------------------------------------------------------
 
@@ -152,6 +228,7 @@ void vmg_cmd_begin_pass(vmg_device *dev, const vmg_pass_desc *pass)
     fb->samples = (uint8_t)(pass->samples > 1 ? pass->samples : 0);
     pipe->set_framebuffer_state(pipe, fb);
     dev->in_pass = true;
+    bound_reset(dev);
 
     // Metal defaults for the pass: viewport and scissor cover the framebuffer.
     vmg_viewport vp = { 0, 0, w, h, 0, 1 };
@@ -223,7 +300,7 @@ void vmg_cmd_end_pass(vmg_device *dev)
         b.mask = util_format_is_depth_or_stencil(b.src.format) ? PIPE_MASK_Z : PIPE_MASK_RGBA;
         b.filter = PIPE_TEX_FILTER_NEAREST;
         pipe->blit(pipe, &b);
-        vmg_texture_sync(dev, a->resolve, false);
+        vmg_texture_written(dev, a->resolve);
     }
     // Store actions: discard what Metal does not keep (memoryless, dontCare on whole textures).
     for (unsigned i = 0; i < n; i++) {
@@ -231,9 +308,10 @@ void vmg_cmd_end_pass(vmg_device *dev)
         if (!a->texture) continue;
         if ((a->store == VMG_STORE_DONTCARE || a->store == VMG_STORE_RESOLVE) && a->texture->desc.memoryless && pipe->invalidate_resource)
             pipe->invalidate_resource(pipe, a->texture->res);
-        else vmg_texture_sync(dev, a->texture, false);
+        else vmg_texture_written(dev, a->texture);
     }
     dev->in_pass = false;
+    bound_reset(dev);
     // Neutral state: the pipeline objects of this pass may be released (on this queue) before the next one.
     pipe->bind_vertex_elements_state(pipe, dev->velems_empty);
     pipe->bind_blend_state(pipe, dev->blend_default);
@@ -423,6 +501,19 @@ void vmg_cmd_set_visibility(vmg_device *dev, uint8_t mode, size_t offset)
 
 // ---- Draw-time binding ----------------------------------------------------------------------------------------------
 
+// The bound-state cache of bind_stage is reset wherever vmg sets these states itself (pass boundaries, after dispatches).
+static void bound_reset(vmg_device *dev)
+{
+    for (unsigned s = 0; s < VMG_STAGES; s++) dev->stage[s].bound_valid = false;
+}
+
+static bool state_filter(void)
+{
+    static int off = -1;   // VMG_NO_STATE_FILTER=1: every state set at every draw, as before
+    if (off < 0) off = getenv("VMG_NO_STATE_FILTER") != NULL;
+    return !off;
+}
+
 static void bind_stage(vmg_device *dev, enum vmg_stage stage, vmg_shader *sh, const uint32_t *extra_header, unsigned extra_words)
 {
     struct pipe_context *pipe = dev->pipe;
@@ -448,7 +539,14 @@ static void bind_stage(vmg_device *dev, enum vmg_stage stage, vmg_shader *sh, co
         ssbo[i].buffer_offset = aligned;
         ssbo[i].buffer_size = ssbo[i].buffer->width0 - aligned;
     }
-    pipe->set_shader_buffers(pipe, gs, 0, count, count ? ssbo : NULL, r->buffers_written);
+    bool filter = b->bound_valid && state_filter();
+    if (!filter || count != b->bound_ssbo_count || r->buffers_written != b->bound_ssbo_written ||
+        (count && memcmp(ssbo, b->bound_ssbo, count * sizeof ssbo[0]))) {
+        pipe->set_shader_buffers(pipe, gs, 0, count, count ? ssbo : NULL, r->buffers_written);
+        if (count) memcpy(b->bound_ssbo, ssbo, count * sizeof ssbo[0]);
+        b->bound_ssbo_count = count;
+        b->bound_ssbo_written = r->buffers_written;
+    }
     static int trace = -1;
     if (trace < 0) trace = getenv("VMG_TRACE") != NULL;
     if (trace)
@@ -485,7 +583,11 @@ static void bind_stage(vmg_device *dev, enum vmg_stage stage, vmg_shader *sh, co
         if (t->surface_copy) vmg_texture_sync(dev, t, true);   // also inside a pass: CoreAnimation samples them in draws
         views[i] = t->view;
     }
-    pipe->set_sampler_views(pipe, gs, 0, tcount, 0, views);
+    if (!filter || tcount != b->bound_view_count || (tcount && memcmp(views, b->bound_views, tcount * sizeof views[0]))) {
+        pipe->set_sampler_views(pipe, gs, 0, tcount, 0, views);
+        if (tcount) memcpy(b->bound_views, views, tcount * sizeof views[0]);
+        b->bound_view_count = tcount;
+    }
     uint32_t iused = r->textures_written;
     if (iused) {
         struct pipe_image_view img[VMG_MAX_TEXTURES];
@@ -520,7 +622,16 @@ static void bind_stage(vmg_device *dev, enum vmg_stage stage, vmg_shader *sh, co
         scount = VMG_CONSTEXPR_SAMPLER_BASE + i + 1;
     }
     for (unsigned i = 0; i < scount; i++) if (!samplers[i]) samplers[i] = dev->sampler_default;
-    if (scount) pipe->bind_sampler_states(pipe, gs, 0, scount, samplers);
+    // Samplers only on Panfrost: it re-emits everything at every new batch (panfrost_dirty_state_all), while llvmpipe
+    // starting a new scene inside a pass needs them bound again (ca renders differently without).
+    if (scount && (!filter || !dev->panfrost || scount != b->bound_sampler_count || memcmp(samplers, b->bound_samplers, scount * sizeof samplers[0]))) {
+        pipe->bind_sampler_states(pipe, gs, 0, scount, samplers);
+        memcpy(b->bound_samplers, samplers, scount * sizeof samplers[0]);
+        b->bound_sampler_count = scount;
+    }
+    // Images are not filtered (rare); everything else above now matches what is bound. Compute is unbound after
+    // every dispatch, so its cache never becomes valid.
+    b->bound_valid = stage != VMG_COMPUTE && dev->in_pass;
     if (trace && scount)
         for (unsigned i = 0; i < scount; i++)
             fprintf(stderr, "vmg: stage %d sampler %u %p%s\n", stage, i, samplers[i], samplers[i] == dev->sampler_default ? " (default)" : "");
@@ -675,7 +786,25 @@ void vmg_cmd_copy_texture(vmg_device *dev, vmg_texture *src, unsigned ss, unsign
     unsigned slayer = src->res->target == PIPE_TEXTURE_3D ? sz : src->first_layer + ss;
     unsigned dlayer = dst->res->target == PIPE_TEXTURE_3D ? dz : dst->first_layer + ds;
     u_box_3d((int)sx, (int)sy, (int)slayer, (int)w, (int)h, (int)MAX2(d, 1), &box);
-    if (util_format_get_blocksize(src->res->format) == util_format_get_blocksize(dst->res->format) &&
+    // Panfrost's resource_copy_region is the generic CPU copy: it maps both textures (submits and waits for the GPU
+    // work on them) and reads write-combined memory. Same-format copies between colour textures the GPU can render
+    // go through the blitter instead, in GPU order (VMG_CPU_TEXTURE_COPY=1: always the CPU copy).
+    static int cpu_copy = -1;
+    if (cpu_copy < 0) cpu_copy = getenv("VMG_CPU_TEXTURE_COPY") != NULL;
+    bool gpu_copy = dev->panfrost && !cpu_copy && src->res != dst->res && src->res->format == dst->res->format &&
+                    src->res->nr_samples <= 1 && dst->res->nr_samples <= 1 &&
+                    !util_format_is_depth_or_stencil(src->res->format) && !util_format_is_compressed(src->res->format) &&
+                    dev->screen->is_format_supported(dev->screen, dst->res->format, dst->res->target, 0, 0, PIPE_BIND_RENDER_TARGET) &&
+                    dev->screen->is_format_supported(dev->screen, src->res->format, src->res->target, 0, 0, PIPE_BIND_SAMPLER_VIEW);
+    if (gpu_copy) {
+        struct pipe_blit_info b = {0};
+        b.src.resource = src->res; b.src.format = src->res->format; b.src.level = src->first_level + sl; b.src.box = box;
+        b.dst.resource = dst->res; b.dst.format = dst->res->format; b.dst.level = dst->first_level + dl;
+        u_box_3d((int)dx, (int)dy, (int)dlayer, (int)w, (int)h, (int)MAX2(d, 1), &b.dst.box);
+        b.mask = util_format_get_mask(src->res->format);
+        b.filter = PIPE_TEX_FILTER_NEAREST;
+        dev->pipe->blit(dev->pipe, &b);
+    } else if (util_format_get_blocksize(src->res->format) == util_format_get_blocksize(dst->res->format) &&
         src->res->nr_samples == dst->res->nr_samples)
         dev->pipe->resource_copy_region(dev->pipe, dst->res, dst->first_level + dl, dx, dy, dlayer, src->res, src->first_level + sl, &box);
     else {
@@ -687,7 +816,7 @@ void vmg_cmd_copy_texture(vmg_device *dev, vmg_texture *src, unsigned ss, unsign
         b.filter = PIPE_TEX_FILTER_NEAREST;
         dev->pipe->blit(dev->pipe, &b);
     }
-    vmg_texture_sync(dev, dst, false);
+    vmg_texture_written(dev, dst);
 }
 
 void vmg_cmd_copy_buffer_to_texture(vmg_device *dev, vmg_resource *src, size_t off, size_t row_pitch, size_t image_pitch,
@@ -703,7 +832,7 @@ void vmg_cmd_copy_buffer_to_texture(vmg_device *dev, vmg_resource *src, size_t o
     if (!data) return;
     vmg_texture_write(dev, dst, level, slice, x, y, z, w, h, d, data, row_pitch, image_pitch ? image_pitch : row_pitch * h);
     dev->pipe->buffer_unmap(dev->pipe, x0);
-    vmg_texture_sync(dev, dst, false);
+    vmg_texture_written(dev, dst);
 }
 
 void vmg_cmd_copy_texture_to_buffer(vmg_device *dev, vmg_texture *src, unsigned slice, unsigned level, uint32_t x, uint32_t y,
@@ -739,6 +868,7 @@ struct vmg_fence_ext { struct vmg_fence base; vis_entry *vis; unsigned vis_count
 
 void vmg_flush(vmg_device *dev, vmg_fence **out)
 {
+    copy_out_all(dev);
     dev->copy_epoch++;
     if (dev->cb_draws) {
         char line[512];
@@ -799,6 +929,17 @@ bool vmg_fence_wait(vmg_device *dev, vmg_fence *fence, uint64_t timeout_ns)
     bool done = !fence->fence || dev->screen->fence_finish(dev->screen, NULL, fence->fence, timeout_ns);
     if (done) resolve_visibility(dev, fe);
     return done;
+}
+
+bool vmg_fence_wait_gpu(vmg_device *dev, vmg_fence *fence, uint64_t timeout_ns)
+{
+    // fence_finish only touches the screen (thread safe), never the pipe_context.
+    return !fence || !fence->fence || dev->screen->fence_finish(dev->screen, NULL, fence->fence, timeout_ns);
+}
+
+bool vmg_fence_has_results(vmg_fence *fence)
+{
+    return fence && ((struct vmg_fence_ext *)fence)->vis_count;
 }
 
 void vmg_fence_release(vmg_device *dev, vmg_fence *fence)

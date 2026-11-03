@@ -948,6 +948,12 @@ extern int drmSyncobjFDToHandle(int fd, int obj_fd, uint32_t *handle);
 
 extern int drmSyncobjImportSyncFile(int fd, uint32_t handle, int sync_file_fd);
 extern int drmSyncobjExportSyncFile(int fd, uint32_t handle, int *sync_file_fd);
+#ifdef __APPLE__
+/* libdrm-xnu: *handle = a syncobj holding src's current fence (one kernel call, syncobjs reused from a pool), and
+ * putting one back. For Panfrost's fences (pan_fence.c), which otherwise go through emulated sync files. */
+extern int drmSyncobjSnapshotXNU(int fd, uint32_t src, uint32_t *handle);
+extern int drmSyncobjReleaseXNU(int fd, uint32_t handle);
+#endif
 extern int drmSyncobjWait(int fd, uint32_t *handles, unsigned num_handles,
 			  int64_t timeout_nsec, unsigned flags,
 			  uint32_t *first_signaled);

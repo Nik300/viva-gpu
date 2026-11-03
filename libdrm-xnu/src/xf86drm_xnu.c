@@ -214,7 +214,9 @@ static void map_cache_drop(int fd, uint32_t handle)
 
 // A surface fd is a real file descriptor (an unlinked sparse temporary file whose size is the surface's, because
 // Mesa asks lseek(fd, 0, SEEK_END) for the buffer size) registered with its surface id and plane.
-typedef struct { int fd; uint32_t surface, plane; } SurfaceFd;
+// A BO fd (vmg_drm_bo_fd) stands for a BO of this process (handle): importing it returns the same handle, so Panfrost
+// finds its own BO and a texture can alias a buffer (linear textures over MTLBuffers).
+typedef struct { int fd; uint32_t surface, plane; bool is_bo; uint32_t bo_handle; } SurfaceFd;
 static SurfaceFd g_surf[256];
 static pthread_mutex_t g_surf_lock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -242,6 +244,21 @@ int vmg_drm_surface_fd(int device_fd, uint32_t surface_id, unsigned plane)
     return fd;
 }
 
+int vmg_drm_bo_fd(int device_fd, uint32_t handle)
+{
+    (void)device_fd;
+    // /dev/null: lseek gives size 0, so the fd can only import a BO Panfrost already has (its handle is known).
+    int fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return -1;
+    pthread_mutex_lock(&g_surf_lock);
+    unsigned i = 0;
+    for (; i < 256 && g_surf[i].fd; i++) {}
+    if (i < 256) g_surf[i] = (SurfaceFd){ fd, 0, 0, true, handle };
+    pthread_mutex_unlock(&g_surf_lock);
+    if (i == 256) { close(fd); return -1; }
+    return fd;
+}
+
 void vmg_drm_surface_fd_close(int fd)
 {
     pthread_mutex_lock(&g_surf_lock);
@@ -257,6 +274,7 @@ int drmPrimeFDToHandle(int fd, int prime_fd, uint32_t *handle)
     for (unsigned i = 0; i < 256; i++) if (g_surf[i].fd == prime_fd) sf = g_surf[i];
     pthread_mutex_unlock(&g_surf_lock);
     if (!sf.fd) { errno = EBADF; return -EBADF; }
+    if (sf.is_bo) { *handle = sf.bo_handle; return 0; }
     pthread_mutex_lock(&g_bo_lock);
     for (unsigned i = 0; i < g_bo_count; i++)
         if (g_bo[i].fd == fd && g_bo[i].surface == sf.surface && g_bo[i].plane == sf.plane) {
@@ -327,6 +345,50 @@ int drmSyncobjReset(int fd, const uint32_t *handles, uint32_t handle_count)
     int r = vgpu_ioctl(fd, VGPU_SEL_SYNCOBJ_RESET, &a);
     if (r) errno = -r;
     return r;
+}
+
+// Fence snapshots (drmSyncobjSnapshotXNU): Panfrost takes one per fenced flush (every Metal command buffer) and drops it
+// at completion. Syncobjs come back to a small pool instead of SYNCOBJ_DESTROY + SYNCOBJ_CREATE; TRANSFER replaces the
+// fence a pooled syncobj held, so its state does not matter.
+typedef struct { int fd; uint32_t handle; } PooledSyncobj;
+static PooledSyncobj g_sync_pool[32];
+static unsigned g_sync_pool_count;
+static pthread_mutex_t g_sync_pool_lock = PTHREAD_MUTEX_INITIALIZER;
+
+int drmSyncobjSnapshotXNU(int fd, uint32_t src, uint32_t *handle)
+{
+    uint32_t h = 0;
+    pthread_mutex_lock(&g_sync_pool_lock);
+    for (unsigned i = g_sync_pool_count; i-- > 0;)
+        if (g_sync_pool[i].fd == fd) { h = g_sync_pool[i].handle; g_sync_pool[i] = g_sync_pool[--g_sync_pool_count]; break; }
+    pthread_mutex_unlock(&g_sync_pool_lock);
+    if (!h) {
+        struct vgpu_syncobj_create c = {0};
+        int r = vgpu_ioctl(fd, VGPU_SEL_SYNCOBJ_CREATE, &c);
+        if (r) { errno = -r; return r; }
+        h = c.handle;
+    }
+    struct vgpu_syncobj_transfer t = { .src = src, .dst = h };
+    int r = vgpu_ioctl(fd, VGPU_SEL_SYNCOBJ_TRANSFER, &t);
+    if (r) {
+        drmSyncobjDestroy(fd, h);   // not back in the pool: it may be stale (fd of a closed connection reused)
+        errno = -r;
+        return r;
+    }
+    *handle = h;
+    return 0;
+}
+
+int drmSyncobjReleaseXNU(int fd, uint32_t handle)
+{
+    pthread_mutex_lock(&g_sync_pool_lock);
+    if (g_sync_pool_count < 32) {
+        g_sync_pool[g_sync_pool_count++] = (PooledSyncobj){ fd, handle };
+        pthread_mutex_unlock(&g_sync_pool_lock);
+        return 0;
+    }
+    pthread_mutex_unlock(&g_sync_pool_lock);
+    return drmSyncobjDestroy(fd, handle);
 }
 
 // Sync files (Linux fences as fds) do not exist on XNU. Panfrost uses them only to snapshot a syncobj's current fence

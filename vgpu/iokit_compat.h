@@ -40,6 +40,7 @@ kern_return_t IOObjectRelease(io_object_t object);
 kern_return_t IORegistryEntryGetRegistryEntryID(io_registry_entry_t entry, uint64_t *entryID);
 kern_return_t IOConnectCallStructMethod(mach_port_t connection, uint32_t selector, const void *inputStruct,
                                         size_t inputStructCnt, void *outputStruct, size_t *outputStructCnt);
+kern_return_t IOConnectTrap2(io_connect_t connect, uint32_t index, uintptr_t p1, uintptr_t p2);
 kern_return_t IOConnectMapMemory64(io_connect_t connect, uint32_t memoryType, task_port_t intoTask,
                                    mach_vm_address_t *atAddress, mach_vm_size_t *ofSize, IOOptionBits options);
 kern_return_t IOConnectUnmapMemory64(io_connect_t connect, uint32_t memoryType, task_port_t fromTask,
