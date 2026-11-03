@@ -134,12 +134,14 @@ int main(void) { @autoreleasepool {
     [cb waitUntilCompleted];
     draw(rt, halves, nil, priv);
     CHECK(px(rt, 5, 5) == red && px(rt, 40, 5) == blue, "partial blit into a private buffer (0x%08x 0x%08x)", px(rt, 5, 5), px(rt, 40, 5));
+#if TARGET_OS_OSX   // no managed storage on iOS
     id<MTLBuffer> managed = [dev newBufferWithBytes:cols length:sizeof cols options:MTLResourceStorageModeManaged];
     draw(rt, halves, nil, managed);
     ((simd_float4 *)managed.contents)[0] = (simd_float4){ 1, 1, 0, 1 };
     [managed didModifyRange:NSMakeRange(0, 16)];
     draw(rt, halves, nil, managed);
     CHECK(px(rt, 5, 5) == yellow && px(rt, 40, 5) == green, "managed buffer: didModifyRange (0x%08x 0x%08x)", px(rt, 5, 5), px(rt, 40, 5));
+#endif
     ((simd_float4 *)src.contents)[0] = (simd_float4){ 0, 1, 1, 1 };
     draw(rt, halves, nil, src);
     CHECK(px(rt, 5, 5) == cyan, "shared buffer: CPU write without notification is seen (0x%08x)", px(rt, 5, 5));

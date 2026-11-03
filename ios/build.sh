@@ -107,9 +107,11 @@ tests() {
   echo '#import <Metal/Metal.h>
 id<MTLDevice> TSMtlCreateDevice(void) { return MTLCreateSystemDefaultDevice(); }
 void TSMtlRegisterGLSL(id a, id b) {}' > "$OUT/obj/tsdevice.m"
-  for t in phase1 translate uploads; do
-    $CC $TARGET -fobjc-arc -O1 -g -I"$GPU/shim/src" -DTS_SOURCE_DIR=\"/var/root/viva-tests\" "$GPU/shim/tests/$t.m" \
-        "$OUT/obj/tsdevice.m" -framework Foundation -framework Metal -framework UIKit -o "$T/$t" || echo "($t needs porting: AppKit)"
+  for t in phase1 phase2:phase3 translate uploads; do   # SOURCE:NAME (phase2.m is the Mac's "phase3")
+    src=${t%%:*} name=${t##*:}
+    $CC $TARGET -fobjc-arc -O1 -g -I"$HERE/compat" -I"$GPU/shim/src" -DTS_SOURCE_DIR=\"/var/root/viva-tests\" \
+        "$GPU/shim/tests/$src.m" "$OUT/obj/tsdevice.m" -framework Foundation -framework Metal -framework IOSurface \
+        -framework CoreGraphics -framework ImageIO -framework UIKit -o "$T/$name" || echo "($name does not build for iOS)"
   done
   $CC $TARGET -fobjc-arc -O1 -g "$HERE/vmprobe.m" -framework Foundation -framework Metal -o "$T/vmprobe"
   $CC $TARGET -fobjc-arc -O1 -g "$GPU/driver/tests/compute.m" "$OUT/obj/tsdevice.m" -framework Foundation -framework Metal -o "$T/compute"
