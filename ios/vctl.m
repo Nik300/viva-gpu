@@ -9,6 +9,9 @@
 //   vctl surf ID PATH                one IOSurface's planes as PATH-pN.raw (+ layout, how much is non-zero)
 //   vctl ls DIR                      directory listing, newest first (iOS has no ls)
 //   vctl unlock                      unlock (no passcode) through FrontBoard
+//   vctl kill NAME [SIG]             signal every process with that name (default SIGKILL; iOS has no kill):
+//                                    `vctl kill backboardd` restarts the render server with a new driver (launchd
+//                                    starts it again, SpringBoard follows)
 // Touches are digitizer events dispatched into backboardd's HID event system (private IOKit HID API, entitlement
 // com.apple.private.hid.client.event-dispatch, see vctl.entitlements); apps open through SpringBoardServices.
 #import <Foundation/Foundation.h>
@@ -18,6 +21,8 @@
 #import <IOSurface/IOSurfaceRef.h>
 #import <CoreGraphics/CoreGraphics.h>
 #import <ImageIO/ImageIO.h>
+#import <signal.h>
+#import <sys/sysctl.h>
 
 typedef struct __IOHIDEventSystemClient *IOHIDEventSystemClientRef;
 typedef struct __IOHIDEvent *IOHIDEventRef;
@@ -293,11 +298,31 @@ static int ls(const char *dir) {
     return 0;
 }
 
+// kill NAME [SIG]: every process whose name (p_comm) is NAME.
+static int killName(const char *name, int sig) {
+    int mib[3] = { CTL_KERN, KERN_PROC, KERN_PROC_ALL };
+    size_t size = 0;
+    if (sysctl(mib, 3, NULL, &size, NULL, 0)) { perror("vctl: sysctl"); return 1; }
+    size += size / 4;
+    struct kinfo_proc *procs = malloc(size);
+    if (!procs || sysctl(mib, 3, procs, &size, NULL, 0)) { perror("vctl: sysctl"); free(procs); return 1; }
+    int n = (int)(size / sizeof *procs), hit = 0;
+    for (int i = 0; i < n; i++) {
+        if (strncmp(procs[i].kp_proc.p_comm, name, MAXCOMLEN)) continue;
+        pid_t pid = procs[i].kp_proc.p_pid;
+        if (kill(pid, sig)) printf("%s[%d]: %s\n", name, pid, strerror(errno));
+        else { printf("%s[%d]: signal %d\n", name, pid, sig); hit++; }
+    }
+    free(procs);
+    return hit ? 0 : 1;
+}
+
 int main(int argc, char **argv) { @autoreleasepool {
     if (argc < 2) {
         fprintf(stderr, "usage: vctl open BUNDLE | tap X Y | swipe X1 Y1 X2 Y2 [MS] | home | unlock | shot PATH | ls DIR   (X Y in 0..1)\n");
         return 2;
     }
+    if (!strcmp(argv[1], "kill") && argc >= 3) return killName(argv[2], argc >= 4 ? atoi(argv[3]) : SIGKILL);
     if (!strcmp(argv[1], "burst") && argc >= 5) return burst(argv[2], atoi(argv[3]), atoi(argv[4]), argc - 5, argv + 5);
     return dispatch_action(argc - 1, argv + 1);
 } }
