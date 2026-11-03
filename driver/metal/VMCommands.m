@@ -80,7 +80,7 @@ VM_CATCH_ALL(VMBlitEncoder)
     VMDevice *d = VMEncoderDevice(self);
     VMTexture *s = (VMTexture *)src, *t = (VMTexture *)dst;
     [VMEncoderCB(self) useSurface:src.iosurface];
-    [VMEncoderCB(self) useSurface:dst.iosurface];
+    [VMEncoderCB(self) writeSurface:dst.iosurface];
     [VMEncoderCB(self) recordCommand:^{
         vmg_cmd_copy_texture(d.vmg, s.vmg, (unsigned)ss, (unsigned)sl, (uint32_t)so.x, (uint32_t)so.y, (uint32_t)so.z,
                              (uint32_t)size.width, (uint32_t)size.height, (uint32_t)MAX(size.depth, 1), t.vmg, (unsigned)ds,
@@ -157,7 +157,8 @@ VM_CATCH_ALL(VMComputeEncoder)
 - (void)setTexture:(id<MTLTexture>)texture atIndex:(NSUInteger)index {
     VMDevice *d = VMEncoderDevice(self);
     VMTexture *t = (VMTexture *)texture;
-    [VMEncoderCB(self) useSurface:texture.iosurface];
+    if (texture.usage & MTLTextureUsageShaderWrite) [VMEncoderCB(self) writeSurface:texture.iosurface];
+    else [VMEncoderCB(self) useSurface:texture.iosurface];
     [VMEncoderCB(self) recordCommand:^{ vmg_cmd_set_texture(d.vmg, VMG_COMPUTE, (unsigned)index, t.vmg); }];
 }
 - (void)setTextures:(const id<MTLTexture> __unsafe_unretained *)textures withRange:(NSRange)range {
@@ -235,6 +236,7 @@ enum { VMInlineChunk = 64 << 10, VMInlineAlign = 16 };
     NSMutableArray *_keep;
     NSLock *_lock;
     CFMutableSetRef _surfaces;
+    BOOL _writesSurface;
     VMBuffer *_inline;
     NSUInteger _inlineUsed;
 }
@@ -295,6 +297,12 @@ VM_CATCH_ALL(VMCommandBuffer)
     CFSetAddValue(_surfaces, surface);
     [_lock unlock];
 }
+- (void)writeSurface:(IOSurfaceRef)surface {
+    if (!surface) return;
+    [self useSurface:surface];
+    _writesSurface = YES;
+}
+- (BOOL)writesSurface { return _writesSurface; }
 static void VMSurfaceUse(const void *value, void *ctx) {
     if (ctx) IOSurfaceIncrementUseCount((IOSurfaceRef)value); else IOSurfaceDecrementUseCount((IOSurfaceRef)value);
 }
@@ -414,7 +422,16 @@ static void VMPollCompletion(VMDevice *device, VMCommandQueue *queue, VMCommandB
     for (NSUInteger i = 0; i < count; i++) {
         VMCommandBuffer *cb = buffers[i];
         [cb beginSurfaceUse];
-        dispatch_async(device.gpuQueue, ^{
+        // A command buffer that writes an IOSurface is replayed and submitted before commit returns (not waited
+        // for): another process may read the surface as soon as this one tells it, e.g. SpringBoard's app snapshots
+        // rendered by backboardd. The kernel makes readers (IOSurfaceLock, their GPU jobs) wait only for jobs it knows;
+        // submitted later, the snapshot was read half drawn (black launch cards). Apple's driver registers the work at
+        // commit too. VMG_ASYNC_SURFACE_COMMIT=1: asynchronous as before (comparisons).
+        static int async_surface = -1;
+        if (async_surface < 0) async_surface = getenv("VMG_ASYNC_SURFACE_COMMIT") != NULL;
+        void (^submit)(dispatch_block_t) = cb.writesSurface && !async_surface ? ^(dispatch_block_t b) { [device gpuSync:b]; }
+                                                                              : ^(dispatch_block_t b) { [device gpuAsync:b]; };
+        submit(^{
             uint64_t start = mach_absolute_time();
             TSMtlStat(TSStatCommandBuffers, 1);
             [cb execute];
