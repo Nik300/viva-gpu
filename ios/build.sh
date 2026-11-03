@@ -93,6 +93,7 @@ driver() {
       -framework Foundation -framework Metal -framework IOSurface -framework IOKit -framework QuartzCore -framework CoreGraphics \
       -o "$B/VivaMTLDriver"
   sed "s/BUILD_VERSION/$(date +%Y%m%d.%H%M)/" "$HERE/Info.plist" > "$B/Info.plist"
+  rm -rf "$OUT/VivaMTLDriver.dSYM"; [ -d "$B/VivaMTLDriver.dSYM" ] && mv "$B/VivaMTLDriver.dSYM" "$OUT/"   # symbols stay off the phone
   codesign -s - -f "$B"
   echo "bundle: $B"
 }
