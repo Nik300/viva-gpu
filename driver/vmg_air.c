@@ -51,6 +51,7 @@
 
 #define TS_LLVM_DEFINE(ret, name, args) ret (*ts_##name) args;
 TS_LLVM_FUNCS(TS_LLVM_DEFINE)
+TS_LLVM_OPTIONAL_FUNCS(TS_LLVM_DEFINE)
 #undef TS_LLVM_DEFINE
 
 static int g_llvm_loaded;
@@ -69,6 +70,9 @@ static void llvm_load_once(void)
     if (!(ts_##name = (ret (*) args)dlsym(h, #name))) { g_llvm_failure = "libLLVM lacks " #name; return; }
     TS_LLVM_FUNCS(TS_LLVM_RESOLVE)
 #undef TS_LLVM_RESOLVE
+#define TS_LLVM_RESOLVE_OPT(ret, name, args) ts_##name = (ret (*) args)dlsym(h, #name);
+    TS_LLVM_OPTIONAL_FUNCS(TS_LLVM_RESOLVE_OPT)
+#undef TS_LLVM_RESOLVE_OPT
     g_llvm_loaded = 1;
 }
 
@@ -506,7 +510,10 @@ static val *value(T *t, LLVMValueRef v)
         return vptr(t, g->sp, NULL, nir_imm_int(&t->b, g->index));
     }
     if (ts_LLVMIsAConstant(v)) return constant(t, v);
-    FAIL(t, "value used before its definition");
+    char *txt = ts_LLVMPrintValueToString(v);
+    if (!t->error) t->error = vmg_strdup_printf("value used before its definition: %.120s", txt ? txt : "?");
+    ts_LLVMDisposeMessage(txt);
+    return NULL;
 }
 
 static nir_def *ssa(T *t, LLVMValueRef v)
@@ -1762,6 +1769,14 @@ static bool edge_copies(T *t, LLVMBasicBlockRef from, LLVMBasicBlockRef to)
     return true;
 }
 
+static nir_block *new_block(T *t)
+{
+    nir_block *nb = nir_block_create(t->impl);
+    exec_list_push_tail(&t->impl->body, &nb->cf_node.node);
+    nb->cf_node.parent = &t->impl->cf_node;
+    return nb;
+}
+
 static bool has_phis(LLVMBasicBlockRef bb)
 {
     LLVMValueRef i = ts_LLVMGetFirstInstruction(bb);
@@ -1797,13 +1812,31 @@ static bool terminator(T *t, LLVMValueRef term, LLVMBasicBlockRef bb)
             // Edges into blocks with phis get their own block for the copies.
             nir_block *tn = block_for(t, tb), *fn = block_for(t, fb);
             nir_block *te = tn, *fe = fn;
-            if (has_phis(tb)) { te = nir_block_create(t->impl); exec_list_push_tail(&t->impl->body, &te->cf_node.node); te->cf_node.parent = &t->impl->cf_node; }
-            if (has_phis(fb)) { fe = nir_block_create(t->impl); exec_list_push_tail(&t->impl->body, &fe->cf_node.node); fe->cf_node.parent = &t->impl->cf_node; }
+            if (has_phis(tb)) te = new_block(t);
+            if (has_phis(fb)) fe = new_block(t);
             nir_goto_if(b, te, c, fe);
             if (te != tn) { b->cursor = nir_after_block(te); goto_edge(t, bb, tb); }
             if (fe != fn) { b->cursor = nir_after_block(fe); goto_edge(t, bb, fb); }
             return !t->error;
         }
+    case LLVMSwitch: {
+        // switch(cond, default, (value, dest)*): a chain of goto_if blocks, as spirv_to_nir does.
+        nir_def *sel = ssa(t, ts_LLVMGetOperand(term, 0));
+        if (!sel) return false;
+        unsigned ncases = ts_LLVMGetNumSuccessors(term) - 1;
+        for (unsigned k = 0; k < ncases; k++) {
+            LLVMValueRef cv = ts_LLVMGetOperand(term, 2 + 2 * k);
+            LLVMBasicBlockRef dest = ts_LLVMGetSuccessor(term, k + 1);
+            nir_def *cond = nir_ieq_imm(b, sel, ts_LLVMConstIntGetZExtValue(cv));
+            nir_block *next = new_block(t), *target = block_for(t, dest);
+            nir_block *edge = has_phis(dest) ? new_block(t) : target;
+            nir_goto_if(b, edge, cond, next);
+            if (edge != target) { b->cursor = nir_after_block(edge); goto_edge(t, bb, dest); }
+            b->cursor = nir_after_block(next);
+        }
+        goto_edge(t, bb, ts_LLVMGetSuccessor(term, 0));
+        return !t->error;
+    }
     default:
         FAILB(t, "unsupported terminator %d", ts_LLVMGetInstructionOpcode(term));
     }
@@ -1940,19 +1973,50 @@ static bool emit_function(T *t)
         _mesa_hash_table_insert(t->blocks, bb, nb);
     }
     if (!declare_phis(t)) return false;
-    for (LLVMBasicBlockRef bb = ts_LLVMGetFirstBasicBlock(t->fn); bb; bb = ts_LLVMGetNextBasicBlock(bb)) {
+    // Instructions in reverse post-order: every definition is emitted before its uses (LLVM's block layout does not
+    // promise that; phis read their back-edge values through variables).
+    unsigned nblocks = 0;
+    for (LLVMBasicBlockRef bb = ts_LLVMGetFirstBasicBlock(t->fn); bb; bb = ts_LLVMGetNextBasicBlock(bb)) nblocks++;
+    LLVMBasicBlockRef *order = calloc(nblocks, sizeof *order), *stack = calloc(nblocks * 2 + 2, sizeof *stack);
+    unsigned *next_succ = calloc(nblocks * 2 + 2, sizeof *next_succ);
+    struct hash_table *seen = _mesa_pointer_hash_table_create(t->mem);
+    unsigned norder = 0, sp = 0;
+    stack[sp] = ts_LLVMGetFirstBasicBlock(t->fn); next_succ[sp++] = 0;
+    _mesa_hash_table_insert(seen, stack[0], NULL);
+    while (sp) {
+        LLVMBasicBlockRef bb = stack[sp - 1];
+        LLVMValueRef term = ts_LLVMGetBasicBlockTerminator(bb);
+        unsigned ns = term ? ts_LLVMGetNumSuccessors(term) : 0;
+        if (next_succ[sp - 1] < ns) {
+            LLVMBasicBlockRef s2 = ts_LLVMGetSuccessor(term, next_succ[sp - 1]++);
+            if (!_mesa_hash_table_search(seen, s2)) {
+                _mesa_hash_table_insert(seen, s2, NULL);
+                stack[sp] = s2; next_succ[sp++] = 0;
+            }
+        } else {
+            order[norder++] = bb;   // post-order
+            sp--;
+        }
+    }
+    bool ok = true;
+    for (unsigned k = norder; k-- > 0 && ok;) {
+        LLVMBasicBlockRef bb = order[k];
         t->b.cursor = nir_after_block(block_for(t, bb));
         LLVMValueRef term = ts_LLVMGetBasicBlockTerminator(bb);
-        for (LLVMValueRef i = ts_LLVMGetFirstInstruction(bb); i && i != term; i = ts_LLVMGetNextInstruction(i))
-            if (!instruction(t, i)) return false;
-        if (!term || !terminator(t, term, bb)) return false;
+        for (LLVMValueRef i = ts_LLVMGetFirstInstruction(bb); i && i != term && ok; i = ts_LLVMGetNextInstruction(i))
+            ok = instruction(t, i);
+        if (ok && (!term || !terminator(t, term, bb))) ok = false;
     }
-    return true;
+    // Unreachable blocks were never filled: give them a jump so the CFG stays valid.
+    for (LLVMBasicBlockRef bb = ts_LLVMGetFirstBasicBlock(t->fn); bb && ok; bb = ts_LLVMGetNextBasicBlock(bb))
+        if (!_mesa_hash_table_search(seen, bb)) { t->b.cursor = nir_after_block(block_for(t, bb)); nir_goto(&t->b, t->impl->end_block); }
+    free(order); free(stack); free(next_succ);
+    return ok;
 }
 
 // ---- Module ---------------------------------------------------------------------------------------------------------
 
-static const char *kCleanupPasses = "inline,function(sroa,early-cse,instcombine,dse,adce,simplifycfg,lowerswitch,instcombine,simplifycfg)";
+static const char *kCleanupPasses = "inline,function(sroa,early-cse,instcombine,dse,adce,simplifycfg,instcombine,simplifycfg)";
 
 static char *run_passes(LLVMModuleRef mod, const char *pipeline)
 {
@@ -1964,6 +2028,40 @@ static char *run_passes(LLVMModuleRef mod, const char *pipeline)
     char *copy = strdup(msg ? msg : "passes failed");
     ts_LLVMDisposeErrorMessage(msg);
     return copy;
+}
+
+// Every function defined in the module is inlined into the entry point (NIR translation has no calls): drop
+// noinline, add alwaysinline; the "always-inline" pass then runs before the clean-up.
+static void force_inlining(LLVMModuleRef mod, LLVMValueRef entry)
+{
+    if (!ts_LLVMGetEnumAttributeKindForName || !ts_LLVMRemoveEnumAttributeAtIndex || !ts_LLVMCreateEnumAttribute ||
+        !ts_LLVMAddAttributeAtIndex || !ts_LLVMGetModuleContext)
+        return;
+    unsigned noinline = ts_LLVMGetEnumAttributeKindForName("noinline", 8);
+    unsigned always = ts_LLVMGetEnumAttributeKindForName("alwaysinline", 12);
+    unsigned optnone = ts_LLVMGetEnumAttributeKindForName("optnone", 7);
+    LLVMAttributeRef a = ts_LLVMCreateEnumAttribute(ts_LLVMGetModuleContext(mod), always, 0);
+    for (LLVMValueRef f = ts_LLVMGetFirstFunction(mod); f; f = ts_LLVMGetNextFunction(f)) {
+        if (f == entry || ts_LLVMIsDeclaration(f)) continue;
+        ts_LLVMRemoveEnumAttributeAtIndex(f, ~0u, noinline);
+        ts_LLVMRemoveEnumAttributeAtIndex(f, ~0u, optnone);
+        ts_LLVMAddAttributeAtIndex(f, ~0u, a);
+    }
+}
+
+static LLVMValueRef entry_function(LLVMModuleRef mod)
+{
+    const char *kinds[] = { "air.vertex", "air.fragment", "air.kernel" };
+    for (unsigned i = 0; i < 3; i++) {
+        if (!ts_LLVMGetNamedMetadataNumOperands(mod, kinds[i])) continue;
+        LLVMValueRef node;
+        ts_LLVMGetNamedMetadataOperands(mod, kinds[i], &node);
+        LLVMValueRef ops[256];
+        if (ts_LLVMGetMDNodeNumOperands(node) > 256) return NULL;
+        ts_LLVMGetMDNodeOperands(node, ops);
+        return ops[0];
+    }
+    return NULL;
 }
 
 static const char kVisibleRef[] = ".MTL_VISIBLE_FN_REF";
@@ -2113,6 +2211,10 @@ nir_shader *vmg_air_translate(const nir_shader_compiler_options *options, const 
     if (bad) *error = strdup("bitcode parse failed");
     else {
         char *err = in->linked_count ? link_visible(ctx, mod, in) : NULL;
+        if (!err) {
+            force_inlining(mod, entry_function(mod));
+            err = run_passes(mod, "always-inline");
+        }
         if (!err) err = run_passes(mod, kCleanupPasses);
         if (err) *error = err;
         else s = translate_module(options, mod, in, refl, pool, error);

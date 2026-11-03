@@ -11,7 +11,7 @@ M_SRC     = vmg_formats.m
 OBJ       = $(addprefix $(OUT)/,$(C_SRC:.c=.o) $(M_SRC:.m=.o))
 HDR       = vmg.h vmg_internal.h vmg_llvm.h
 
-all: $(OUT)/libvmg.a $(OUT)/test_vmg
+all: $(OUT)/libvmg.a $(OUT)/test_vmg $(OUT)/airnir
 
 $(OUT)/%.o: %.c $(HDR)
 	@mkdir -p $(OUT)
@@ -35,3 +35,6 @@ test: $(OUT)/test_vmg
 clean:
 	rm -rf out
 .PHONY: all test clean
+
+$(OUT)/airnir: tools/airnir.m $(OUT)/libvmg.a
+	$(CC) -fobjc-arc $(CFLAGS) $< $(OUT)/libvmg.a $(MESA_LD) -framework Foundation -framework Metal -o $@

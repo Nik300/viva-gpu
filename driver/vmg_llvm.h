@@ -152,8 +152,18 @@ typedef enum {
     X(void *, LLVMGetNextUse, (void *)) \
     X(LLVMValueRef, LLVMGetUser, (void *))
 
+typedef struct LLVMOpaqueAttributeRef *LLVMAttributeRef;
+// Optional: resolved when present (NULL otherwise); used for forced inlining.
+#define TS_LLVM_OPTIONAL_FUNCS(X) \
+    X(unsigned, LLVMGetEnumAttributeKindForName, (const char *, size_t)) \
+    X(void, LLVMRemoveEnumAttributeAtIndex, (LLVMValueRef, unsigned, unsigned)) \
+    X(LLVMAttributeRef, LLVMCreateEnumAttribute, (LLVMContextRef, unsigned, uint64_t)) \
+    X(void, LLVMAddAttributeAtIndex, (LLVMValueRef, unsigned, LLVMAttributeRef)) \
+    X(LLVMContextRef, LLVMGetModuleContext, (LLVMModuleRef))
+
 #define TS_LLVM_DECLARE(ret, name, args) extern ret (*ts_##name) args;
 TS_LLVM_FUNCS(TS_LLVM_DECLARE)
+TS_LLVM_OPTIONAL_FUNCS(TS_LLVM_DECLARE)
 #undef TS_LLVM_DECLARE
 
 // Loads libLLVM and resolves every function above; returns 0 (with a reason) if anything is missing.
