@@ -10,5 +10,7 @@
 	<key>com.apple.springboard.launchapplications</key><true/>
 	<key>com.apple.frontboard.launchapplications</key><true/>
 	<key>com.apple.backboardd.launchapplications</key><true/>
+	<key>com.apple.private.iosurface.lookup</key><true/>
+	<key>com.apple.iosurface.allow-global-lookup</key><true/>
 </dict>
 </plist>

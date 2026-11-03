@@ -4,6 +4,7 @@
 //   vctl tap X Y                     one finger, X Y in 0..1 of the screen (portrait, origin top left)
 //   vctl swipe X1 Y1 X2 Y2 [MS]      drag (default 300 ms)
 //   vctl home                        the home button
+//   vctl shot PATH                   the render server's framebuffers as PATH-N.png
 //   vctl unlock                      unlock (no passcode) through FrontBoard
 // Touches are digitizer events dispatched into backboardd's HID event system (private IOKit HID API, entitlement
 // com.apple.private.hid.client.event-dispatch, see vctl.entitlements); apps open through SpringBoardServices.
@@ -11,6 +12,9 @@
 #import <dlfcn.h>
 #import <mach/mach_time.h>
 #import <unistd.h>
+#import <IOSurface/IOSurfaceRef.h>
+#import <CoreGraphics/CoreGraphics.h>
+#import <ImageIO/ImageIO.h>
 
 typedef struct __IOHIDEventSystemClient *IOHIDEventSystemClientRef;
 typedef struct __IOHIDEvent *IOHIDEventRef;
@@ -142,6 +146,42 @@ static int open_app(NSString *bundle) {
     return ok ? 0 : 1;
 }
 
+// The render server's framebuffers: IOSurfaces of the screen's size (1125x2436, BGRA), written as PATH-N.png (one per
+// surface found; the front one is the newest). Faster than dumping the scanout layer with the link's peek.
+IOSurfaceRef IOSurfaceLookup(IOSurfaceID);
+static int shot(const char *path) {
+    int found = 0;
+    for (IOSurfaceID sid = 1; sid < 8192; sid++) {
+        IOSurfaceRef sf = IOSurfaceLookup(sid);
+        if (!sf) continue;
+        size_t w = IOSurfaceGetWidth(sf), h = IOSurfaceGetHeight(sf);
+        uint32_t fmt = IOSurfaceGetPixelFormat(sf);
+        if (getenv("VCTL_VERBOSE") && w >= 256) fprintf(stderr, "vctl: surface %u %zux%zu '%.4s' seed %u\n", sid, w, h, (char *)&(uint32_t){ __builtin_bswap32(fmt) }, IOSurfaceGetSeed(sf));
+        if (w < 1000 || h < 2000 || (fmt != 'BGRA' && fmt != 'ARGB')) { CFRelease(sf); continue; }
+        IOSurfaceLock(sf, kIOSurfaceLockReadOnly, NULL);
+        CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+        CGContextRef c = CGBitmapContextCreate(IOSurfaceGetBaseAddress(sf), w, h, 8, IOSurfaceGetBytesPerRow(sf), cs,
+                                               kCGImageAlphaNoneSkipFirst | kCGBitmapByteOrder32Little);
+        CGImageRef img = c ? CGBitmapContextCreateImage(c) : NULL;
+        IOSurfaceUnlock(sf, kIOSurfaceLockReadOnly, NULL);
+        if (img) {
+            NSString *out = [NSString stringWithFormat:@"%s-%d.png", path, found];
+            CGImageDestinationRef d = CGImageDestinationCreateWithURL((__bridge CFURLRef)[NSURL fileURLWithPath:out], CFSTR("public.png"), 1, NULL);
+            CGImageDestinationAddImage(d, img, NULL);
+            CGImageDestinationFinalize(d);
+            CFRelease(d);
+            CGImageRelease(img);
+            printf("%s: surface %u %zux%zu seed %u\n", out.UTF8String, sid, w, h, IOSurfaceGetSeed(sf));
+            found++;
+        }
+        if (c) CGContextRelease(c);
+        CGColorSpaceRelease(cs);
+        CFRelease(sf);
+    }
+    if (!found) fprintf(stderr, "vctl: no framebuffer surface found\n");
+    return found ? 0 : 1;
+}
+
 int main(int argc, char **argv) { @autoreleasepool {
     if (argc < 2) {
         fprintf(stderr, "usage: vctl open BUNDLE | tap X Y | swipe X1 Y1 X2 Y2 [MS] | home   (X Y in 0..1)\n");
@@ -155,6 +195,7 @@ int main(int argc, char **argv) { @autoreleasepool {
         usleep(100000);
         return 0;
     }
+    if (!strcmp(cmd, "shot") && argc == 3) return shot(argv[2]);
     if (!strcmp(cmd, "unlock")) return open_frontboard(@"com.apple.springboard") == 0 ? 0 : open_app(@"com.apple.Preferences");
     if (!strcmp(cmd, "home")) { key(0x0c, 0x40); return 0; }   // consumer page, Menu (the home button)
     fprintf(stderr, "vctl: unknown command %s\n", cmd);
