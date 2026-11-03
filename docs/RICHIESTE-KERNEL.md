@@ -84,3 +84,18 @@ Con la GPU che compone, la copia CPU di `AppleCLCD` (11 MB per frame) diventa il
   `libdrm-xnu` somma lo scarto (`gpu` commit "IOSurface planes off a page boundary").
 - `IMPORT_USERPTR` (`newBufferWithBytesNoCopy`): lato kernel pronto. Lato Mesa manca il `resource_from_handle` dei
   buffer: oggi questi buffer vengono copiati, ed è sufficiente per CoreAnimation.
+
+## Risposte del kernel (2026-11-03, patch 0101-0109 di `fork/`, da provare sul telefono)
+Dettagli in `fork/VIVA.md`. Boot con `vivagpu=2`.
+
+| Richiesta | Stato | Come verificarla |
+|---|---|---|
+| K1 | Ogni tipo di user client sconosciuto riceve un client "sonda": ogni selettore, trap, tipo di memoria e porta di notifica viene loggato e risponde `kIOReturnUnsupported` (`vivagpuprobe=0` per rifiutarli come prima). Anche le letture delle proprietà del servizio vengono loggate, una volta per coppia (processo, chiave), con found/MISSING. | `gpu probe`, righe `VIVA GPU: probe ...` / `reads property` |
+| K2 | (b) fatto: AppleCLCD converte `w30r`, `w40a`/`w40m` e `l10r` in BGRA8 durante la copia. (a): l'ADT di viva dichiara `artwork-display-gamut = sRGB`; MobileGestalt potrebbe però avere il valore in cache. | log `SWEET FB: layer N format ...` a ogni cambio di formato |
+| K3 | Le BO normali hanno manutenzione solo dopo la prima mappatura CPU. Le IOSurface sono "pigre": vengono pulite solo dopo un lock in scrittura della CPU e invalidate al lock successivo o prima della copia del display. **Contratto: l'accesso CPU a una IOSurface usata dalla GPU deve stare dentro IOSurfaceLock/Unlock** (oppure si mappa la BO con il client vgpu, che la rende "eager"). Con `vivagpucache=0` si torna al comportamento vecchio. L'aperture per la RAM bassa NON è corretta. | `gpu status`: tempo medio del submit, tempo di manutenzione, KiB per submit |
+| K4 | Tabella vendor (segmento 0, letto dal devinfo). `vivagpufreq=MHz` (default 300, massimo 950), `vivagpumv` (margine, default 50 mV, limite a 0,9 V). A runtime: `gpu freq MHz`. DVFS non c'è ancora. | `gpu freq`, `gpu status` |
+| K5 | Un fault MMU disattiva solo l'AS colpito e fa fallire la catena, senza reset. Il reset resta solo per i bus fault "veri" e al timeout. Dopo un fault, le catene fragment hanno un timeout di 500 ms finché una non termina bene. | `gpu selftest fault` → "no reset", poi `gpu selftest` |
+| K6 | SetValue/CopyValue/RemoveValue/SetValues e gli attachment bulk, con l'ABI verificato sul disassemblato di 20H392. | — |
+| K7 | Comandi del link: `push`, `pull`, `run`. Il demone `vivad` (`fork/tools/vivad`, compilato dalla CI) esegue i programmi e rimanda lo stdout. All'avvio esegue `/private/var/root/viva-tests/autorun/*`. Installazione senza riflashare: si fa `pull` di launchd.plist, poi `tools/viva-launchd-add.py`, poi `push` di plist e vivad, poi reboot. | `viva-link.py run test_vgpu` |
+| K8 | Contatore per processo e limiti `vivagpumem` / `vivagpumemtotal` (MiB). Oltre il limite: `kIOReturnNoMemory`. | `gpu status` |
+| K9 | Scanout diretto di una sola superficie a schermo intero, BGRA e contigua: cambiano solo ADDR e PITCH del layer OVL di LK. Spento di default (`vivascanout=1` o `disp scanout on`). Non è ancora sincronizzato al vblank. Prima va lanciato `disp regs` (solo lettura). | `disp`, `disp regs` |
