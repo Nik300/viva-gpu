@@ -80,7 +80,7 @@ VM_CATCH_ALL(VMBlitEncoder)
     VMDevice *d = VMEncoderDevice(self);
     VMTexture *s = (VMTexture *)src, *t = (VMTexture *)dst;
     [VMEncoderCB(self) useSurface:src.iosurface];
-    [VMEncoderCB(self) writeSurface:dst.iosurface];
+    [VMEncoderCB(self) useSurface:dst.iosurface];
     [VMEncoderCB(self) recordCommand:^{
         vmg_cmd_copy_texture(d.vmg, s.vmg, (unsigned)ss, (unsigned)sl, (uint32_t)so.x, (uint32_t)so.y, (uint32_t)so.z,
                              (uint32_t)size.width, (uint32_t)size.height, (uint32_t)MAX(size.depth, 1), t.vmg, (unsigned)ds,
@@ -235,7 +235,6 @@ enum { VMInlineChunk = 64 << 10, VMInlineAlign = 16 };
     NSMutableArray *_keep;
     NSLock *_lock;
     CFMutableSetRef _surfaces;
-    BOOL _writesSurface;
     VMBuffer *_inline;
     NSUInteger _inlineUsed;
 }
@@ -296,12 +295,6 @@ VM_CATCH_ALL(VMCommandBuffer)
     CFSetAddValue(_surfaces, surface);
     [_lock unlock];
 }
-- (void)writeSurface:(IOSurfaceRef)surface {
-    if (!surface) return;
-    [self useSurface:surface];
-    _writesSurface = YES;
-}
-- (BOOL)writesSurface { return _writesSurface; }
 static void VMSurfaceUse(const void *value, void *ctx) {
     if (ctx) IOSurfaceIncrementUseCount((IOSurfaceRef)value); else IOSurfaceDecrementUseCount((IOSurfaceRef)value);
 }
@@ -373,16 +366,6 @@ VM_CATCH_ALL(VMCommandQueue)
     return [[VMCommandBuffer alloc] initWithQueue:self retainedReferences:desc.retainedReferences];
 }
 
-// A command buffer that writes an IOSurface reports "scheduled" only once the GPU has finished: backboardd swaps the
-// framebuffer from "scheduled" (Apple's display driver then waits for the GPU writes to the surface; AppleCLCD here
-// copies at once), so the screen showed frames half drawn (black tiles, old and new halves) during animations.
-// VMG_SCHEDULE_EARLY=1: scheduled right after the flush, as before (comparisons).
-static BOOL VMScheduleEarly(void) {
-    static int early = -1;
-    if (early < 0) early = getenv("VMG_SCHEDULE_EARLY") != NULL;
-    return early;
-}
-
 // GPU queue: reports completion once the fence has signalled; polls without blocking the queue.
 static void VMPollCompletion(VMDevice *device, VMCommandQueue *queue, VMCommandBuffer *cb, vmg_fence *fence, uint64_t start) {
     if (!vmg_fence_wait(device.vmg, fence, 0)) {
@@ -392,7 +375,6 @@ static void VMPollCompletion(VMDevice *device, VMCommandQueue *queue, VMCommandB
         return;
     }
     vmg_fence_release(device.vmg, fence);
-    if (cb.writesSurface && !VMScheduleEarly()) [cb didScheduleWithStartTime:start endTime:mach_absolute_time() error:nil];
     [cb endSurfaceUse];
     [cb releaseKept];
     [queue commandBufferDidComplete:cb startTime:start completionTime:mach_absolute_time() error:nil];
@@ -410,9 +392,8 @@ static void VMPollCompletion(VMDevice *device, VMCommandQueue *queue, VMCommandB
             [cb execute];
             vmg_fence *fence = NULL;
             vmg_flush(device.vmg, &fence);
-            // "Scheduled" after the flush (presentDrawable hands the IOSurface on from there), or at completion when
-            // the command buffer writes an IOSurface (VMPollCompletion).
-            if (!cb.writesSurface || VMScheduleEarly()) [cb didScheduleWithStartTime:start endTime:mach_absolute_time() error:nil];
+            // "Scheduled" after the flush: presentDrawable hands the IOSurface to the compositor from there.
+            [cb didScheduleWithStartTime:start endTime:mach_absolute_time() error:nil];
             VMPollCompletion(device, self, cb, fence, start);
         });
     }

@@ -57,7 +57,7 @@ VM_CATCH_ALL(VMRenderEncoder)
         VMAttachment(&pass.color[i], c, keep);
         MTLClearColor cc = c.clearColor;
         pass.color[i].clear[0] = cc.red; pass.color[i].clear[1] = cc.green; pass.color[i].clear[2] = cc.blue; pass.color[i].clear[3] = cc.alpha;
-        [cb writeSurface:c.texture.iosurface];
+        [cb useSurface:c.texture.iosurface];
     }
     VMAttachment(&pass.depth, desc.depthAttachment, keep);
     pass.depth.clear[0] = desc.depthAttachment.clearDepth;
