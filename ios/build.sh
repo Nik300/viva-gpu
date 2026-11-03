@@ -38,6 +38,9 @@ mesa() {
   local libs=()
   for t in $targets; do [ -f "$B/$t" ] && libs+=("$B/$t") || echo "missing $t"; done
   echo "combining ${#libs[@]} archives"
+  for l in "${libs[@]}"; do echo "  $(ar t "$l" 2>/dev/null | wc -l | tr -d ' ') ${l#$B/}"; done
+  # The bundle links the individual archives (ld64 is order independent); the combined one is for the artifact.
+  printf '%s\n' "${libs[@]}" > "$OUT/lib/mesa-libs.txt"
   xcrun --sdk iphoneos libtool -static -o "$OUT/lib/libmesa_viva.a" "${libs[@]}"
   echo "libmesa_viva.a: $(ar t "$OUT/lib/libmesa_viva.a" | wc -l) members"
   nm "$OUT/lib/libmesa_viva.a" 2>/dev/null | grep -c " T _nir_builder_init_simple_shader" || echo "nir_builder_init_simple_shader MISSING"
@@ -76,7 +79,7 @@ driver() {
   local B="$OUT/VivaMTLDriver.bundle"
   rm -rf "$B"; mkdir -p "$B"
   $CC $TARGET -fobjc-arc -O2 -g -bundle -Wno-deprecated-declarations -I"$GPU/driver/metal" -I"$GPU/driver" \
-      "$GPU"/driver/metal/*.m "$OBJ"/*.o "$OUT/lib/libmesa_viva.a" -lz -lc++ \
+      "$GPU"/driver/metal/*.m "$OBJ"/*.o $(cat "$OUT/lib/mesa-libs.txt") -lz -lc++ \
       -framework Foundation -framework Metal -framework IOSurface -framework IOKit -framework QuartzCore -framework CoreGraphics \
       -o "$B/VivaMTLDriver"
   sed "s/BUILD_VERSION/$(date +%Y%m%d.%H%M)/" "$HERE/Info.plist" > "$B/Info.plist"
