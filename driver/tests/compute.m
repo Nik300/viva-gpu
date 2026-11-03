@@ -36,6 +36,8 @@ static NSString *const kMSL = @
     "struct Two { half4 c0 [[color(0)]]; half4 c1 [[color(1)]]; };\n"
     "fragment Two clip_write(VOut i [[stage_in]]) { Two o; o.c0 = 0; o.c1 = half4(i.pos.x < 4 ? 1.0h : 0.0h); return o; }\n"
     "fragment Two clip_write_all(VOut i [[stage_in]], half4 dst [[color(0)]]) { Two o; o.c0 = dst; o.c1 = half4(i.pos.x < 4 ? 1.0h : 0.0h); return o; }\n"
+    "struct TwoF { float4 c0 [[color(0)]]; float4 c1 [[color(1)]]; };\n"
+    "fragment TwoF mrt_plain() { TwoF o; o.c0 = float4(0, 1, 0, 1); o.c1 = float4(0, 0, 1, 1); return o; }\n"
     "fragment Two clip_apply(half4 dst [[color(0)]], half4 clip [[color(1)]]) {\n"
     "  Two o; o.c0 = mix(dst, half4(1, 0, 0, 1), clip.r); o.c1 = clip; return o; }\n";
 
@@ -209,7 +211,19 @@ int main(void) { @autoreleasepool {
     const char *fv = getenv("VMG_FETCH_VARIANT");
     int variant = fv ? atoi(fv) : 0;
     if (variant) { fd.storageMode = MTLStorageModeShared; c1 = [dev newTextureWithDescriptor:fd]; }
-    id<MTLRenderPipelineState> w = rpipe(variant == 2 ? @"clip_write_all" : @"clip_write", 2), a = rpipe(@"clip_apply", 2);
+    // 3 = clip_write alone, 4 = plain MRT (float outputs, no fetch): c1 read back
+    NSString *wn = variant == 2 ? @"clip_write_all" : variant == 4 ? @"mrt_plain" : @"clip_write";
+    id<MTLRenderPipelineState> w = rpipe(wn, 2), a = rpipe(@"clip_apply", 2);
+    if (variant >= 3 && w) {
+        pass(2, @[w]);
+        uint8_t m[8 * 8 * 4];
+        [c1 getBytes:m bytesPerRow:32 fromRegion:MTLRegionMake2D(0, 0, 8, 8) mipmapLevel:0];
+        [c0 getBytes:fb bytesPerRow:32 fromRegion:MTLRegionMake2D(0, 0, 8, 8) mipmapLevel:0];
+        printf("  variant %d: c0 (%u %u %u %u) c1 x1 (%u %u %u %u) x6 (%u %u %u %u)\n", variant, fb[2], fb[1], fb[0], fb[3],
+               m[(2 * 8 + 1) * 4 + 2], m[(2 * 8 + 1) * 4 + 1], m[(2 * 8 + 1) * 4], m[(2 * 8 + 1) * 4 + 3],
+               m[(2 * 8 + 6) * 4 + 2], m[(2 * 8 + 6) * 4 + 1], m[(2 * 8 + 6) * 4], m[(2 * 8 + 6) * 4 + 3]);
+        w = nil;
+    }
     if (w && a) {
         pass(2, @[w, a]);
         [c0 getBytes:fb bytesPerRow:32 fromRegion:MTLRegionMake2D(0, 0, 8, 8) mipmapLevel:0];
