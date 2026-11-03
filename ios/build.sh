@@ -23,7 +23,7 @@ mesa() {
   # Host tools (mesa_clc, vtn_bindgen2, panfrost_compile) come from the macOS build.
   [ -x "$GPU/mesa/build-macos/src/panfrost/clc/panfrost_compile" ] || bash "$GPU/mesa/build.sh" macos-nosmoke
   sed -e "s|@IOS_SDK@|$SDK|" -e "s|@GPU@|$GPU|" "$GPU/mesa/cross/ios-arm64.ini" > "$OUT/ios-arm64.ini"
-  export PATH="$GPU/mesa/build-macos/src/compiler/clc:$GPU/mesa/build-macos/src/compiler/spirv:$GPU/mesa/build-macos/src/panfrost/clc:$PATH"
+  export PATH="$GPU/.venv/bin:$GPU/mesa/build-macos/src/compiler/clc:$GPU/mesa/build-macos/src/compiler/spirv:$GPU/mesa/build-macos/src/panfrost/clc:$PATH"
   local B="$GPU/mesa/build-ios"
   [ -f "$B/build.ninja" ] || "$GPU/.venv/bin/meson" setup "$B" "$GPU/mesa/src" --cross-file "$OUT/ios-arm64.ini" \
       -Dgallium-drivers=panfrost -Dvulkan-drivers= -Dllvm=disabled -Ddraw-use-llvm=false -Dplatforms= \
