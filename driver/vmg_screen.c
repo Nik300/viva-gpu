@@ -33,7 +33,9 @@ static bool rasterizer_equal(const void *a, const void *b) { return !memcmp(a, b
 // Variables for processes we do not start (backboardd): KEY=VALUE lines, without overriding the environment.
 static void load_env_file(void)
 {
-    FILE *f = fopen("/private/var/root/viva-tests/vmg.env", "r");
+    // In the bundle first: every process that loads the driver may read it (backboardd's sandbox may not reach /var/root).
+    FILE *f = fopen("/System/Library/Extensions/VivaMTLDriver.bundle/vmg.env", "r");
+    if (!f) f = fopen("/private/var/root/viva-tests/vmg.env", "r");
     if (!f) return;
     char line[256];
     while (fgets(line, sizeof line, f)) {
