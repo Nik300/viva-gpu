@@ -103,6 +103,7 @@ void vmg_cmd_begin_pass(vmg_device *dev, const vmg_pass_desc *pass)
             fprintf(stderr, " c%u %p %ux%u %s load %d store %d clear %.2f,%.2f,%.2f,%.2f", i, (void *)a->texture,
                     a->texture->res->width0, a->texture->res->height0, util_format_short_name(a->texture->format), a->load,
                     a->store, a->clear[0], a->clear[1], a->clear[2], a->clear[3]);
+            if (a->texture->surface_id) fprintf(stderr, " surf %u", a->texture->surface_id);
         }
         if (pass->stencil.texture) fprintf(stderr, " stencil load %d clear %u", pass->stencil.load, pass->stencil.clear_stencil);
         if (pass->depth.texture) fprintf(stderr, " depth load %d", pass->depth.load);
@@ -354,6 +355,11 @@ void vmg_cmd_set_texture(vmg_device *dev, enum vmg_stage stage, unsigned slot, v
     if (slot >= VMG_MAX_TEXTURES) return;
     static int trace = -1;
     if (trace < 0) trace = getenv("VMG_TRACE") != NULL;
+    static int trace_draw = -1;
+    if (trace_draw < 0) trace_draw = getenv("VMG_TRACE_DRAW") ? atoi(getenv("VMG_TRACE_DRAW")) : 0;
+    if (trace_draw == 2 && tex && tex->surface_id)
+        fprintf(stderr, "vmg: sample surf %u %ux%u%s\n", tex->surface_id, tex->res->width0, tex->res->height0,
+                tex->surface_copy ? " (copy)" : "");
     if (trace && tex)
         fprintf(stderr, "vmg: stage %d texture %u: %p %ux%u %s levels %u %s%s\n", stage, slot, (void *)tex, tex->res->width0, tex->res->height0,
                 util_format_short_name(tex->res->format), tex->res->last_level + 1,
@@ -368,7 +374,7 @@ void vmg_cmd_set_sampler(vmg_device *dev, enum vmg_stage stage, unsigned slot, v
     (void)lod_min; (void)lod_max;
     if (slot >= VMG_MAX_SAMPLERS) return;
     static int trace_draw = -1;
-    if (trace_draw < 0) trace_draw = getenv("VMG_TRACE_DRAW") != NULL;
+    if (trace_draw < 0) trace_draw = getenv("VMG_TRACE_DRAW") && atoi(getenv("VMG_TRACE_DRAW")) == 1;
     if (trace_draw && s)
         fprintf(stderr, "vmg: stage %d sampler %u: wrap %u %u filter %u %u norm %d border %.0f,%.0f,%.0f,%.0f\n", stage, slot,
                 s->state.wrap_s, s->state.wrap_t, s->state.min_img_filter, s->state.mag_img_filter, !s->state.unnormalized_coords,
@@ -549,9 +555,9 @@ void vmg_cmd_draw(vmg_device *dev, const vmg_draw_info *d)
         if (i == dev->cb_fs_count && i < 24) dev->cb_fs[dev->cb_fs_count++] = n;
         dev->cb_draws++;
     }
-    static int trace_draw = -1;
-    if (trace_draw < 0) trace_draw = getenv("VMG_TRACE_DRAW") != NULL;
-    if (trace_draw) {
+    static int trace_draw = -1;   // VMG_TRACE_DRAW=2: passes and sampled IOSurfaces only (light enough for animations)
+    if (trace_draw < 0) trace_draw = getenv("VMG_TRACE_DRAW") ? atoi(getenv("VMG_TRACE_DRAW")) : 0;
+    if (trace_draw == 1) {
         const vmg_color_attachment *c = &p->desc.color[0];
         fprintf(stderr, "vmg: draw %s/%s prim %u count %u inst %u blend %d %u,%u,%u,%u op %u,%u mask %x scissor %u,%u-%u,%u%s%s\n",
                 p->desc.vertex->name, p->desc.fragment ? p->desc.fragment->name : "-", d->primitive, d->count,
