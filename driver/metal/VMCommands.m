@@ -337,15 +337,43 @@ static void VMSurfaceUse(const void *value, void *ctx) {
     return (id<MTLParallelRenderCommandEncoder>)[[TSMtlInert alloc] initWithDevice:self.device protocols:@[@protocol(MTLParallelRenderCommandEncoder)]];
 }
 // Events: one serial GPU queue, so waits are satisfied by order; signals run at completion.
+// Values our command buffers have signalled, per event (plain MTLEvents have no readable value): VMG_TRACE_EVENT.
+static NSMapTable *VMEventValues(void) {
+    static NSMapTable *t;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ t = [NSMapTable weakToStrongObjectsMapTable]; });
+    return t;
+}
+static BOOL VMTraceEvents(void) {
+    static int on = -1;
+    if (on < 0) on = getenv("VMG_TRACE_EVENT") != NULL;
+    return on;
+}
 - (void)encodeSignalEvent:(id<MTLEvent>)event value:(uint64_t)value {
-    [self recordCommand:^{}];
     __weak id<MTLEvent> e = event;
+    // VMG_TRACE_EVENT: what matters on one serial queue is that the signaller ran before the waiter.
+    [self recordCommand:^{
+        id<MTLEvent> ev = e;
+        if (ev && VMTraceEvents()) @synchronized (VMEventValues()) { [VMEventValues() setObject:@(value) forKey:ev]; }
+    }];
     [self addCompletedHandler:^(id<MTLCommandBuffer> cb) {
         id<MTLEvent> ev = e;
         if ([(id)ev respondsToSelector:@selector(setSignaledValue:)]) [(id<MTLSharedEvent>)ev setSignaledValue:value];
     }];
 }
-- (void)encodeWaitForEvent:(id<MTLEvent>)event value:(uint64_t)value {}
+- (void)encodeWaitForEvent:(id<MTLEvent>)event value:(uint64_t)value {
+    if (!VMTraceEvents()) return;
+    __weak id<MTLEvent> e = event;
+    [self recordCommand:^{
+        id<MTLEvent> ev = e;
+        uint64_t have = 0;
+        BOOL shared = [(id)ev respondsToSelector:@selector(signaledValue)];
+        @synchronized (VMEventValues()) { have = [[VMEventValues() objectForKey:ev] unsignedLongLongValue]; }
+        if (shared) have = MAX(have, [(id<MTLSharedEvent>)ev signaledValue]);   // also signalled by the CPU / others
+        fprintf(stderr, "vmg: event wait %s %p value %llu, signalled %llu%s\n", shared ? "shared" : "plain", (__bridge void *)ev,
+                (unsigned long long)value, (unsigned long long)have, have < value ? " UNSATISFIED" : "");
+    }];
+}
 @end
 
 #pragma mark - Command queue
