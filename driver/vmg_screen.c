@@ -39,6 +39,7 @@ vmg_device *vmg_device_create(const char *which, char *error, size_t error_size)
     if (!which) which = VMG_HAVE_LLVMPIPE ? "llvmpipe" : "panfrost";
 #endif
     vmg_device *dev = calloc(1, sizeof *dev);
+    dev->copy_epoch = 1;   // new textures (copy_epoch 0) copy in at their first use, also in the first command buffer
     dev->fd = -1;
     glsl_type_singleton_init_or_ref();
     if (!strcmp(which, "panfrost")) {
