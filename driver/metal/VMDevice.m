@@ -195,6 +195,15 @@ static NSDictionary<NSString *, NSNumber *> *VMLimitOffsets(Ivar ivar, size_t *s
 #pragma mark Identity and limits
 
 - (NSString *)name { return _name; }
+// SPI: the target architecture of the backend compiler ({type, subtype, name}; AGX G13G: {0x142, 0x30000, "g13g"}).
+// _MTLDevice returns NULL, and MTLPipelineLibraryBuilder::newLibraryWithFile (CA::OGL::new_metal_context, i.e.
+// backboardd at boot) dereferences it. Zeros + our name are what Metal itself uses for devices without it: no
+// precompiled pipeline matches, everything is compiled from AIR.
+typedef struct { uint64_t type; uint32_t subtype; const char *name; } VMTargetDeviceArch;
+- (const VMTargetDeviceArch *)targetDeviceInfo {
+    static const VMTargetDeviceArch arch = { 0, 0, "viva_mali_g57" };
+    return &arch;
+}
 - (NSString *)familyName { return @"Mali"; }
 - (NSString *)productName { return _name; }
 - (NSString *)vendorName { return @"ARM"; }
