@@ -192,10 +192,14 @@ static int burst(const char *path, int n, int ms, int argc, char **argv) {
     for (IOSurfaceID sid = 1; sid < 8192 && ns < 4; sid++) {
         IOSurfaceRef sf = IOSurfaceLookup(sid);
         if (!sf) continue;
-        if (IOSurfaceGetWidth(sf) == 1125 && IOSurfaceGetHeight(sf) == 2436) surf[ns++] = sf; else CFRelease(sf);
+        // The panel's scanout surface (1080x2400, AppleCLCD copies each presented frame into it): what the screen
+        // shows. The render server's 1125x2436 pair includes the back buffer being drawn (VCTL_BURST_RS=1 for those).
+        bool rs = getenv("VCTL_BURST_RS") != NULL;
+        size_t w = IOSurfaceGetWidth(sf), h = IOSurfaceGetHeight(sf);
+        if (rs ? (w == 1125 && h == 2436) : (w == 1080 && h == 2400)) surf[ns++] = sf; else CFRelease(sf);
     }
     if (!ns) { fprintf(stderr, "vctl: no framebuffer surface\n"); return 1; }
-    enum { DW = 375, DH = 812 };
+    enum { DW = 360, DH = 800 };   // 1:3 of 1080x2400 (of 1125x2436: the top left 1080x2400)
     uint8_t **frames = calloc(n, sizeof *frames);
     double *when = calloc(n, sizeof *when);
     uint32_t seen[4] = {0};
@@ -210,8 +214,8 @@ static int burst(const char *path, int n, int ms, int argc, char **argv) {
             const uint8_t *src = IOSurfaceGetBaseAddress(surf[k]);
             size_t bpr = IOSurfaceGetBytesPerRow(surf[k]);
             uint32_t seed = 2166136261u;
-            for (int y = 0; y < 2436; y += 29)
-                for (int x = 0; x < 1125; x += 17) seed = (seed ^ *(const uint32_t *)(src + y * bpr + x * 4)) * 16777619u;
+            for (int y = 0; y < (int)IOSurfaceGetHeight(surf[k]); y += 29)
+                for (int x = 0; x < (int)IOSurfaceGetWidth(surf[k]); x += 17) seed = (seed ^ *(const uint32_t *)(src + y * bpr + x * 4)) * 16777619u;
             if (seed == seen[k]) { IOSurfaceUnlock(surf[k], kIOSurfaceLockReadOnly, NULL); continue; }
             seen[k] = seed;
             uint8_t *dst = frames[got] = malloc(DW * DH * 4);
