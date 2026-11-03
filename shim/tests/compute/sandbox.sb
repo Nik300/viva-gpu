@@ -1,0 +1,8 @@
+;; Compute C0 probe: an App Sandbox-like profile (deny default + system.sb + system-graphics, as in application.sb).
+;; sed "s#@PROBE@#$PWD/build/clprobe#; s#@DIR@#$PWD/build#" tests/compute/sandbox.sb > /tmp/x.sb && sandbox-exec -f /tmp/x.sb build/clprobe
+(version 1)
+(deny default)
+(import "system.sb")
+(system-graphics)
+(allow process-exec (literal "@PROBE@"))
+(allow file-read* (subpath "@DIR@"))

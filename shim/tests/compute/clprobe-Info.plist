@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Embedded in build/clprobe-hardened: App Sandbox needs a bundle identifier (libsecinit traps without one). -->
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>com.terascale.clprobe</string>
+	<key>CFBundleName</key>
+	<string>clprobe</string>
+</dict>
+</plist>

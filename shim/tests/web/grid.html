@@ -1,0 +1,19 @@
+<!doctype html>
+<!-- Numbered grid: every 100x100 cell shows its row,col and a distinct colour, so a misplaced
+     compositor tile tells where its content came from (docs/FINDINGS-RENDERING.md). -->
+<html><head><meta charset="utf-8"><title>grid</title>
+<style>
+body { margin: 0; font: bold 22px Helvetica, sans-serif; }
+.g { display: grid; grid-template-columns: repeat(14, 100px); }
+.c { width: 100px; height: 100px; box-sizing: border-box; border: 1px solid #0003; display: flex; align-items: center; justify-content: center; }
+</style></head><body><div class="g" id="g"></div>
+<script>
+const g = document.getElementById('g');
+for (let r = 0; r < 60; r++) for (let c = 0; c < 14; c++) {
+  const d = document.createElement('div');
+  d.className = 'c';
+  d.style.background = `hsl(${(r * 37 + c * 11) % 360} 70% ${r % 2 ? 75 : 60}%)`;
+  d.textContent = r + ',' + c;
+  g.appendChild(d);
+}
+</script></body></html>

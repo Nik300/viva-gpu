@@ -1,0 +1,13 @@
+shim/build/
+shim/tools/*
+!shim/tools/*.m
+!shim/tools/*.sh
+!shim/tools/*.py
+!shim/tools/*.pl
+!shim/tools/*.swift
+mesa/src/
+mesa/build-*/
+mesa/out/
+.venv/
+*.dSYM/
+.DS_Store

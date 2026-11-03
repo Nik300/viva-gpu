@@ -1,0 +1,22 @@
+<!doctype html>
+<title>bf2</title>
+<style>
+body { margin: 0; font: 16px sans-serif; background: linear-gradient(90deg, #c33, #3c3, #33c); }
+.bg { position: absolute; inset: 0; display: grid; grid-template-columns: repeat(8, 1fr); }
+.bg span { font: bold 40px sans-serif; color: #fff; }
+.grid { position: relative; display: grid; grid-template-columns: repeat(3, 420px); gap: 40px; padding: 30px; }
+.c { height: 150px; border-radius: 28px; padding: 20px; background: rgba(255,255,255,.92); }
+.c b { display: block; font-size: 22px; }
+.bf { backdrop-filter: blur(16px); }
+.sh { box-shadow: rgba(25,65,66,.35) 0 18px 50px; }
+.sh4 { box-shadow: rgba(0,0,0,.6) 0 0 0 4px; }
+.wc { will-change: transform; }
+.big { grid-column: span 2; height: 330px; }
+.ol { outline: 30px solid rgba(255,255,0,.5); }
+.mq { position: relative; margin: 0 30px; height: 60px; overflow: hidden; background: #355; }
+.mq div { position: absolute; white-space: nowrap; font: bold 40px sans-serif; color: #fff; animation: m 6s linear infinite; }
+@keyframes m { from { transform: translateX(0); } to { transform: translateX(-50%); } }
+</style>
+<div class="bg"><span>A</span><span>B</span><span>C</span><span>D</span><span>E</span><span>F</span><span>G</span><span>H</span><span>I</span><span>J</span><span>K</span><span>L</span><span>M</span><span>N</span><span>O</span><span>P</span><span>Q</span><span>R</span><span>S</span><span>T</span><span>U</span><span>V</span><span>W</span><span>X</span><span>Y</span><span>Z</span><span>1</span><span>2</span><span>3</span><span>4</span><span>5</span><span>6</span></div>
+<div class="mq"><div>MARQUEE 1 2 3 4 5 6 7 8 9 MARQUEE 1 2 3 4 5 6 7 8 9 MARQUEE 1 2 3 4 5 6 7 8 9 MARQUEE 1 2 3 4 5 6 7 8 9 MARQUEE 1 2 3 4 5 6 7 8 9 MARQUEE 1 2 3 4 5 6 7 8 9 </div></div>
+<div class="grid"><div class="c bf big"><b>4 blur, big</b>840x330, no shadow</div></div>
