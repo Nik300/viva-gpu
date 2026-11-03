@@ -148,3 +148,15 @@ Dettagli in `fork/VIVA.md`. Boot con `vivagpu=2`.
 | K7 | Comandi del link: `push`, `pull`, `run`. Il demone `vivad` (`fork/tools/vivad`, compilato dalla CI) esegue i programmi e rimanda lo stdout. All'avvio esegue `/private/var/root/viva-tests/autorun/*`. Installazione senza riflashare: si fa `pull` di launchd.plist, poi `tools/viva-launchd-add.py`, poi `push` di plist e vivad, poi reboot. | `viva-link.py run test_vgpu` |
 | K8 | Contatore per processo e limiti `vivagpumem` / `vivagpumemtotal` (MiB). Oltre il limite: `kIOReturnNoMemory`. | `gpu status` |
 | K9 | Scanout diretto di una sola superficie a schermo intero, BGRA e contigua: cambiano solo ADDR e PITCH del layer OVL di LK. Spento di default (`vivascanout=1` o `disp scanout on`). Non è ancora sincronizzato al vblank. Prima va lanciato `disp regs` (solo lettura). | `disp`, `disp regs` |
+
+## Risposte del kernel (2026-11-03, patch 0114-0115 di `fork/`, da provare sul telefono)
+Analisi completa e verifiche in `docs/ANALISI-KERNEL-RENDERING.md`.
+
+| Richiesta | Stato | Come verificarla |
+|---|---|---|
+| K0 | In `submit` ogni job aspetta il fence dell'ultimo job su ognuno dei suoi BO (tutti trattati come scritti). Per le IOSurface vale in qualunque connessione: il fence è anche sulla superficie. `WAIT_BO` su una IOSurface attende anche i job degli altri processi. | `gpu status`: `implicit dependencies` |
+| K0b.1 | Nessuna manutenzione nell'IRQ di completamento. I BO mantenuti dalla CPU vanno in una lista e vengono invalidati una volta sola quando userspace attende (`WAIT_BO`, attesa su syncobj). I BO eseguibili (shader) non vengono mai invalidati. `vivagpulazy=0` = come prima. | `gpu status`: `lazy invalidation` |
+| K0b.2 | I BO senza `VGPU_BO_WB_MMAP` sono **write-combined**, come Panfrost su Linux con GPU non coerente (Mesa con DRM 1.5 se lo aspetta). Niente da pulire al submit né da invalidare dopo. Dipende dalla 0112: se all'avvio va in panic in `pmap`, usare `vivagpuwc=0`. | `gpu status`: submit maintenance ~0 µs |
+| K0b.3 | Non fatto: con il tiler heap condiviso le dipendenze alternano slot 1 e slot 0, quindi `JS_HEAD_NEXT` non accorcia nulla. Al suo posto: flush reduction e DVFS (0115). | — |
+| K0c | `viva_gpu_surface_idle` (fence dell'ultimo job sulla superficie, in qualunque connessione). `AppleCLCD` mette in coda gli swap in ordine e a ogni tick mostra il più recente con le superfici finite. Se nessuno è pronto riprova al tick dopo, senza attese nel timer. Se durante la copia arriva un job nuovo, rifà la copia. Dopo 12 tick (`sweetfb_gpuwait`) mostra comunque l'ultimo frame; 0 disattiva l'attesa. Anche `IOSurfaceLock` aspetta la GPU (AvoidSync → `kIOReturnCannotLock`). | `vctl burst`; `disp`: `GPU sync (K0c)` |
+| Nota `sweetfb_hz` | Default ora adattivo: copie entro il 25% di una CPU (`sweetfb_duty`), fino a 60 Hz. `sweetfb_hz=N` lo fissa. | `disp`: copies, avg µs |
