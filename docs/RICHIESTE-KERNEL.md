@@ -208,3 +208,27 @@ Dettagli in `fork/VIVA.md`.
 |---|---|---|
 | K0d | (1) fatto: doppio buffer del pannello. La copia va nel buffer che il pannello non sta leggendo: quello di LK (0x7bc10000) o il successivo nella memoria di LK (0x7c606000, quello che hai visto su OVL0 L1; prima di usarlo il kernel controlla che nessun layer abilitato lo legga). Il layer di LK passa all'altro buffer al frame end successivo, cioè quando sale il bit 1 di INTSTA dell'OVL (FME_CPL), letto in polling e calibrato al primo swap. Il timer vsync è agganciato in fase al pannello: scatta 1 ms (`sweetfb_lead`) prima del frame end previsto. Anche lo scanout (`vivascanout=1`) cambia indirizzo solo al frame end. Restano sul buffer a schermo come prima: frame che non coprono tutto il pannello, la surface di default e la console del kernel non silenziata. `sweetfb_flip=0` o `disp flip off` = comportamento vecchio. | `disp`: riga `double buffer (K0d) on`, periodo del frame (~16667 us), switch / missed / unsure. Se dice `off: no frame-end status from the OVL`, manda l'output di `disp regs` (ora include inten/intsta/addcon_dbg). Poi `vctl burst` come prima. |
 | K0e | Kick dal filtro dell'IRQ dei job (contesto di interrupt primario). Dopo ogni kick, la testa della coda di ogni slot che aspetta solo job già sull'hardware viene "armata" (AS legato, JS_CONFIG pronto). Il filtro la avvia appena quei job segnalano done, senza aspettare che il thread del workloop si svegli. Vale sia tra slot (fragment dopo il suo tiler, vertex dopo il fragment per l'heap) sia sullo stesso slot. `JS_*_NEXT` non usato: il filtro riavvia lo slot in pochi µs, senza l'ambiguità "due job, un solo bit done". `vivagpufastkick=0` o `gpu fastkick off` = percorso vecchio. | `gpu lat` (anche in `gpu status`). Dopo `gpu lat reset` e un run di `ca`: % di tempo GPU occupata / job in coda ma nessuno in esecuzione / niente in coda, tempo medio per job sull'hardware, latenza di avvio (pronto al submit / dopo una dipendenza via workloop / via filtro), latenza IRQ → handler. Se "niente in coda" domina, il tempo è in userspace (submit/attese), non nel kick. |
+
+## Risposte del kernel (2026-11-03, patch 0118 di `fork/`, da provare sul telefono)
+Analisi in `docs/ANALISI-KERNEL-RENDERING.md`, sezione "Seconda analisi". Dettagli in `fork/VIVA.md`.
+
+| Richiesta | Stato | Come verificarla |
+|---|---|---|
+| K0g (causa) | Trovata nel codice: ogni completamento di job, ogni SUBMIT con `out_sync` e ogni cambio di syncobj svegliava **tutti** i thread in attesa di tutti i processi, che riprendevano il gate uno per uno; le SUBMIT aspettavano in coda dietro di loro. Ora chi aspetta un fence dorme su quel fence; l'evento comune resta solo per attese ANY su più syncobj o su un syncobj senza fence. Semantica invariata. | `cmd gpu calls reset`, run di `ca`, `cmd gpu calls`: riga `waits` (risvegli a vuoto, mirati, generici) |
+| K0g.1 | WAIT_BO con timeout scaduto: dentro il gate fa solo il controllo del fence (l'invalidazione pigra riguarda solo i BO `WB_MMAP` in lista, non i WC). Il costo che resta è il messaggio Mach + il gate, che ora non è più conteso dai risvegli: con la trap (sotto) resta ~solo la syscall. | `gpu calls`: `wait_bo` avg e gate avg |
+| K0g.2 | `gpu calls` per selettore: chiamate (di cui via trap), tempo medio/massimo nel kernel (da `externalMethod` / trap all'uscita), attesa media/massima del gate. Il vostro tempo per chiamata meno questo = costo del messaggio Mach. | `cmd gpu calls` |
+| K0g.3 | Fatto: **trap**. `IOConnectTrap2(conn, 0 /* VGPU_TRAP_CALL */, selector, (uintptr_t)&args)` fa esattamente quello che fa `IOConnectCallStructMethod(conn, selector, &args, size, &args, &size)` (copyin della struttura dalla vostra memoria, stessa dispatch, copyout dei campi in uscita), senza messaggio Mach. Vale per ogni selettore; ha senso per SUBMIT, WAIT_BO, SYNCOBJ_WAIT. Disponibile se `GET_VERSION` dà `minor >= 1` (il kernel di 0118 dà 1; il vostro controllo è solo su `major`, quindi compatibile). Errori: lo stesso `kIOReturn*` del metodo. | In `vgpu_iokit.c`: `iokit_ioctl` usa la trap se `minor >= 1`; poi `gpu calls` mostra la colonna trap = chiamate |
+| Display (nuovo) | Presentazione anticipata: uno swap finito viene copiato appena arriva o appena termina il job GPU sulla sua IOSurface, non al tick vsync; il cambio di buffer avviene al frame end successivo. Un frame di latenza in meno (non più fps). `sweetfb_early=0` / `disp early off` = come 0117. | `cmd disp`: riga `early present` |
+| CPU (nuovo) | `gpu clocks` legge le PLL di A55/A76/CCI/MFG (solo lettura). In questo port le frequenze CPU restano quelle di LK: se sono basse, sono il prossimo limite (vedi analisi). | `cmd gpu clocks` |
+
+Nota per `vgpu_iokit.c` (proposta, non l'ho toccato):
+```c
+// dopo GET_VERSION: c->trap = v.minor >= 1;
+static int iokit_ioctl(void *conn, enum vgpu_selector sel, void *arg, size_t size)
+{
+    IOKitConn *c = conn;
+    if (c->trap) return errno_for(IOConnectTrap2(c->conn, 0 /* VGPU_TRAP_CALL */, (uintptr_t)sel, (uintptr_t)arg));
+    size_t out = size;
+    return errno_for(IOConnectCallStructMethod(c->conn, sel, arg, size, arg, &out));
+}
+```

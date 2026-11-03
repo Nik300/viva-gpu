@@ -95,3 +95,86 @@ delicata (fault del primo con il secondo già partito). Non l'ho fatto. Per CA l
 | K0 | `cmd gpu status` | `implicit dependencies` > 0; niente MMU fault in slot 0 |
 | DVFS | `cmd gpu dvfs` durante l'animazione e dopo | sale fino a 950 sotto carico, torna a 300 da fermo |
 | Fallback | boot-arg `vivagpuwc=0`, `vivagpulazy=0`, `vivagpuflushid=0`, `vivagpudvfs=0`, `sweetfb_gpuwait=0`, `sweetfb_hz=10` | ognuno riporta al comportamento di prima |
+
+---
+
+# Seconda analisi (2026-11-03 sera, dopo 0117): perché le animazioni sono ancora lente, solo kernel
+
+Dati di partenza (misure userspace, `FINDINGS-2026-11-03.md`): scena Settings di `ca` 18 ms/frame, GPU occupata
+~1%, job sull'hardware ~24 µs, latenza di avvio 13-47 µs. La GPU e il kick non sono più il limite. Il tempo è nelle
+ioctl: **SUBMIT ~60 µs l'una** (~100 per frame) e **WAIT_BO** (Panfrost la chiama con timeout 0 a ogni riuso di un BO).
+
+## Cosa costa una ioctl oggi (lettura del codice di 0117)
+
+| Pezzo | Stima | Note |
+|---|---|---|
+| Messaggio Mach (`IOConnectCallStructMethod`: MIG, lookup delle porte, copia richiesta + risposta) | ~8-15 µs su A55 (stima) | uguale per ogni selettore |
+| Gate del driver: attesa del lock | da 0 a decine di µs | **qui c'è il problema, sotto** |
+| Lavoro dentro il gate di SUBMIT (2 OSArray, fence, job, per BO: retain, dipendenza implicita) | ~5-10 µs (stima) | lineare nei BO del batch |
+| WAIT_BO con timeout 0, dentro il gate | ~1 µs | |
+
+**Il problema principale: un solo evento di attesa per tutto il sistema.** Ogni thread che aspetta la GPU
+(WAIT_BO con timeout, attese sui syncobj, `IOSurfaceLock`, in qualunque processo) dormiva su `fFenceEvent`. Ogni
+completamento di job, ogni SUBMIT con `out_sync` (cioè tutte quelle di Panfrost) e ogni cambio di syncobj facevano
+`commandWakeup(&fFenceEvent)`: **tutti** i thread in attesa si svegliavano, riprendevano il gate uno alla volta,
+trovavano che il loro fence non era cambiato e tornavano a dormire. Con ~100 job e ~100 submit per frame, e diversi
+thread in attesa (backboardd, SpringBoard, l'app, il test), sono migliaia di risvegli inutili al secondo, tutti
+serializzati sullo stesso gate: la SUBMIT del thread che lavora davvero aspetta in coda dietro di loro. È coerente
+con quello che misuravate: thread fermi nel kernel, SUBMIT lenta anche se dentro fa poco.
+
+## Fatto in 0118
+
+1. **Risvegli mirati.** Chi aspetta un fence preciso (WAIT_BO, syncobj wait con un handle o WAIT_ALL, IOSurfaceLock,
+   K0c) dorme su quel fence. Il completamento di un job sveglia solo chi aspetta quel job. L'evento comune resta solo
+   per le attese ANY su più syncobj e per un syncobj ancora senza fence (WAIT_FOR_SUBMIT), e viene svegliato solo se
+   qualcuno ci dorme. Quando il fence di un syncobj viene sostituito (submit, reset, signal, transfer, destroy), chi
+   dormiva sul vecchio viene svegliato e ricontrolla, come prima: la semantica non cambia.
+2. **Percorso veloce senza messaggio Mach** (K0g.3): `IOConnectTrap2(conn, VGPU_TRAP_CALL /*0*/, selector, &args)`
+   fa la stessa cosa del metodo struct (il kernel legge la struttura con copyin e la riscrive con copyout), per
+   qualunque selettore. UAPI minor = 1. **Da adottare in userspace** (vedi RICHIESTE-KERNEL, risposta K0g).
+3. **Misure** (K0g.2): `gpu calls` per selettore: numero di chiamate (quante via trap), tempo medio/massimo nel
+   kernel, attesa media/massima del gate; numero di attese, risvegli "a vuoto", risvegli mirati e generici.
+   `gpu calls reset` azzera. Il tempo misurato da userspace meno quello del kernel = costo del messaggio Mach.
+4. **Presentazione anticipata del frame** (`sweetfb_early=1`, `disp early on|off`): finora un frame finito veniva
+   copiato solo al tick vsync, 1 ms prima del frame end; la copia (~3 ms) finiva dopo, quindi il cambio di buffer
+   slittava al frame end successivo: ~2 frame dal commit allo schermo. Ora la copia parte appena arriva lo swap o
+   appena finisce un job GPU che usa IOSurface (se il frame è pronto e il budget `sweetfb_duty` lo permette) e il
+   cambio avviene al primo frame end utile: **un frame di latenza in meno**. Non aumenta gli fps, migliora la
+   risposta al tocco.
+5. **`gpu clocks`** (solo lettura): frequenza di ARMPLL_LL (A55), ARMPLL_BL (A76), CCIPLL e MFGPLL. Su Android le
+   frequenze CPU le gestisce il firmware MCUPM con il DVFS; in questo port nessuno le tocca, restano dove le ha
+   lasciate LK. Ora che il limite è la CPU, è il primo numero da guardare (vedi sotto).
+
+## Cosa non si può ottimizzare qui (o non conviene), e perché
+
+- **La GPU in sé**: occupata ~1%. DVFS, flush reduction e fast kick sono già fatti; alzare la frequenza non cambia
+  nulla finché il frame è limitato dalla CPU.
+- **Il numero di ioctl per frame** (~200): lo decide Panfrost (2 submit per pass, WAIT_BO per riuso di BO). Il kernel
+  può solo renderle più leggere. Ridurle (batch più grandi, cache dei BO senza WAIT_BO) è lato userspace.
+- **Il costo di un messaggio Mach**: è di XNU. La trap lo evita, ma serve che userspace la usi.
+- **Lavoro per BO in SUBMIT**: con i BO write-combined (0114) non c'è più manutenzione cache; restano retain e
+  dipendenze implicite, pochi µs. Si potrebbe togliere l'OSArray per job, ma il guadagno è sotto la misura: va fatto
+  solo se `gpu calls` mostra SUBMIT ancora alta dopo 0118.
+- **Scheduler AMP**: XNU qui vede un solo cluster omogeneo (8 core uguali): i thread caldi (backboardd, render
+  server) finiscono su un A55 tre volte su quattro, anche se ci sono due A76 liberi. Il supporto P/E di XNU
+  (`__ARM_AMP__`) è una modifica grande e fuori dal driver GPU.
+- **Frequenza CPU**: se `gpu clocks` mostra le CPU basse (LK di solito le lascia a un'OPP intermedia), il guadagno
+  potenziale è grande ma richiede un driver DVFS CPU (MCUPM/CSRAM di MediaTek o ARMPLL diretto + tensioni VPROC del
+  PMIC): progetto a sé, con rischio sul ferro. Prima misurare.
+- **Copia del display** (~3,2 ms per frame su un core): resta finché non si prova lo scanout diretto (`vivascanout=1`
+  all'avvio, 0109, ora con cambio al frame end da 0117). Non è il collo di bottiglia degli fps (una copia per frame,
+  entro il 25% di un core) ma è CPU sottratta al resto.
+- **Coalescenza dei timer** di XNU sul tick vsync: può ritardarlo fino a ~1 ms. Con il doppio buffer agganciato in
+  fase non si accumula; effetto minore.
+
+## Come verificarlo
+
+| Cosa | Comando | Atteso |
+|---|---|---|
+| Risvegli mirati | `cmd gpu calls reset`, `ca` 61 frame, `cmd gpu calls` | "woke with nothing done" basso rispetto alle attese; generic wakeups ~0 |
+| SUBMIT / WAIT_BO | stesso | gate avg pochi µs; submit avg kernel di gran lunga sotto i 60 µs misurati prima |
+| Trap | dopo l'adozione in libdrm-xnu | colonna "trap" = numero chiamate; tempo userspace per chiamata in calo |
+| Frame | `VMG_CA_TIME=1 VMG_CA_SETTINGS=1 ca 61` | sotto i 18 ms di 0117 |
+| Early present | `cmd disp` | "frames shown before their tick" > 0 durante le animazioni |
+| CPU | `cmd gpu clocks` | frequenze di A55/A76 (da confrontare col massimo ~2 GHz) |
+| Fallback | `disp early off`; boot-arg `sweetfb_early=0` | comportamento di 0117 |
