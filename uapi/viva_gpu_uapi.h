@@ -78,7 +78,8 @@ struct vgpu_get_param { uint32_t param, pad; uint64_t value; };
 // BO flags (DRM_PANFROST_BO_*).
 #define VGPU_BO_NOEXEC   (1u << 0)
 #define VGPU_BO_HEAP     (1u << 1)   // grows on GPU fault (tiler heap)
-#define VGPU_BO_WB_MMAP  (1u << 2)   // CPU mapping write-back cached; userspace keeps it coherent with SYNC_BO
+#define VGPU_BO_WB_MMAP  (1u << 2)   // CPU mapping write-back cached (patch 0100 maps every BO cacheable and
+                                     // cleans/invalidates the CPU caches around each job itself)
 struct vgpu_create_bo { uint32_t size, flags, handle, pad; uint64_t offset; };   // out: handle, offset = GPU VA (VGPU_VA_*)
 struct vgpu_mmap_bo { uint32_t handle, flags; uint64_t offset; };                // out: offset = memoryType token
 struct vgpu_get_bo_offset { uint32_t handle, pad; uint64_t offset; };
