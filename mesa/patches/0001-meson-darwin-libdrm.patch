@@ -1,0 +1,38 @@
+Darwin: let panfrost use a (stub) libdrm via pkg-config without enabling the generic HAVE_LIBDRM / sync_file paths.
+diff --git a/meson.build b/meson.build
+index 37f2fd4..9fe4893 100644
+--- a/meson.build
++++ b/meson.build
+@@ -1930,12 +1930,18 @@ if system_has_kms_drm
+       'amdgpu' : _libdrm_checks[1][1] ? 'enabled' : 'disabled',
+     },
+   )
++elif host_machine.system() == 'darwin' and with_gallium_panfrost
++  # Darwin (XNU) has no DRM, but panfrost is built against a stub libdrm
++  # (libdrm-xnu) that forwards to an IOKit kernel interface.
++  dep_libdrm = dependency('libdrm', version : '>=' + _drm_ver, required : true)
+ else
+   # We should prevent libdrm from being available when the target doesn't have it to avoid transitive
+   # dependencies (such as vk-runtime) linking to it
+   dep_libdrm = null_dep
+ endif
+-if dep_libdrm.found()
++# On Darwin libdrm is only a direct dependency of panfrost: do not enable the
++# generic HAVE_LIBDRM paths (dma-buf, sync_file, ppoll) in util/llvmpipe.
++if dep_libdrm.found() and host_machine.system() != 'darwin'
+   pre_args += '-DHAVE_LIBDRM'
+   if with_dri_platform == 'drm' and with_dri
+     with_gallium_drisw_kms = true
+diff --git a/src/util/meson.build b/src/util/meson.build
+index b11f0c4..ed9adb8 100644
+--- a/src/util/meson.build
++++ b/src/util/meson.build
+@@ -314,7 +314,7 @@ deps_for_libmesa_util = [
+   idep_mesautilformat,
+ ]
+ 
+-if dep_libdrm.found()
++if dep_libdrm.found() and host_machine.system() != 'darwin'
+   files_mesa_util += files('u_sync_provider.c', 'u_sync_provider.h')
+   deps_for_libmesa_util += dep_libdrm
+ endif

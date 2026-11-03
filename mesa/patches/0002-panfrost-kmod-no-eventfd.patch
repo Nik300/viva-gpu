@@ -1,0 +1,33 @@
+Darwin: XNU lacks eventfd/timerfd/sched_setscheduler; stub them so panfrost kmod builds (perf-counter sessions fail with ENOSYS).
+diff --git a/src/panfrost/lib/kmod/panfrost_kmod.c b/src/panfrost/lib/kmod/panfrost_kmod.c
+index 2a33283..c6bae42 100644
+--- a/src/panfrost/lib/kmod/panfrost_kmod.c
++++ b/src/panfrost/lib/kmod/panfrost_kmod.c
+@@ -9,8 +9,27 @@
+ #include <pthread.h>
+ #include <string.h>
+ #include <xf86drm.h>
++#ifdef __APPLE__
++/* XNU has no eventfd/timerfd: perf-counter sessions are unsupported there,
++ * these stubs make panfrost_kmod_perf_create() fail cleanly. */
++typedef uint64_t eventfd_t;
++struct itimerspec {
++   struct timespec it_interval;
++   struct timespec it_value;
++};
++#define TFD_CLOEXEC 0
++static inline int eventfd(unsigned v, int f) { errno = ENOSYS; return -1; }
++static inline int eventfd_read(int fd, eventfd_t *v) { errno = ENOSYS; return -1; }
++static inline int eventfd_write(int fd, eventfd_t v) { errno = ENOSYS; return -1; }
++static inline int timerfd_create(int c, int f) { errno = ENOSYS; return -1; }
++static inline int timerfd_settime(int fd, int f, const struct itimerspec *n,
++                                  struct itimerspec *o) { errno = ENOSYS; return -1; }
++/* No sched_setscheduler() either; the perf thread is best-effort RT anyway. */
++#define sched_setscheduler(pid, policy, param) (errno = ENOSYS, -1)
++#else
+ #include <sys/eventfd.h>
+ #include <sys/timerfd.h>
++#endif
+ 
+ #include "util/hash_table.h"
+ #include "util/macros.h"

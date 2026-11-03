@@ -1,0 +1,10 @@
+# libdrm-xnu: stub libdrm for Darwin/XNU (headers from libdrm 2.4.134 + Linux uapi)
+prefix=${pcfiledir}/..
+includedir=${prefix}/include
+libdir=${prefix}/out
+
+Name: libdrm
+Description: Userspace interface to kernel DRM services (XNU stub)
+Version: 2.4.134
+Libs: -L${libdir} -ldrm-xnu
+Cflags: -I${includedir} -I${includedir}/libdrm
