@@ -5,7 +5,7 @@
 #pragma once
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
-#import <IOSurface/IOSurface.h>
+#import <IOSurface/IOSurfaceRef.h>
 #include "../vmg.h"
 
 // macOS-only Metal pixel formats (marked unavailable in the iOS SDK), by value.
