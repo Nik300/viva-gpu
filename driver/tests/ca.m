@@ -96,6 +96,25 @@ static CALayer *scene(void) {
     }
     [root addSublayer:blurred];
 
+    // An IOSurface as layer contents in luminance+alpha ('LA08', 2 bytes per pixel, rows of 480 bytes: not 64-aligned),
+    // as backboardd receives some of SpringBoard's layers. VMG_CA_SIMPLE=1 leaves it out.
+    if (!getenv("VMG_CA_SIMPLE")) {
+        NSDictionary *props = @{ (id)kIOSurfaceWidth: @230, (id)kIOSurfaceHeight: @186, (id)kIOSurfaceBytesPerElement: @2,
+                                 (id)kIOSurfaceBytesPerRow: @480, (id)kIOSurfacePixelFormat: @((uint32_t)'LA08') };
+        IOSurfaceRef la = IOSurfaceCreate((__bridge CFDictionaryRef)props);
+        if (la) {
+            IOSurfaceLock(la, 0, NULL);
+            uint8_t *m = IOSurfaceGetBaseAddress(la);
+            for (int y = 0; y < 186; y++)
+                for (int x = 0; x < 230; x++) { m[y * 480 + x * 2] = (uint8_t)(x + y); m[y * 480 + x * 2 + 1] = 200; }
+            IOSurfaceUnlock(la, 0, NULL);
+            CALayer *l = [CALayer layer];
+            l.frame = CGRectMake(250, 380, 100, 80);
+            l.contents = (__bridge id)la;
+            [root addSublayer:l];
+        }
+    }
+
     // SpringBoard's materials (dock, folders, control center): a backdrop layer blurring what is behind it, with a
     // saturation colour matrix and vibrancy on top. VMG_CA_SIMPLE=1 leaves them out.
     Class backdrop = NSClassFromString(@"CABackdropLayer");
