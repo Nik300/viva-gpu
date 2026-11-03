@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <math.h>
 
 id<MTLDevice> TSMtlCreateDevice(void);
 
@@ -235,6 +236,35 @@ int main(void) { @autoreleasepool {
             [c1 getBytes:m bytesPerRow:32 fromRegion:MTLRegionMake2D(0, 0, 8, 8) mipmapLevel:0];
             printf("  c1 after the pass: x1 %u, x6 %u\n", m[(2 * 8 + 1) * 4], m[(2 * 8 + 6) * 4]);
         }
+    }
+
+    printf("compressed textures\n");
+    // ASTC 4x4 (SpringBoard's launch snapshots are ASTC): void-extent blocks = one constant colour (UNORM16 RGBA).
+    for (int fmt = 0; fmt < 2; fmt++) {
+        MTLPixelFormat pf = fmt ? MTLPixelFormatASTC_4x4_sRGB : MTLPixelFormatASTC_4x4_LDR;
+        MTLTextureDescriptor *ad = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:pf width:8 height:8 mipmapped:NO];
+        ad.usage = MTLTextureUsageShaderRead;
+        id<MTLTexture> at = [dev newTextureWithDescriptor:ad];
+        if (!at) { CHECK(0, "ASTC 4x4 %s texture creation", fmt ? "sRGB" : "LDR"); continue; }
+        uint8_t blocks[4][16];
+        for (int i = 0; i < 4; i++) {
+            const uint8_t ve[8] = { 0xfc, 0xfd, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+            memcpy(blocks[i], ve, 8);
+            uint16_t c[4] = { 0xffff, 0x8000, 0x4000, 0xffff };   // 1, 0.5, 0.25, 1
+            memcpy(blocks[i] + 8, c, 8);
+        }
+        [at replaceRegion:MTLRegionMake2D(0, 0, 8, 8) mipmapLevel:0 withBytes:blocks bytesPerRow:2 * 16];
+        id<MTLBuffer> ob = [dev newBufferWithLength:16 * 16 options:MTLResourceStorageModeShared];
+        run(^(id<MTLComputeCommandEncoder> e) {
+            [e setComputePipelineState:kpipe(@"read_tex")];
+            [e setTexture:at atIndex:0];
+            [e setBuffer:ob offset:0 atIndex:0];
+            [e dispatchThreads:MTLSizeMake(4, 4, 1) threadsPerThreadgroup:MTLSizeMake(4, 4, 1)];
+        });
+        float *ar = ob.contents;
+        CHECK(fabsf(ar[(2 * 4 + 3) * 4] - 1) < 0.02f && fabsf(ar[(2 * 4 + 3) * 4 + 1] - (fmt ? 0.214f : 0.5f)) < 0.03f,
+              "ASTC 4x4 %s void-extent block read (%g %g %g %g)", fmt ? "sRGB" : "LDR", ar[(2 * 4 + 3) * 4], ar[(2 * 4 + 3) * 4 + 1],
+              ar[(2 * 4 + 3) * 4 + 2], ar[(2 * 4 + 3) * 4 + 3]);
     }
 
     printf("%d/%d checks passed\n", checks - failures, checks);
