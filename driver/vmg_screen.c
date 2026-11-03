@@ -790,6 +790,9 @@ vmg_render_pipeline *vmg_render_pipeline_create(vmg_device *dev, const vmg_rende
     }
     struct pipe_blend_state bs = {0};
     bs.independent_blend_enable = 1;
+    // Panfrost sizes its blend descriptors by max_rt (llvmpipe ignores it): left at 0, writes to [[color(1+)]] were
+    // dropped (CoreAnimation's clip mask in colour 1: black outside the rounded corners on iOS).
+    for (unsigned i = 0; i < VMG_MAX_COLOR; i++) if (d->color[i].format) bs.max_rt = i;
     bs.alpha_to_coverage = d->alpha_to_coverage;
     bs.alpha_to_one = d->alpha_to_one;
     for (unsigned i = 0; i < VMG_MAX_COLOR; i++) {
