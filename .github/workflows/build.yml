@@ -26,18 +26,33 @@ jobs:
     timeout-minutes: 120
     env:
       JOBS: 3
+      # ccache recognizes objects by the content of their sources, not by file dates: a fresh Mesa clone or a cache
+      # restored with other timestamps still reuses everything that did not change.
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 2G
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_NOHASHDIR: "true"
+      VIVA_CCACHE: ccache
       NOCACHE: ${{ inputs.clean && 'yes' || '' }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Tools
         run: |
-          brew install llvm spirv-llvm-translator spirv-tools zstd pkgconf || true
+          brew install llvm spirv-llvm-translator spirv-tools zstd pkgconf ccache || true
+          ccache --version | head -1
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-path
           "$(brew --prefix llvm)/bin/llvm-config" --version
 
       # ---- restore the sections of the previous run (newest cache whose key starts with the prefix)
+      - name: Restore ccache
+        if: env.NOCACHE == ''
+        uses: actions/cache/restore@v4
+        with:
+          path: .ccache
+          key: ccache-${{ github.run_id }}
+          restore-keys: ccache-
       - name: Restore venv + Mesa source
         if: env.NOCACHE == ''
         uses: actions/cache/restore@v4
@@ -107,6 +122,14 @@ jobs:
         run: bash ios/build.sh tests
 
       # ---- save every section, also when a later step failed
+      - name: Save ccache
+        if: always()
+        run: ccache -s | head -20 || true
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: .ccache
+          key: ccache-${{ github.run_id }}
       - name: Save venv + Mesa source
         if: always()
         uses: actions/cache/save@v4

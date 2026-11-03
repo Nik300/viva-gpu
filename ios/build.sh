@@ -15,14 +15,24 @@ if [ -z "$SDK" ]; then
   echo "ios/build.sh: no iOS SDK (install Xcode and run xcode-select -s /Applications/Xcode.app)" >&2
   exit 1
 fi
-CC="xcrun --sdk iphoneos clang"
+CC="${VIVA_CCACHE:+$VIVA_CCACHE }$(xcrun --sdk iphoneos -f clang)"
 TARGET="-target arm64-apple-ios16.0 -isysroot $SDK"
 mkdir -p "$OUT"
 
 mesa() {
   # Host tools (mesa_clc, vtn_bindgen2, panfrost_compile) come from the macOS build.
   [ -x "$GPU/mesa/build-macos/src/panfrost/clc/panfrost_compile" ] || bash "$GPU/mesa/build.sh" macos-nosmoke
-  sed -e "s|@IOS_SDK@|$SDK|" -e "s|@GPU@|$GPU|" "$GPU/mesa/cross/ios-arm64.ini" > "$OUT/ios-arm64.ini"
+  sed -e "s|@IOS_SDK@|$SDK|" -e "s|@GPU@|$GPU|" "$GPU/mesa/cross/ios-arm64.ini" > "$OUT/ios-arm64.ini.new"
+  if [ -n "${VIVA_CCACHE:-}" ]; then
+    # meson does not wrap cross compilers with ccache, and ccache cannot see through xcrun: use the real compiler
+    # paths (the SDK comes from -isysroot in the flags).
+    local clang clangxx
+    clang="$(xcrun --sdk iphoneos -f clang)"; clangxx="$(xcrun --sdk iphoneos -f clang++)"
+    sed -i '' -e "s|^c = .*|c = ['$VIVA_CCACHE', '$clang']|" -e "s|^cpp = .*|cpp = ['$VIVA_CCACHE', '$clangxx']|" \
+        -e "s|^objc = .*|objc = ['$VIVA_CCACHE', '$clang']|" "$OUT/ios-arm64.ini.new"
+  fi
+  # Keep the old file (and its date) when nothing changed, so meson does not reconfigure.
+  if cmp -s "$OUT/ios-arm64.ini.new" "$OUT/ios-arm64.ini"; then rm "$OUT/ios-arm64.ini.new"; else mv "$OUT/ios-arm64.ini.new" "$OUT/ios-arm64.ini"; fi
   export PATH="$GPU/.venv/bin:$GPU/mesa/build-macos/src/compiler/clc:$GPU/mesa/build-macos/src/compiler/spirv:$GPU/mesa/build-macos/src/panfrost/clc:$PATH"
   local B="$GPU/mesa/build-ios"
   [ -f "$B/build.ninja" ] || "$GPU/.venv/bin/meson" setup "$B" "$GPU/mesa/src" --cross-file "$OUT/ios-arm64.ini" \

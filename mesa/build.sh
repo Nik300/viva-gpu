@@ -34,7 +34,7 @@ setup_venv() {
     "$VENV/bin/pip" install -q --disable-pip-version-check \
       meson ninja mako pyyaml packaging
   fi
-  export PATH="$VENV/bin:/usr/bin:/bin:/usr/sbin:/sbin:$BREW/bin"
+  export PATH="$VENV/bin:/usr/bin:/bin:/usr/sbin:/sbin:$BREW/bin"   # meson picks up ccache from $BREW/bin
 }
 
 # ------------------------------------------------------- host prerequisites
