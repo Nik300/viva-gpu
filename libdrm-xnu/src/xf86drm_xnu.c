@@ -29,7 +29,9 @@ static int ret_errno(int r) { if (r < 0) { errno = -r; return -1; } return r; }
 
 // Imported IOSurface planes that do not start on a page: the GPU offset is the plane, the CPU mapping starts at the
 // page (uapi). Panfrost expects both to address the same byte, so drmMap adds the plane's offset in the page.
-typedef struct { int fd; uint32_t handle; uint64_t token; uint32_t in_page; } BOInfo;
+// Imported surfaces also remember (surface, plane): importing one again returns the same handle, as dma-buf imports do
+// on Linux, so Panfrost sees one BO and orders the jobs that write and read it (two Metal textures over one surface).
+typedef struct { int fd; uint32_t handle; uint64_t token; uint32_t in_page; uint32_t surface, plane; } BOInfo;
 static BOInfo g_bo[1024];
 static unsigned g_bo_count;
 static pthread_mutex_t g_bo_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -38,7 +40,7 @@ static BOInfo *bo_info(int fd, uint32_t handle, bool create)
 {
     for (unsigned i = 0; i < g_bo_count; i++) if (g_bo[i].fd == fd && g_bo[i].handle == handle) return &g_bo[i];
     if (!create || g_bo_count == 1024) return NULL;
-    g_bo[g_bo_count] = (BOInfo){ fd, handle, 0, 0 };
+    g_bo[g_bo_count] = (BOInfo){ fd, handle, 0, 0, 0, 0 };
     return &g_bo[g_bo_count++];
 }
 
@@ -208,6 +210,14 @@ int drmPrimeFDToHandle(int fd, int prime_fd, uint32_t *handle)
     for (unsigned i = 0; i < 256; i++) if (g_surf[i].fd == prime_fd) sf = g_surf[i];
     pthread_mutex_unlock(&g_surf_lock);
     if (!sf.fd) { errno = EBADF; return -EBADF; }
+    pthread_mutex_lock(&g_bo_lock);
+    for (unsigned i = 0; i < g_bo_count; i++)
+        if (g_bo[i].fd == fd && g_bo[i].surface == sf.surface && g_bo[i].plane == sf.plane) {
+            *handle = g_bo[i].handle;
+            pthread_mutex_unlock(&g_bo_lock);
+            return 0;
+        }
+    pthread_mutex_unlock(&g_bo_lock);
     struct vgpu_import_iosurface im = { .surface_id = sf.surface, .plane = sf.plane };
     int r = vgpu_ioctl(fd, VGPU_SEL_IMPORT_IOSURFACE, &im);
     if (r) { errno = -r; return r; }
@@ -215,7 +225,7 @@ int drmPrimeFDToHandle(int fd, int prime_fd, uint32_t *handle)
     uint32_t pg = vgpu_ioctl(fd, VGPU_SEL_GET_VERSION, &v) == 0 && v.page_size ? v.page_size : 16384;
     pthread_mutex_lock(&g_bo_lock);
     BOInfo *b = bo_info(fd, im.handle, true);
-    if (b) b->in_page = (uint32_t)(im.offset & (pg - 1));
+    if (b) { b->in_page = (uint32_t)(im.offset & (pg - 1)); b->surface = sf.surface; b->plane = sf.plane; }
     pthread_mutex_unlock(&g_bo_lock);
     *handle = im.handle;
     return 0;

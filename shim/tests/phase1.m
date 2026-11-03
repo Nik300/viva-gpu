@@ -35,9 +35,14 @@ static void testBuffers(id<MTLDevice> dev) {
     CHECK(a && a.length == 1 << 20 && a.contents, "newBufferWithLength 1 MB");
     CHECK(dev.currentAllocatedSize >= before + (1 << 20), "currentAllocatedSize grows (%lu)", (unsigned long)dev.currentAllocatedSize);
     uint32_t data[4] = {1, 2, 3, 4};
+#if TARGET_OS_OSX
     id<MTLBuffer> b = [dev newBufferWithBytes:data length:sizeof data options:MTLResourceStorageModeManaged];
     CHECK(b && memcmp(b.contents, data, sizeof data) == 0, "newBufferWithBytes copies");
     CHECK(b.storageMode == MTLStorageModeManaged, "storageMode managed");
+#else   // no managed storage on iOS
+    id<MTLBuffer> b = [dev newBufferWithBytes:data length:sizeof data options:MTLResourceStorageModeShared];
+    CHECK(b && memcmp(b.contents, data, sizeof data) == 0, "newBufferWithBytes copies");
+#endif
     __block BOOL freed = NO;
     void *mem = NULL;
     posix_memalign(&mem, 4096, 4096);

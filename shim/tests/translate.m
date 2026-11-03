@@ -493,7 +493,9 @@ static void testReadOwnTarget(void) {
         [e setRenderPipelineState:rd];
         [e setFragmentTexture:t atIndex:0];
         for (int i = 0; i < 3; i++) {   // each read sees the previous draw's result
+#if TARGET_OS_OSX   // render-target barriers are macOS only
             [e memoryBarrierWithScope:MTLBarrierScopeRenderTargets afterStages:MTLRenderStageFragment beforeStages:MTLRenderStageFragment];
+#endif
             [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
         }
     });

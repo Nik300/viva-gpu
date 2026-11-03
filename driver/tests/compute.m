@@ -22,6 +22,8 @@ static NSString *const kMSL = @
     "  atomic_fetch_add_explicit(&bins[in[i] & 3], 1, memory_order_relaxed); }\n"
     "kernel void fill_tex(texture2d<float, access::write> t [[texture(0)]], constant float4 &c [[buffer(0)]],\n"
     "                     uint2 p [[thread_position_in_grid]]) { t.write(c * float(p.x + p.y), p); }\n"
+    "kernel void read_tex(texture2d<float> t [[texture(0)]], device float4 *out [[buffer(0)]], uint2 p [[thread_position_in_grid]]) {\n"
+    "  out[p.y * 4 + p.x] = t.read(p); }\n"
     "kernel void grid_size(device uint *out [[buffer(0)]], uint i [[thread_position_in_grid]], uint n [[threads_per_grid]]) { out[i] = n; }\n"
     "kernel void tg_arg(device uint *a [[buffer(0)]], threadgroup uint *s [[threadgroup(0)]], uint l [[thread_position_in_threadgroup]]) {\n"
     "  s[l] = l * 3; threadgroup_barrier(mem_flags::mem_threadgroup); a[l] = s[(l + 1) % 32]; }\n";
@@ -108,6 +110,23 @@ int main(void) { @autoreleasepool {
     float px[4] = {0};
     [t getBytes:px bytesPerRow:8 * 16 fromRegion:MTLRegionMake2D(3, 2, 1, 1) mipmapLevel:0];
     CHECK(px[0] == 5 && px[3] == 20, "texel (3,2) = c * 5 (%g %g %g %g)", px[0], px[1], px[2], px[3]);
+
+    // CoreAnimation's images, glyphs and gradients: a linear texture over a CPU-filled buffer (not aliased on Panfrost).
+    id<MTLBuffer> lb = [dev newBufferWithLength:256 * 4 options:0];
+    for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++) ((uint32_t *)lb.contents)[y * 64 + x] = 0xff000000u | (uint32_t)(y * 16 + x);
+    MTLTextureDescriptor *ld = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:4 height:4 mipmapped:NO];
+    ld.usage = MTLTextureUsageShaderRead;
+    id<MTLTexture> lt = [lb newTextureWithDescriptor:ld offset:0 bytesPerRow:256];
+    id<MTLBuffer> lo = [dev newBufferWithLength:16 * 16 options:0];
+    run(^(id<MTLComputeCommandEncoder> e) {
+        [e setComputePipelineState:kpipe(@"read_tex")];
+        [e setTexture:lt atIndex:0];
+        [e setBuffer:lo offset:0 atIndex:0];
+        [e dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(4, 4, 1)];
+    });
+    float *lr = lo.contents;
+    CHECK(fabsf(lr[(2 * 4 + 3) * 4] * 255 - 35) < 0.5f && lr[(2 * 4 + 3) * 4 + 3] == 1,
+          "linear texture over a buffer: texel (3,2) (%g %g)", lr[(2 * 4 + 3) * 4] * 255, lr[(2 * 4 + 3) * 4 + 3]);
 
     printf("grid size and threadgroup arguments\n");
     id<MTLBuffer> gb = [dev newBufferWithLength:4 * 100 options:0];
