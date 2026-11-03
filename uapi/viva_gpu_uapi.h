@@ -44,6 +44,7 @@ enum vgpu_selector {
     VGPU_SEL_JM_CTX_DESTROY,        // struct vgpu_jm_ctx               (drm_panfrost_jm_ctx_destroy)
     VGPU_SEL_SYNCOBJ_TRANSFER,      // struct vgpu_syncobj_transfer     (Viva: dst takes src's current fence; stands in
                                     //  for sync-file export/import, which XNU lacks)
+    VGPU_SEL_IMPORT_USERPTR,        // struct vgpu_import_userptr       (Viva: newBufferWithBytesNoCopy; pages wired)
     VGPU_SEL_COUNT
 };
 
@@ -135,6 +136,8 @@ struct vgpu_sync_bo { uint64_t ops; uint32_t op_count, pad; };   // ops: user po
 struct vgpu_query_bo_info { uint32_t handle, extra_flags, create_flags, pad; };
 struct vgpu_jm_ctx { uint32_t handle, priority; };   // create: in priority (ignored), out handle (always 1)
 struct vgpu_syncobj_transfer { uint32_t src, dst; };
+// Wires the calling task's pages [addr, addr + size) (page aligned) and maps them at a GPU VA as a BO.
+struct vgpu_import_userptr { uint64_t addr, size; uint32_t handle, pad; uint64_t offset; };   // out: handle, offset
 
 #ifdef __cplusplus
 // Kernel: argument sizes indexed by selector, checked before dispatch.
@@ -145,6 +148,6 @@ static const uint32_t vgpu_selector_size[VGPU_SEL_COUNT] = {
     sizeof(struct vgpu_syncobj_create), sizeof(struct vgpu_syncobj_destroy), sizeof(struct vgpu_syncobj_wait),
     sizeof(struct vgpu_syncobj_array), sizeof(struct vgpu_syncobj_array), sizeof(struct vgpu_import_iosurface),
     sizeof(struct vgpu_sync_bo), sizeof(struct vgpu_query_bo_info), sizeof(struct vgpu_jm_ctx), sizeof(struct vgpu_jm_ctx),
-    sizeof(struct vgpu_syncobj_transfer),
+    sizeof(struct vgpu_syncobj_transfer), sizeof(struct vgpu_import_userptr),
 };
 #endif

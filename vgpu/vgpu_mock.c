@@ -70,7 +70,7 @@ static void mock_close(void *conn)
     MockConn *c = conn;
     for (uint32_t i = 1; i < MAX_HANDLES; i++)
         if (c->bos[i].surface) CFRelease(c->bos[i].surface);
-        else if (c->bos[i].addr) munmap(c->bos[i].addr, c->bos[i].size);
+        else if (c->bos[i].addr && !c->bos[i].imported) munmap(c->bos[i].addr, c->bos[i].size);
     free(c->bos);
     free(c->syncobj);
     free(c);
@@ -199,7 +199,7 @@ static int mock_ioctl(void *conn, enum vgpu_selector sel, void *arg, size_t size
         MockBO *b = bo(c, a->handle);
         if (!b) { ret = -ENOENT; break; }
         if (b->surface) CFRelease(b->surface);
-        else munmap(b->addr, b->size);
+        else if (!b->imported) munmap(b->addr, b->size);
         *b = (MockBO){0};
         if (a->handle < c->nextBO) c->nextBO = a->handle;
         break;
@@ -313,6 +313,20 @@ static int mock_ioctl(void *conn, enum vgpu_selector sel, void *arg, size_t size
         }
         c->syncobj[a->dst] = c->syncobj[a->src];
         pthread_cond_broadcast(&c->cond);
+        break;
+    }
+    case VGPU_SEL_IMPORT_USERPTR: {
+        struct vgpu_import_userptr *a = arg;
+        size_t pg = (size_t)getpagesize();
+        if (!a->addr || !a->size || (a->addr & (pg - 1)) || (a->size & (pg - 1))) { ret = -EINVAL; break; }
+        uint32_t h = c->nextBO;
+        while (h < MAX_HANDLES && c->bos[h].addr) h++;
+        uint64_t va = h < MAX_HANDLES ? va_alloc(c, a->size) : 0;
+        if (!va) { ret = -ENOSPC; break; }
+        c->bos[h] = (MockBO){ (void *)(uintptr_t)a->addr, va, a->size, 0, VGPU_MADV_WILLNEED, true, NULL };
+        c->nextBO = h + 1;
+        a->handle = h;
+        a->offset = va;
         break;
     }
     case VGPU_SEL_JM_CTX_CREATE: ((struct vgpu_jm_ctx *)arg)->handle = 1; break;

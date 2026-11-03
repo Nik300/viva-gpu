@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <IOSurface/IOSurfaceRef.h>
+#include <TargetConditionals.h>
 #include "nir.h"
 #include "nir_builder.h"
 #include "compiler/glsl_types.h"
