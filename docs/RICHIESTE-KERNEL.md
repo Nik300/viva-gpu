@@ -6,6 +6,28 @@ serve a me per verificarla.
 
 ## Bloccanti per G7
 
+### K0d. Tearing della copia nello scanout (2026-11-03, dopo 0114-0116)
+K0c funziona: niente più frame a metà disegno. Restano però split orizzontali netti tra due frame completi durante le
+animazioni (`vctl burst /tmp/b 24 30 open com.apple.Preferences`, 1-2 frame su ~8). `disp status`: scanout off,
+layer OVL0_2L L0 = buffer LK 0x7bc10000, copie avg ~3,2 ms: AppleCLCD copia nel buffer che il pannello sta leggendo.
+`disp scanout on` a runtime non basta ("surface not contiguous": CA alloca i framebuffer all'avvio).
+- Serve, una delle due:
+  1. doppio buffer del pannello: copiare in un secondo buffer 1080x2400 (es. la memoria di OVL0 L1 a 0x7c606000,
+     oggi nera) e cambiare l'indirizzo del layer al vsync successivo alla fine della copia;
+  2. `vivascanout=1` nell'immagine di boot (scanout diretto delle IOSurface, niente copia), se 0109 regge.
+- Per verificare: `vctl burst` come sopra, nessun frame con una linea netta tra due frame diversi.
+
+### K0e. Latenza tra job: ~0,28 ms per job, indipendente dal clock (2026-11-03, dopo 0114-0116)
+Scena Settings di `ca` (`VMG_CA_TIME=1 VMG_CA_SETTINGS=1 ca 61`): 42 ms -> **28,5 ms** per frame con 0114-0115
+(grazie!), ma identico a 300 e a 950 MHz fissi; 100 job per frame; profilo: tutti i thread userspace ~90% fermi.
+Quindi ~0,28 ms per job sono la transizione IRQ -> completamento -> kick del job dipendente, non esecuzione.
+- Serve: quando il job in testa alla coda di uno slot dipende solo dal job in esecuzione **sullo stesso slot** (caso
+  tipico con K0: fragment dopo fragment), programmarlo subito nei registri `*_NEXT` (la GPU lo avvia da sola alla fine
+  del corrente); per le dipendenze tra slot (fragment dopo il suo tiler) ridurre la latenza IRQ -> kick (kick
+  direttamente dal filtro/handler dell'interrupt invece che dal workloop, se possibile). Un contatore del tempo medio
+  IRQ->start in `gpu status` aiuterebbe a misurarlo.
+- Per verificare: `ca` come sopra (oggi 28,5 ms; GPU pura stimata < 5 ms).
+
 ### K0c. AppleCLCD presenta frame non ancora finiti dalla GPU (2026-11-03, visto a schermo)
 Durante le animazioni (es. apertura di un'app) a schermo compaiono frame a metà: tile neri, metà frame vecchio e metà
 nuovo. Catturati dalla superficie di scanout con `vctl burst /tmp/b 24 40 open com.apple.Preferences` (confermato
