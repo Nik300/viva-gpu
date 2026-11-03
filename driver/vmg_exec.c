@@ -506,6 +506,15 @@ void vmg_cmd_draw(vmg_device *dev, const vmg_draw_info *d)
     flush_raster(dev);
     bind_stage(dev, VMG_VERTEX, p->desc.vertex, NULL, 0);
     if (p->desc.fragment) bind_stage(dev, VMG_FRAGMENT, p->desc.fragment, NULL, 0);
+    static int trace_cb = -1;
+    if (trace_cb < 0) trace_cb = getenv("VMG_TRACE_CB") != NULL;
+    if (trace_cb) {
+        const char *n = p->desc.fragment ? p->desc.fragment->name : p->desc.vertex->name;
+        unsigned i = 0;
+        while (i < dev->cb_fs_count && strcmp(dev->cb_fs[i], n)) i++;
+        if (i == dev->cb_fs_count && i < 24) dev->cb_fs[dev->cb_fs_count++] = n;
+        dev->cb_draws++;
+    }
     // Vertex buffers: the vertex stage's buffer slots the vertex descriptor reads.
     struct pipe_vertex_buffer vb[VMG_MAX_VERTEX_ATTRIBS];
     memset(vb, 0, sizeof vb);
@@ -665,6 +674,19 @@ struct vmg_fence_ext { struct vmg_fence base; vis_entry *vis; unsigned vis_count
 void vmg_flush(vmg_device *dev, vmg_fence **out)
 {
     dev->copy_epoch++;
+    if (dev->cb_draws) {
+        char line[512];
+        int len = 0;
+        for (unsigned i = 0; i < dev->cb_fs_count && len < (int)sizeof line - 1; i++)
+            len += snprintf(line + len, sizeof line - (size_t)len, "%s%s", i ? " " : "", dev->cb_fs[i]);
+        static int every = -1;   // VMG_TRACE_CB=2: every command buffer, not only when the set changes
+        if (every < 0) every = getenv("VMG_TRACE_CB") && atoi(getenv("VMG_TRACE_CB")) >= 2;
+        if (every || strcmp(line, dev->cb_last)) {
+            fprintf(stderr, "vmg: cb: %u draws: %s\n", dev->cb_draws, line);
+            memcpy(dev->cb_last, line, sizeof line);
+        }
+        dev->cb_fs_count = dev->cb_draws = 0;
+    }
     struct pipe_fence_handle *f = NULL;
     dev->pipe->flush(dev->pipe, out || g_vis_count ? &f : NULL, 0);
     struct vmg_fence_ext *fe = NULL;

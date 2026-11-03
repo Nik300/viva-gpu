@@ -30,8 +30,25 @@
 static uint32_t rasterizer_hash(const void *key) { return _mesa_hash_data(key, sizeof(struct pipe_rasterizer_state)); }
 static bool rasterizer_equal(const void *a, const void *b) { return !memcmp(a, b, sizeof(struct pipe_rasterizer_state)); }
 
+// Variables for processes we do not start (backboardd): KEY=VALUE lines, without overriding the environment.
+static void load_env_file(void)
+{
+    FILE *f = fopen("/private/var/root/viva-tests/vmg.env", "r");
+    if (!f) return;
+    char line[256];
+    while (fgets(line, sizeof line, f)) {
+        line[strcspn(line, "\r\n")] = 0;
+        char *eq = strchr(line, '=');
+        if (line[0] == '#' || !eq || eq == line) continue;
+        *eq = 0;
+        setenv(line, eq + 1, 0);
+    }
+    fclose(f);
+}
+
 vmg_device *vmg_device_create(const char *which, char *error, size_t error_size)
 {
+    load_env_file();
     if (!which) which = getenv("VMG_DRIVER");
 #if TARGET_OS_IPHONE
     if (!which) which = "panfrost";
@@ -620,6 +637,7 @@ vmg_shader *vmg_shader_create(vmg_device *dev, const vmg_air_input *in, vmg_refl
     if (dev->screen->finalize_nir) dev->screen->finalize_nir(dev->screen, nir, true);
     vmg_shader *sh = calloc(1, sizeof *sh);
     sh->stage = r.stage;
+    snprintf(sh->name, sizeof sh->name, "%s", nir->info.name ? nir->info.name : "?");
     sh->refl = r;
     if (refl) *refl = r;
     sh->pool_size = pool.size;

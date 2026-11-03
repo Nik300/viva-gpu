@@ -94,6 +94,35 @@ static CALayer *scene(void) {
         blurred.filters = @[f];
     }
     [root addSublayer:blurred];
+
+    // SpringBoard's materials (dock, folders, control center): a backdrop layer blurring what is behind it, with a
+    // saturation colour matrix and vibrancy on top. VMG_CA_SIMPLE=1 leaves them out.
+    Class backdrop = NSClassFromString(@"CABackdropLayer");
+    if (backdrop && filter && !getenv("VMG_CA_SIMPLE")) {
+        CALayer *bd = [backdrop layer];
+        bd.frame = CGRectMake(30, 200, 300, 160);
+        bd.cornerRadius = 24;
+        bd.masksToBounds = YES;
+        id blur = [filter performSelector:@selector(filterWithType:) withObject:@"gaussianBlur"];
+        [blur setValue:@20 forKey:@"inputRadius"];
+        id sat = [filter performSelector:@selector(filterWithType:) withObject:@"colorSaturate"];
+        [sat setValue:@1.8 forKey:@"inputAmount"];
+        bd.filters = @[blur, sat];
+        [root addSublayer:bd];
+        CALayer *tint = [CALayer layer];
+        tint.frame = bd.bounds;
+        tint.backgroundColor = rgb(1, 1, 1, 0.3);
+        [bd addSublayer:tint];
+        CATextLayer *vibrant = [CATextLayer layer];
+        vibrant.frame = CGRectMake(20, 60, 260, 40);
+        vibrant.string = @"Vibrancy";
+        vibrant.fontSize = 28;
+        vibrant.contentsScale = 2;
+        vibrant.foregroundColor = rgb(0, 0, 0, 1);
+        id vib = [filter performSelector:@selector(filterWithType:) withObject:@"vibrantDark"];
+        if (vib) vibrant.compositingFilter = vib;
+        [bd addSublayer:vibrant];
+    }
     return root;
 }
 

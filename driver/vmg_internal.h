@@ -54,6 +54,7 @@ struct vmg_shader {
     struct pipe_resource *pool_buffer; // constant buffer 1 (NULL when the shader has no constant tables)
     uint8_t *pool; size_t pool_size;
     struct vmg_sampler *constexpr_samplers[16];
+    char name[64];                    // entry point (traces)
 };
 
 struct vmg_render_pipeline {
@@ -92,6 +93,8 @@ struct vmg_device {
     struct pipe_framebuffer_state fb;
     vmg_pass_desc pass;
     bool in_pass;
+    // VMG_TRACE_CB: fragment shaders drawn by the current command buffer (printed at the flush when the set changes)
+    const char *cb_fs[24]; unsigned cb_fs_count, cb_draws; char cb_last[512];
     uint64_t copy_epoch;               // bumped by every vmg_flush and every copy-out of a copied texture
     struct pipe_rasterizer_state raster;
     void *raster_cso; bool raster_dirty;
