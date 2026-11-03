@@ -55,11 +55,15 @@ struct vmg_shader {
     uint8_t *pool; size_t pool_size;
     struct vmg_sampler *constexpr_samplers[16];
     char name[64];                    // entry point (traces)
+    // Fragment shaders writing several colours keep their NIR: a pipeline without an attachment for one of them gets a
+    // variant without that output (Metal drops the write; Panfrost would read a blend descriptor past its table).
+    struct nir_shader *nir_keep; uint32_t colors_written;
 };
 
 struct vmg_render_pipeline {
     vmg_render_pipeline_desc desc;
     void *blend, *velems;
+    void *fs_variant;                 // fragment shader without the outputs that have no attachment (NULL: the shader's)
     unsigned velem_buffer[VMG_MAX_VERTEX_ATTRIBS];   // Metal buffer slot of each Gallium vertex buffer
     unsigned velem_buffers;
     uint32_t velem_strides[VMG_MAX_VERTEX_ATTRIBS];

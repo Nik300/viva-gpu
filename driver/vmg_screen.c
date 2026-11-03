@@ -667,6 +667,10 @@ vmg_shader *vmg_shader_create(vmg_device *dev, const vmg_air_input *in, vmg_refl
         nir_assign_io_var_locations(nir, nir_var_shader_out);
     }
     if (getenv("VMG_TRACE")) { fprintf(stderr, "vmg: creating %s shader %s\n", mesa_shader_stage_name(nir->info.stage), nir->info.name); if (getenv("VMG_TRACE_NIR")) nir_print_shader(nir, stderr); }
+    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
+        sh->colors_written = (uint32_t)(nir->info.outputs_written >> FRAG_RESULT_DATA0) & 0xff;
+        if (sh->colors_written & ~1u) sh->nir_keep = nir_shader_clone(NULL, nir);   // writes beyond colour 0
+    }
     struct pipe_shader_state state = {0};
     state.type = PIPE_SHADER_IR_NIR;
     state.ir.nir = nir;
@@ -695,6 +699,7 @@ vmg_shader *vmg_shader_create(vmg_device *dev, const vmg_air_input *in, vmg_refl
 void vmg_shader_release(vmg_device *dev, vmg_shader *sh)
 {
     if (!sh) return;
+    ralloc_free(sh->nir_keep);
     if (sh->cso) {
         if (sh->stage == VMG_VERTEX) dev->pipe->delete_vs_state(dev->pipe, sh->cso);
         else if (sh->stage == VMG_FRAGMENT) dev->pipe->delete_fs_state(dev->pipe, sh->cso);
@@ -747,10 +752,42 @@ static unsigned blend_op(uint8_t o)
     return o < 5 ? m[o] : PIPE_BLEND_ADD;
 }
 
+// Removes the stores to colour outputs outside 'keep' (bit i = FRAG_RESULT_DATAi).
+static bool drop_color_outputs(nir_builder *b, nir_intrinsic_instr *in, void *data)
+{
+    uint32_t keep = *(uint32_t *)data;
+    if (in->intrinsic != nir_intrinsic_store_deref) return false;
+    nir_variable *v = nir_intrinsic_get_var(in, 0);
+    if (!v || v->data.mode != nir_var_shader_out || v->data.location < FRAG_RESULT_DATA0) return false;
+    if (keep & (1u << (v->data.location - FRAG_RESULT_DATA0))) return false;
+    nir_instr_remove(&in->instr);
+    return true;
+}
+
+static void *fragment_variant(vmg_device *dev, vmg_shader *fs, uint32_t attached)
+{
+    nir_shader *nir = nir_shader_clone(NULL, fs->nir_keep);
+    nir_shader_intrinsics_pass(nir, drop_color_outputs, nir_metadata_control_flow, &attached);
+    nir_remove_dead_variables(nir, nir_var_shader_out, NULL);
+    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
+    nir_assign_io_var_locations(nir, nir_var_shader_out);
+    struct pipe_shader_state state = {0};
+    state.type = PIPE_SHADER_IR_NIR;
+    state.ir.nir = nir;
+    void *cso = dev->pipe->create_fs_state(dev->pipe, &state);
+    free(state.error_message);
+    return cso;
+}
+
 vmg_render_pipeline *vmg_render_pipeline_create(vmg_device *dev, const vmg_render_pipeline_desc *d, char **error)
 {
     vmg_render_pipeline *p = calloc(1, sizeof *p);
     p->desc = *d;
+    if (d->fragment && d->fragment->nir_keep) {
+        uint32_t attached = 0;
+        for (unsigned i = 0; i < VMG_MAX_COLOR; i++) if (d->color[i].format) attached |= 1u << i;
+        if (d->fragment->colors_written & ~attached) p->fs_variant = fragment_variant(dev, d->fragment, attached);
+    }
     struct pipe_blend_state bs = {0};
     bs.independent_blend_enable = 1;
     bs.alpha_to_coverage = d->alpha_to_coverage;
@@ -821,6 +858,7 @@ vmg_render_pipeline *vmg_render_pipeline_create(vmg_device *dev, const vmg_rende
 void vmg_render_pipeline_release(vmg_device *dev, vmg_render_pipeline *p)
 {
     if (!p) return;
+    if (p->fs_variant) dev->pipe->delete_fs_state(dev->pipe, p->fs_variant);
     if (p->blend) dev->pipe->delete_blend_state(dev->pipe, p->blend);
     if (p->velems) dev->pipe->delete_vertex_elements_state(dev->pipe, p->velems);
     free(p);

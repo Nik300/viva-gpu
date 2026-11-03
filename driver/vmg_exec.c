@@ -218,7 +218,7 @@ void vmg_cmd_set_render_pipeline(vmg_device *dev, vmg_render_pipeline *p)
     struct pipe_context *pipe = dev->pipe;
     dev->pipeline = p;
     pipe->bind_vs_state(pipe, p->desc.vertex ? p->desc.vertex->cso : NULL);
-    pipe->bind_fs_state(pipe, p->desc.fragment ? p->desc.fragment->cso : dev->fs_empty);
+    pipe->bind_fs_state(pipe, p->fs_variant ? p->fs_variant : p->desc.fragment ? p->desc.fragment->cso : dev->fs_empty);
     pipe->bind_blend_state(pipe, p->blend);
     pipe->bind_vertex_elements_state(pipe, p->velems);
     pipe->set_sample_mask(pipe, 0xffffffff);
