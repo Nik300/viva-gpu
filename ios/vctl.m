@@ -13,7 +13,7 @@
 
 typedef struct __IOHIDEventSystemClient *IOHIDEventSystemClientRef;
 typedef struct __IOHIDEvent *IOHIDEventRef;
-IOHIDEventSystemClientRef IOHIDEventSystemClientCreate(CFAllocatorRef);
+IOHIDEventSystemClientRef IOHIDEventSystemClientCreateWithType(CFAllocatorRef, int type, CFDictionaryRef);
 void IOHIDEventSystemClientDispatchEvent(IOHIDEventSystemClientRef, IOHIDEventRef);
 IOHIDEventRef IOHIDEventCreateDigitizerEvent(CFAllocatorRef, uint64_t ts, uint32_t transducer, uint32_t index, uint32_t identity,
                                              uint32_t mask, uint32_t buttons, double x, double y, double z, double tip,
@@ -31,8 +31,13 @@ enum { kHand = 3, kRange = 1, kTouch = 2, kPosition = 4, kIdentity = 32 };
 static const uint64_t kSender = 0x000000010000027Full;      // a digitizer-like sender id
 
 static IOHIDEventSystemClientRef client(void) {
+    // Admin (0) can dispatch; a plain IOHIDEventSystemClientCreate client (monitor) cannot. VCTL_CLIENT_TYPE overrides.
     static IOHIDEventSystemClientRef c;
-    if (!c) c = IOHIDEventSystemClientCreate(kCFAllocatorDefault);
+    if (!c) {
+        const char *t = getenv("VCTL_CLIENT_TYPE");
+        c = IOHIDEventSystemClientCreateWithType(kCFAllocatorDefault, t ? atoi(t) : 0, NULL);
+        if (getenv("VCTL_VERBOSE")) fprintf(stderr, "vctl: HID client %p (type %d)\n", (void *)c, t ? atoi(t) : 0);
+    }
     return c;
 }
 
