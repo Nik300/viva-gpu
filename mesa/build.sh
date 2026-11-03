@@ -69,13 +69,18 @@ fetch_and_patch() {
 
 # ------------------------------------------------------------ libdrm-xnu
 build_libdrm_xnu() {
-  log "building libdrm-xnu stub"
+  # libdrm for XNU: libdrm-xnu/src/xf86drm_xnu.c on the vgpu client (IOKit back-end, or the in-process mock).
+  log "building libdrm-xnu"
   mkdir -p "$LIBDRM/out"
-  cc -O2 -g0 -Wall -Wno-unused-parameter -fPIC \
-     -I"$LIBDRM/include" -I"$LIBDRM/include/libdrm" \
-     -c "$LIBDRM/src/xf86drm_stub.c" -o "$LIBDRM/out/xf86drm_stub.o"
+  local objs=()
+  for src in "$LIBDRM/src/xf86drm_xnu.c" "$GPU/vgpu/vgpu.c" "$GPU/vgpu/vgpu_mock.c" "$GPU/vgpu/vgpu_iokit.c"; do
+    local o="$LIBDRM/out/$(basename "${src%.c}").o"
+    cc -O2 -g -Wall -Wno-unused-parameter -Wno-four-char-constants -fPIC \
+       -I"$LIBDRM/include" -I"$LIBDRM/include/libdrm" -c "$src" -o "$o"
+    objs+=("$o")
+  done
   rm -f "$LIBDRM/out/libdrm-xnu.a"
-  libtool -static -o "$LIBDRM/out/libdrm-xnu.a" "$LIBDRM/out/xf86drm_stub.o" 2>/dev/null
+  libtool -static -o "$LIBDRM/out/libdrm-xnu.a" "${objs[@]}" 2>/dev/null
 }
 
 # ------------------------------------------------------------- configure
@@ -217,7 +222,7 @@ EOF
 $O/lib/libmesa_viva.a
 $LIBDRM/out/libdrm-xnu.a
 $llvm_libs -Wl,-rpath,$LLVM_PREFIX/lib
--L$BREW/opt/zstd/lib -lzstd -lz -lc++ -lpthread -lm
+-L$BREW/opt/zstd/lib -lzstd -lz -lc++ -lpthread -lm -framework IOKit -framework IOSurface -framework CoreFoundation
 EOF
 }
 

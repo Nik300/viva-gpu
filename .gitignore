@@ -13,3 +13,4 @@ mesa/out/
 .DS_Store
 vgpu/out/
 mesa/ninja.log
+driver/out/

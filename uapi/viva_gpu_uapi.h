@@ -17,6 +17,11 @@
 #define VGPU_UAPI_MAJOR      1
 #define VGPU_UAPI_MINOR      0
 
+// GPU virtual addresses: Mesa's Panfrost (panfrost_kmod) assumes the Linux driver's range, [32 MiB, 4 GiB) per
+// connection, with VA management in the kernel. Every offset the kernel returns lies in it.
+#define VGPU_VA_START 0x2000000ull
+#define VGPU_VA_END   (1ull << 32)
+
 enum vgpu_selector {
     VGPU_SEL_GET_VERSION = 0,       // struct vgpu_version
     VGPU_SEL_GET_PARAM,             // struct vgpu_get_param            (drm_panfrost_get_param)
@@ -37,6 +42,8 @@ enum vgpu_selector {
     VGPU_SEL_QUERY_BO_INFO,         // struct vgpu_query_bo_info        (drm_panfrost_query_bo_info)
     VGPU_SEL_JM_CTX_CREATE,         // struct vgpu_jm_ctx               (drm_panfrost_jm_ctx_create; one context only)
     VGPU_SEL_JM_CTX_DESTROY,        // struct vgpu_jm_ctx               (drm_panfrost_jm_ctx_destroy)
+    VGPU_SEL_SYNCOBJ_TRANSFER,      // struct vgpu_syncobj_transfer     (Viva: dst takes src's current fence; stands in
+                                    //  for sync-file export/import, which XNU lacks)
     VGPU_SEL_COUNT
 };
 
@@ -71,7 +78,7 @@ struct vgpu_get_param { uint32_t param, pad; uint64_t value; };
 #define VGPU_BO_NOEXEC   (1u << 0)
 #define VGPU_BO_HEAP     (1u << 1)   // grows on GPU fault (tiler heap)
 #define VGPU_BO_WB_MMAP  (1u << 2)   // CPU mapping write-back cached; userspace keeps it coherent with SYNC_BO
-struct vgpu_create_bo { uint32_t size, flags, handle, pad; uint64_t offset; };   // out: handle, offset = GPU VA
+struct vgpu_create_bo { uint32_t size, flags, handle, pad; uint64_t offset; };   // out: handle, offset = GPU VA (VGPU_VA_*)
 struct vgpu_mmap_bo { uint32_t handle, flags; uint64_t offset; };                // out: offset = memoryType token
 struct vgpu_get_bo_offset { uint32_t handle, pad; uint64_t offset; };
 struct vgpu_gem_close { uint32_t handle, pad; };
@@ -127,6 +134,7 @@ struct vgpu_sync_bo { uint64_t ops; uint32_t op_count, pad; };   // ops: user po
 #define VGPU_BO_IS_IMPORTED (1u << 0)
 struct vgpu_query_bo_info { uint32_t handle, extra_flags, create_flags, pad; };
 struct vgpu_jm_ctx { uint32_t handle, priority; };   // create: in priority (ignored), out handle (always 1)
+struct vgpu_syncobj_transfer { uint32_t src, dst; };
 
 #ifdef __cplusplus
 // Kernel: argument sizes indexed by selector, checked before dispatch.
@@ -137,5 +145,6 @@ static const uint32_t vgpu_selector_size[VGPU_SEL_COUNT] = {
     sizeof(struct vgpu_syncobj_create), sizeof(struct vgpu_syncobj_destroy), sizeof(struct vgpu_syncobj_wait),
     sizeof(struct vgpu_syncobj_array), sizeof(struct vgpu_syncobj_array), sizeof(struct vgpu_import_iosurface),
     sizeof(struct vgpu_sync_bo), sizeof(struct vgpu_query_bo_info), sizeof(struct vgpu_jm_ctx), sizeof(struct vgpu_jm_ctx),
+    sizeof(struct vgpu_syncobj_transfer),
 };
 #endif

@@ -1,6 +1,6 @@
 // Viva GPU: kernel simulated in-process (VGPU_BACKEND=mock), for tests on the Mac without the phone.
-// BOs are anonymous memory; the GPU VA is the address of that memory, and each vgpu_mmap returns a new shared alias
-// of it (mach_vm_remap), so munmap of a CPU mapping never frees the BO, as with the real kernel. Submits complete
+// BOs are anonymous memory with a GPU VA from the Panfrost range [32 MiB, 4 GiB) (first fit, like the kernel); each
+// vgpu_mmap returns a new shared alias of the memory (mach_vm_remap), so munmap of a CPU mapping never frees the BO. Submits complete
 // immediately: out_sync is signalled, nothing runs. GET_PARAM answers as a Mali-G57 MC2 (VGPU_MOCK_GPU_ID overrides
 // the product id, e.g. 9093).
 #include "vgpu.h"
@@ -18,7 +18,8 @@
 #define MAX_HANDLES 65536
 
 typedef struct {
-    void *addr;          // the BO's memory (= GPU VA); NULL = free handle
+    void *addr;          // the BO's memory; NULL = free handle
+    uint64_t va;         // GPU virtual address
     size_t size;
     uint32_t flags, madv;
     bool imported;
@@ -32,6 +33,21 @@ typedef struct {
     uint8_t *syncobj;     // index = handle: 0 free, 1 unsignalled, 2 signalled
     uint32_t nextBO, nextSync;
 } MockConn;
+
+// GPU VA allocator: first fit over the BOs sorted by address (linear scan; tests have few BOs).
+static uint64_t va_alloc(MockConn *c, size_t size)
+{
+    uint64_t start = VGPU_VA_START;
+    for (;;) {
+        bool moved = false;
+        for (uint32_t i = 1; i < MAX_HANDLES; i++) {
+            MockBO *b = &c->bos[i];
+            if (b->addr && b->va < start + size && start < b->va + b->size) { start = b->va + b->size; moved = true; }
+        }
+        if (!moved) break;
+    }
+    return start + size <= VGPU_VA_END ? start : 0;
+}
 
 static vgpu_mock_submit_hook g_hook;
 static void *g_hookCtx;
@@ -155,12 +171,14 @@ static int mock_ioctl(void *conn, enum vgpu_selector sel, void *arg, size_t size
         uint32_t h = c->nextBO;
         while (h < MAX_HANDLES && c->bos[h].addr) h++;
         if (h >= MAX_HANDLES) { ret = -ENOMEM; break; }
+        uint64_t va = va_alloc(c, sz);
+        if (!va) { ret = -ENOSPC; break; }
         void *p = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
         if (p == MAP_FAILED) { ret = -ENOMEM; break; }
-        c->bos[h] = (MockBO){ p, sz, a->flags, VGPU_MADV_WILLNEED, false, NULL };
+        c->bos[h] = (MockBO){ p, va, sz, a->flags, VGPU_MADV_WILLNEED, false, NULL };
         c->nextBO = h + 1;
         a->handle = h;
-        a->offset = (uint64_t)(uintptr_t)p;
+        a->offset = va;
         break;
     }
     case VGPU_SEL_MMAP_BO: {
@@ -173,7 +191,7 @@ static int mock_ioctl(void *conn, enum vgpu_selector sel, void *arg, size_t size
         struct vgpu_get_bo_offset *a = arg;
         MockBO *b = bo(c, a->handle);
         if (!b) { ret = -ENOENT; break; }
-        a->offset = (uint64_t)(uintptr_t)b->addr;
+        a->offset = b->va;
         break;
     }
     case VGPU_SEL_GEM_CLOSE: {
@@ -252,7 +270,7 @@ static int mock_ioctl(void *conn, enum vgpu_selector sel, void *arg, size_t size
         break;
     }
     case VGPU_SEL_IMPORT_IOSURFACE: {
-        // In-process: the surface's own memory is the BO (GPU VA = its CPU address, as for every mock BO).
+        // In-process: the surface's own memory is the BO.
         struct vgpu_import_iosurface *a = arg;
         IOSurfaceRef s = IOSurfaceLookup(a->surface_id);
         if (!s) { ret = -ENOENT; break; }
@@ -264,10 +282,14 @@ static int mock_ioctl(void *conn, enum vgpu_selector sel, void *arg, size_t size
         uint8_t *base = IOSurfaceGetBaseAddress(s);
         uint8_t *plane = planes ? IOSurfaceGetBaseAddressOfPlane(s, a->plane) : base;
         size_t total = IOSurfaceGetAllocSize(s);
-        c->bos[h] = (MockBO){ plane, total - (size_t)(plane - base), 0, VGPU_MADV_WILLNEED, true, s };
+        size_t psize = total - (size_t)(plane - base);
+        size_t vsize = (psize + getpagesize() - 1) & ~((size_t)getpagesize() - 1);
+        uint64_t va = va_alloc(c, vsize);
+        if (!va) { CFRelease(s); ret = -ENOSPC; break; }
+        c->bos[h] = (MockBO){ plane, va, psize, 0, VGPU_MADV_WILLNEED, true, s };
         c->nextBO = h + 1;
         a->handle = h;
-        a->offset = (uint64_t)(uintptr_t)plane;
+        a->offset = va;
         a->size = c->bos[h].size;
         a->bytes_per_row = (uint32_t)(planes ? IOSurfaceGetBytesPerRowOfPlane(s, a->plane) : IOSurfaceGetBytesPerRow(s));
         a->pixel_format = IOSurfaceGetPixelFormat(s);
@@ -282,6 +304,15 @@ static int mock_ioctl(void *conn, enum vgpu_selector sel, void *arg, size_t size
         if (!b) { ret = -ENOENT; break; }
         a->create_flags = b->flags;
         a->extra_flags = b->imported ? VGPU_BO_IS_IMPORTED : 0;
+        break;
+    }
+    case VGPU_SEL_SYNCOBJ_TRANSFER: {
+        struct vgpu_syncobj_transfer *a = arg;
+        if (!a->src || a->src >= MAX_HANDLES || !c->syncobj[a->src] || !a->dst || a->dst >= MAX_HANDLES || !c->syncobj[a->dst]) {
+            ret = -EINVAL; break;
+        }
+        c->syncobj[a->dst] = c->syncobj[a->src];
+        pthread_cond_broadcast(&c->cond);
         break;
     }
     case VGPU_SEL_JM_CTX_CREATE: ((struct vgpu_jm_ctx *)arg)->handle = 1; break;

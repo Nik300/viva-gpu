@@ -28,6 +28,7 @@ static const uint32_t selector_size[VGPU_SEL_COUNT] = {
     [VGPU_SEL_QUERY_BO_INFO] = sizeof(struct vgpu_query_bo_info),
     [VGPU_SEL_JM_CTX_CREATE] = sizeof(struct vgpu_jm_ctx),
     [VGPU_SEL_JM_CTX_DESTROY] = sizeof(struct vgpu_jm_ctx),
+    [VGPU_SEL_SYNCOBJ_TRANSFER] = sizeof(struct vgpu_syncobj_transfer),
 };
 
 #define MAX_FDS 1024

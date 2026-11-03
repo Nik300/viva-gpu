@@ -6,6 +6,7 @@ drmCloseBufferHandle	libpankmod_lib.a:pan_kmod.c.o, libpankmod_lib.a:panfrost_km
 drmFreeVersion	libpankmod_lib.a:pan_kmod.c.o
 drmGetVersion	libpankmod_lib.a:pan_kmod.c.o
 drmIoctl	libgallium.a:renderonly_renderonly.c.o, libpanfrost-v10.a:pan_csf.c.o, libpanfrost-v12.a:pan_csf.c.o, libpanfrost-v13.a:pan_csf.c.o, libpanfrost-v14.a:pan_csf.c.o, libpanfrost-v4.a:pan_jm.c.o, libpanfrost-v5.a:pan_jm.c.o, libpanfrost-v6.a:pan_jm.c.o, libpanfrost-v7.a:pan_jm.c.o, libpanfrost-v9.a:pan_jm.c.o, libpanfrostwinsys.a:panfrost_drm_winsys.c.o, libpankmod_lib.a:panfrost_kmod.c.o, libpankmod_lib.a:panthor_kmod.c.o
+drmMap	libpanfrost.a:pan_bo.c.o
 drmPrimeFDToHandle	libgallium.a:renderonly_renderonly.c.o, libpankmod_lib.a:pan_kmod.c.o
 drmPrimeHandleToFD	libgallium.a:renderonly_renderonly.c.o, libpanfrost.a:pan_bo.c.o, libpanfrostwinsys.a:panfrost_drm_winsys.c.o, libpankmod_lib.a:panthor_kmod.c.o
 drmSyncobjCreate	libpanfrost.a:pan_context.c.o, libpanfrost.a:pan_fence.c.o, libpankmod_lib.a:panthor_kmod.c.o
@@ -17,3 +18,4 @@ drmSyncobjReset	libpankmod_lib.a:panthor_kmod.c.o
 drmSyncobjTimelineWait	libpanfrost-v10.a:pan_csf.c.o, libpanfrost-v12.a:pan_csf.c.o, libpanfrost-v13.a:pan_csf.c.o, libpanfrost-v14.a:pan_csf.c.o, libpankmod_lib.a:panthor_kmod.c.o
 drmSyncobjTransfer	libpanfrost-v10.a:pan_csf.c.o, libpanfrost-v12.a:pan_csf.c.o, libpanfrost-v13.a:pan_csf.c.o, libpanfrost-v14.a:pan_csf.c.o, libpankmod_lib.a:panthor_kmod.c.o
 drmSyncobjWait	libpanfrost-v10.a:pan_csf.c.o, libpanfrost-v12.a:pan_csf.c.o, libpanfrost-v13.a:pan_csf.c.o, libpanfrost-v14.a:pan_csf.c.o, libpanfrost-v4.a:pan_jm.c.o, libpanfrost-v5.a:pan_jm.c.o, libpanfrost-v6.a:pan_jm.c.o, libpanfrost-v7.a:pan_jm.c.o, libpanfrost-v9.a:pan_jm.c.o, libpanfrost.a:pan_fence.c.o
+drmUnmap	libpanfrost.a:pan_bo.c.o

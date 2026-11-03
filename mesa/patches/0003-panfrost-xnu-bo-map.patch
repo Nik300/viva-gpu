@@ -1,0 +1,40 @@
+XNU: map/unmap Panfrost BOs through libdrm-xnu (drmMap/drmUnmap) instead of mmap on the device fd.
+diff --git a/src/gallium/drivers/panfrost/pan_bo.c b/src/gallium/drivers/panfrost/pan_bo.c
+index d0ce95c..a3827ea 100644
+--- a/src/gallium/drivers/panfrost/pan_bo.c
++++ b/src/gallium/drivers/panfrost/pan_bo.c
+@@ -343,7 +343,11 @@ panfrost_bo_munmap(struct panfrost_bo *bo)
+    if (!bo->ptr.cpu)
+       return;
+ 
++#ifdef __APPLE__
++   if (drmUnmap((void *)(uintptr_t)bo->ptr.cpu, panfrost_bo_size(bo))) {
++#else
+    if (os_munmap((void *)(uintptr_t)bo->ptr.cpu, panfrost_bo_size(bo))) {
++#endif
+       mesa_loge("munmap failed: %s", strerror(errno));
+       abort();
+    }
+diff --git a/src/panfrost/lib/kmod/pan_kmod.h b/src/panfrost/lib/kmod/pan_kmod.h
+index 8d37023..1684900 100644
+--- a/src/panfrost/lib/kmod/pan_kmod.h
++++ b/src/panfrost/lib/kmod/pan_kmod.h
+@@ -761,8 +761,18 @@ pan_kmod_bo_mmap(struct pan_kmod_bo *bo, int prot, int flags, void *host_addr)
+    if (mmap_offset < 0)
+       return MAP_FAILED;
+ 
++#ifdef __APPLE__
++   /* XNU: the device fd is not mmappable; libdrm-xnu maps the BO through the
++    * kernel driver (IOConnectMapMemory64) or the in-process mock. */
++   {
++      drmAddress addr = NULL;
++      host_addr = drmMap(bo->dev->fd, (drm_handle_t)mmap_offset, bo->size, &addr)
++                     ? MAP_FAILED : addr;
++   }
++#else
+    host_addr =
+       os_mmap(host_addr, bo->size, prot, flags, bo->dev->fd, mmap_offset);
++#endif
+    if (host_addr == MAP_FAILED)
+       mesa_loge("mmap(..., size=%" PRIu64 ", prot=%d, flags=0x%x) failed: %s",
+                 bo->size, prot, flags, strerror(errno));
