@@ -9,6 +9,7 @@
 #import <ImageIO/ImageIO.h>
 #import <CoreText/CoreText.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+#import <IOSurface/IOSurfaceRef.h>
 
 id<MTLDevice> TSMtlCreateDevice(void);
 enum { W = 360, H = 640 };
@@ -130,7 +131,15 @@ static NSData *render(id<MTLDevice> dev, int frames, NSString *png) {
     MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:W height:H mipmapped:NO];
     td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
     td.storageMode = MTLStorageModeShared;
-    id<MTLTexture> tex = [dev newTextureWithDescriptor:td];
+    id<MTLTexture> tex;
+    if (getenv("VMG_CA_IOSURFACE")) {   // like backboardd: render straight into an IOSurface (the framebuffer)
+        NSDictionary *props = @{ (id)kIOSurfaceWidth: @W, (id)kIOSurfaceHeight: @H, (id)kIOSurfaceBytesPerElement: @4,
+                                 (id)kIOSurfacePixelFormat: @((uint32_t)'BGRA') };
+        IOSurfaceRef surf = IOSurfaceCreate((__bridge CFDictionaryRef)props);
+        tex = [dev newTextureWithDescriptor:td iosurface:surf plane:0];
+        CFRelease(surf);
+    } else
+        tex = [dev newTextureWithDescriptor:td];
     id<MTLCommandQueue> q = [dev newCommandQueue];
     CARenderer *rr = [CARenderer rendererWithMTLTexture:tex options:@{ kCARendererMetalCommandQueue: q }];
     rr.layer = scene();
