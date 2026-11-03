@@ -3,6 +3,7 @@
 #import <Metal/Metal.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 id<MTLDevice> TSMtlCreateDevice(void);
 
@@ -34,6 +35,7 @@ static NSString *const kMSL = @
     "fragment half4 fetch_one(half4 dst [[color(0)]]) { return dst * half4(0.5h, 1, 1, 1) + half4(0, 0, 0.25h, 0); }\n"
     "struct Two { half4 c0 [[color(0)]]; half4 c1 [[color(1)]]; };\n"
     "fragment Two clip_write(VOut i [[stage_in]]) { Two o; o.c0 = 0; o.c1 = half4(i.pos.x < 4 ? 1.0h : 0.0h); return o; }\n"
+    "fragment Two clip_write_all(VOut i [[stage_in]], half4 dst [[color(0)]]) { Two o; o.c0 = dst; o.c1 = half4(i.pos.x < 4 ? 1.0h : 0.0h); return o; }\n"
     "fragment Two clip_apply(half4 dst [[color(0)]], half4 clip [[color(1)]]) {\n"
     "  Two o; o.c0 = mix(dst, half4(1, 0, 0, 1), clip.r); o.c1 = clip; return o; }\n";
 
@@ -182,8 +184,8 @@ int main(void) { @autoreleasepool {
         rp.colorAttachments[0].storeAction = MTLStoreActionStore;
         if (n > 1) {
             rp.colorAttachments[1].texture = c1;
-            rp.colorAttachments[1].loadAction = MTLLoadActionDontCare;
-            rp.colorAttachments[1].storeAction = MTLStoreActionDontCare;
+            rp.colorAttachments[1].loadAction = c1.storageMode == MTLStorageModeShared ? MTLLoadActionClear : MTLLoadActionDontCare;
+            rp.colorAttachments[1].storeAction = c1.storageMode == MTLStorageModeShared ? MTLStoreActionStore : MTLStoreActionDontCare;
         }
         id<MTLCommandBuffer> cb = [queue commandBuffer];
         id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
@@ -203,13 +205,22 @@ int main(void) { @autoreleasepool {
         // BGRA: expect r 0.25 (64), g 0.5 (128), b 0.75 (191)
         CHECK(abs(fb[2] - 64) <= 2 && abs(fb[1] - 128) <= 2 && abs(fb[0] - 191) <= 2, "[[color(0)]] read (rgb %u %u %u)", fb[2], fb[1], fb[0]);
     }
-    id<MTLRenderPipelineState> w = rpipe(@"clip_write", 2), a = rpipe(@"clip_apply", 2);
+    // VMG_FETCH_VARIANT: 1 = c1 private, stored and read back; 2 = also clip_write writes c0 (full mask)
+    const char *fv = getenv("VMG_FETCH_VARIANT");
+    int variant = fv ? atoi(fv) : 0;
+    if (variant) { fd.storageMode = MTLStorageModeShared; c1 = [dev newTextureWithDescriptor:fd]; }
+    id<MTLRenderPipelineState> w = rpipe(variant == 2 ? @"clip_write_all" : @"clip_write", 2), a = rpipe(@"clip_apply", 2);
     if (w && a) {
         pass(2, @[w, a]);
         [c0 getBytes:fb bytesPerRow:32 fromRegion:MTLRegionMake2D(0, 0, 8, 8) mipmapLevel:0];
         const uint8_t *in = fb + (2 * 8 + 1) * 4, *out = fb + (2 * 8 + 6) * 4;   // x 1: clipped in, x 6: out
         CHECK(in[2] == 255 && in[1] == 0 && abs(out[2] - 128) <= 2 && abs(out[1] - 128) <= 2,
               "clip mask in [[color(1)]], mix with [[color(0)]] (in %u %u %u, out %u %u %u)", in[2], in[1], in[0], out[2], out[1], out[0]);
+        if (c1.storageMode == MTLStorageModeShared) {
+            uint8_t m[8 * 8 * 4];
+            [c1 getBytes:m bytesPerRow:32 fromRegion:MTLRegionMake2D(0, 0, 8, 8) mipmapLevel:0];
+            printf("  c1 after the pass: x1 %u, x6 %u\n", m[(2 * 8 + 1) * 4], m[(2 * 8 + 6) * 4]);
+        }
     }
 
     printf("%d/%d checks passed\n", checks - failures, checks);
