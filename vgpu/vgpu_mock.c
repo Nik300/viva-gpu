@@ -185,7 +185,7 @@ static int mock_ioctl(void *conn, enum vgpu_selector sel, void *arg, size_t size
     case VGPU_SEL_MMAP_BO: {
         struct vgpu_mmap_bo *a = arg;
         if (!bo(c, a->handle)) { ret = -ENOENT; break; }
-        a->offset = (uint64_t)a->handle << 16;   // token: handle in the high bits, never 0
+        a->offset = a->handle;   // token = handle, as the kernel (uapi); handles start at 1
         break;
     }
     case VGPU_SEL_GET_BO_OFFSET: {
@@ -345,7 +345,7 @@ static void *mock_mmap(void *conn, uint64_t token, size_t size)
 {
     MockConn *c = conn;
     pthread_mutex_lock(&c->lock);
-    MockBO *b = bo(c, (uint32_t)(token >> 16));
+    MockBO *b = bo(c, (uint32_t)token);
     void *src = b ? b->addr : NULL;
     size_t bsize = b ? b->size : 0;
     pthread_mutex_unlock(&c->lock);

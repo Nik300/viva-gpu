@@ -240,7 +240,8 @@ int main(void) { @autoreleasepool {
 
     printf("compressed textures\n");
     // ASTC 4x4 (SpringBoard's launch snapshots are ASTC): void-extent blocks = one constant colour (UNORM16 RGBA).
-    for (int fmt = 0; fmt < 2; fmt++) {
+    // llvmpipe has no ASTC: only on the GPU
+    for (int fmt = 0; fmt < 2 && ![dev.name containsString:@"llvmpipe"]; fmt++) {
         MTLPixelFormat pf = fmt ? MTLPixelFormatASTC_4x4_sRGB : MTLPixelFormatASTC_4x4_LDR;
         MTLTextureDescriptor *ad = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:pf width:8 height:8 mipmapped:NO];
         ad.usage = MTLTextureUsageShaderRead;

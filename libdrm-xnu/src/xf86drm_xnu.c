@@ -52,6 +52,8 @@ static void bo_forget(int fd, uint32_t handle)
     pthread_mutex_unlock(&g_bo_lock);
 }
 
+static void map_cache_drop(int fd, uint32_t handle);
+
 int drmIoctl(int fd, unsigned long request, void *arg)
 {
     enum vgpu_selector sel;
@@ -82,7 +84,11 @@ int drmIoctl(int fd, unsigned long request, void *arg)
     static int trace_bo = -1;
     if (trace_bo < 0) trace_bo = getenv("VGPU_TRACE_BO") != NULL;
     if (trace_bo && sel == VGPU_SEL_GEM_CLOSE) fprintf(stderr, "vgpu: close %u\n", ((struct vgpu_gem_close *)arg)->handle);
-    int r = vgpu_ioctl(fd, sel, arg);
+    // MMAP_BO: the uapi's mmap token is the BO handle (VGPU_SEL_MMAP_BO), so no kernel call is needed; Panfrost asks
+    // for it at every mapping of a BO taken from its cache.
+    int r = sel == VGPU_SEL_MMAP_BO ? (((struct vgpu_mmap_bo *)arg)->offset = ((struct vgpu_mmap_bo *)arg)->handle, 0)
+                                    : vgpu_ioctl(fd, sel, arg);
+    if (sel == VGPU_SEL_GEM_CLOSE && !r) map_cache_drop(fd, ((struct vgpu_gem_close *)arg)->handle);
     if (trace_bo && !r && sel == VGPU_SEL_CREATE_BO) {
         struct vgpu_create_bo *c = arg;
         fprintf(stderr, "vgpu: bo %u 0x%llx-0x%llx flags %x\n", c->handle, (unsigned long long)c->offset,
@@ -128,19 +134,33 @@ int drmCloseBufferHandle(int fd, uint32_t handle)
 {
     struct vgpu_gem_close c = { .handle = handle };
     int r = vgpu_ioctl(fd, VGPU_SEL_GEM_CLOSE, &c);
-    if (!r) bo_forget(fd, handle);
+    if (!r) { map_cache_drop(fd, handle); bo_forget(fd, handle); }
     return ret_errno(r);
 }
 
 // ---- BO mappings ----------------------------------------------------------------------------------------------------
 
-typedef struct { void *addr; size_t size; int fd; void *base; size_t map_size; } Mapping;   // addr = returned pointer
+// Mappings stay alive after drmUnmap until the BO is closed (map_cache_drop): Panfrost unmaps every BO it puts back
+// in its cache and maps it again when it takes it out, and IOConnectMapMemory64/IOConnectUnmapMemory64 cost far more
+// than mmap/munmap on Linux (a third of the GPU queue's time in CoreAnimation's frames went there).
+typedef struct { void *addr; size_t size; int fd; void *base; size_t map_size; uint64_t token; bool idle; } Mapping;
 static Mapping *g_maps;
 static size_t g_map_count, g_map_cap;
 static pthread_mutex_t g_map_lock = PTHREAD_MUTEX_INITIALIZER;
 
 int drmMap(int fd, drm_handle_t handle, drmSize size, drmAddressPtr address)
 {
+    pthread_mutex_lock(&g_map_lock);
+    for (size_t i = 0; i < g_map_count; i++) {
+        Mapping *m = &g_maps[i];
+        if (m->idle && m->fd == fd && m->token == (uint64_t)handle && m->size == size) {
+            m->idle = false;
+            *address = m->addr;
+            pthread_mutex_unlock(&g_map_lock);
+            return 0;
+        }
+    }
+    pthread_mutex_unlock(&g_map_lock);
     uint32_t in_page = 0;
     pthread_mutex_lock(&g_bo_lock);
     for (unsigned i = 0; i < g_bo_count; i++)
@@ -151,7 +171,7 @@ int drmMap(int fd, drm_handle_t handle, drmSize size, drmAddressPtr address)
     if (!p) return -errno;
     pthread_mutex_lock(&g_map_lock);
     if (g_map_count == g_map_cap) { g_map_cap = g_map_cap ? g_map_cap * 2 : 256; g_maps = realloc(g_maps, g_map_cap * sizeof *g_maps); }
-    g_maps[g_map_count++] = (Mapping){ (uint8_t *)p + in_page, size, fd, p, map_size };
+    g_maps[g_map_count++] = (Mapping){ (uint8_t *)p + in_page, size, fd, p, map_size, (uint64_t)handle, false };
     pthread_mutex_unlock(&g_map_lock);
     *address = (uint8_t *)p + in_page;
     return 0;
@@ -161,15 +181,27 @@ int drmUnmap(drmAddress address, drmSize size)
 {
     pthread_mutex_lock(&g_map_lock);
     for (size_t i = 0; i < g_map_count; i++) {
-        if (g_maps[i].addr != address) continue;
-        Mapping m = g_maps[i];
-        g_maps[i] = g_maps[--g_map_count];
+        if (g_maps[i].addr != address || g_maps[i].idle) continue;
+        g_maps[i].idle = true;   // unmapped for real when the BO is closed
         pthread_mutex_unlock(&g_map_lock);
         (void)size;
-        return vgpu_munmap(m.fd, m.base, m.map_size);
+        return 0;
     }
     pthread_mutex_unlock(&g_map_lock);
     return -EINVAL;
+}
+
+// The BO behind (fd, handle) is closed: its kept mappings go.
+static void map_cache_drop(int fd, uint32_t handle)
+{
+    pthread_mutex_lock(&g_map_lock);
+    for (size_t i = 0; i < g_map_count;) {
+        Mapping m = g_maps[i];
+        if (m.fd != fd || m.token != handle) { i++; continue; }
+        g_maps[i] = g_maps[--g_map_count];
+        vgpu_munmap(m.fd, m.base, m.map_size);
+    }
+    pthread_mutex_unlock(&g_map_lock);
 }
 
 // ---- IOSurfaces as dma-bufs -----------------------------------------------------------------------------------------
