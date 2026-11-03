@@ -1,7 +1,7 @@
 // CoreAnimation's own Metal renderer (CARenderer, the engine of iOS's render server in backboardd) on the Viva
 // driver: a layer tree typical of iOS UI is composed on our device (llvmpipe or Panfrost-on-mock) and on the Mac's
 // real GPU, and the two frames are compared. PNGs go to /tmp/vmg-ca-{viva,ref}.png.
-// Usage: ca [frames]
+// Usage: ca [frames]          (phone: writes /tmp/vmg-ca-viva.png only)
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/QuartzCore.h>
@@ -12,6 +12,14 @@
 
 id<MTLDevice> TSMtlCreateDevice(void);
 enum { W = 360, H = 640 };
+
+// CGColorCreateGenericRGB is macOS only.
+static CGColorRef rgb(CGFloat r, CGFloat g, CGFloat b, CGFloat a) {
+    static CGColorSpaceRef cs;
+    if (!cs) cs = CGColorSpaceCreateDeviceRGB();
+    const CGFloat c[4] = { r, g, b, a };
+    return CGColorCreate(cs, c);
+}
 
 static CGImageRef checkerImage(void) {
     CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
@@ -30,14 +38,14 @@ static CGImageRef checkerImage(void) {
 static CALayer *scene(void) {
     CALayer *root = [CALayer layer];
     root.frame = CGRectMake(0, 0, W, H);
-    root.backgroundColor = CGColorCreateGenericRGB(0.95, 0.95, 0.97, 1);
+    root.backgroundColor = rgb(0.95, 0.95, 0.97, 1);
 
     CALayer *card = [CALayer layer];                 // rounded, bordered, shadowed card
     card.frame = CGRectMake(20, 30, 320, 180);
-    card.backgroundColor = CGColorCreateGenericRGB(1, 1, 1, 1);
+    card.backgroundColor = rgb(1, 1, 1, 1);
     card.cornerRadius = 18;
     card.borderWidth = 1;
-    card.borderColor = CGColorCreateGenericRGB(0.8, 0.8, 0.85, 1);
+    card.borderColor = rgb(0.8, 0.8, 0.85, 1);
     card.shadowOpacity = 0.35;
     card.shadowRadius = 10;
     card.shadowOffset = CGSizeMake(0, 4);
@@ -55,13 +63,13 @@ static CALayer *scene(void) {
     text.frame = CGRectMake(150, 30, 160, 80);
     text.string = @"Viva Metal\nMali-G57";
     text.fontSize = 22;
-    text.foregroundColor = CGColorCreateGenericRGB(0.1, 0.1, 0.15, 1);
+    text.foregroundColor = rgb(0.1, 0.1, 0.15, 1);
     text.contentsScale = 2;
     [card addSublayer:text];
 
     CAGradientLayer *grad = [CAGradientLayer layer]; // gradient
     grad.frame = CGRectMake(20, 240, 320, 90);
-    grad.colors = @[(__bridge id)CGColorCreateGenericRGB(0.2, 0.5, 1, 1), (__bridge id)CGColorCreateGenericRGB(1, 0.3, 0.5, 1)];
+    grad.colors = @[(__bridge id)rgb(0.2, 0.5, 1, 1), (__bridge id)rgb(1, 0.3, 0.5, 1)];
     grad.startPoint = CGPointMake(0, 0.5);
     grad.endPoint = CGPointMake(1, 0.5);
     grad.cornerRadius = 12;
@@ -69,7 +77,7 @@ static CALayer *scene(void) {
 
     CALayer *tilted = [CALayer layer];               // 3D transform + opacity
     tilted.frame = CGRectMake(60, 360, 240, 120);
-    tilted.backgroundColor = CGColorCreateGenericRGB(0.2, 0.8, 0.4, 1);
+    tilted.backgroundColor = rgb(0.2, 0.8, 0.4, 1);
     tilted.opacity = 0.8;
     CATransform3D t = CATransform3DIdentity;
     t.m34 = -1.0 / 500;
@@ -124,6 +132,9 @@ static NSData *render(id<MTLDevice> dev, int frames, NSString *png) {
 int main(int argc, char **argv) { @autoreleasepool {
     int frames = argc > 1 ? atoi(argv[1]) : 2;
     id<MTLDevice> viva = TSMtlCreateDevice(), ref = MTLCreateSystemDefaultDevice();
+#if TARGET_OS_IPHONE
+    ref = nil;   // on the phone the system device is ours: only our frame, to look at
+#endif
     printf("viva: %s / reference: %s\n", viva.name.UTF8String, ref.name.UTF8String);
     NSData *a = render(viva, frames, @"/tmp/vmg-ca-viva.png");
     NSData *b = ref ? render(ref, frames, @"/tmp/vmg-ca-ref.png") : nil;
