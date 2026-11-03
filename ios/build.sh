@@ -34,7 +34,13 @@ mesa() {
   targets="$(bash "$GPU/mesa/build.sh" fn mesa_libs 2>/dev/null | grep -v -i 'llvmpipe\|gallivm\|null_sw' || true)"
   "$GPU/.venv/bin/ninja" -C "$B" $targets
   mkdir -p "$OUT/lib"
-  libtool -static -o "$OUT/lib/libmesa_viva.a" $(cd "$B" && for t in $targets; do echo "$B/$t"; done) 2>/dev/null
+  rm -f "$OUT/lib/libmesa_viva.a"
+  local libs=()
+  for t in $targets; do [ -f "$B/$t" ] && libs+=("$B/$t") || echo "missing $t"; done
+  echo "combining ${#libs[@]} archives"
+  xcrun --sdk iphoneos libtool -static -o "$OUT/lib/libmesa_viva.a" "${libs[@]}"
+  echo "libmesa_viva.a: $(ar t "$OUT/lib/libmesa_viva.a" | wc -l) members"
+  nm "$OUT/lib/libmesa_viva.a" 2>/dev/null | grep -c " T _nir_builder_init_simple_shader" || echo "nir_builder_init_simple_shader MISSING"
 }
 
 driver() {
