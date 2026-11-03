@@ -5,6 +5,9 @@
 #include <stdbool.h>
 #include "util/format/u_formats.h"
 
+// macOS-only formats, by value (unavailable in the iOS SDK).
+enum { VM_PF_D24S8 = 255, VM_PF_X24S8 = 262 };
+
 enum pipe_format vmg_pipe_format(unsigned f);
 enum pipe_format vmg_vertex_format(unsigned f);
 bool vmg_format_is_depth(unsigned f), vmg_format_is_stencil(unsigned f);
@@ -124,10 +127,10 @@ enum pipe_format vmg_pipe_format(unsigned f)
     case MTLPixelFormatDepth16Unorm: return PIPE_FORMAT_Z16_UNORM;
     case MTLPixelFormatDepth32Float: return PIPE_FORMAT_Z32_FLOAT;
     case MTLPixelFormatStencil8: return PIPE_FORMAT_S8_UINT;
-    case MTLPixelFormatDepth24Unorm_Stencil8: return PIPE_FORMAT_Z24_UNORM_S8_UINT;
+    case (MTLPixelFormat)VM_PF_D24S8: return PIPE_FORMAT_Z24_UNORM_S8_UINT;
     case MTLPixelFormatDepth32Float_Stencil8: return PIPE_FORMAT_Z32_FLOAT_S8X24_UINT;
     case MTLPixelFormatX32_Stencil8: return PIPE_FORMAT_X32_S8X24_UINT;
-    case MTLPixelFormatX24_Stencil8: return PIPE_FORMAT_X24S8_UINT;
+    case (MTLPixelFormat)VM_PF_X24S8: return PIPE_FORMAT_X24S8_UINT;
     // YUV formats (video): not handled yet.
     default: return PIPE_FORMAT_NONE;
     }
@@ -136,7 +139,7 @@ enum pipe_format vmg_pipe_format(unsigned f)
 bool vmg_format_is_depth(unsigned f)
 {
     switch ((MTLPixelFormat)f) {
-    case MTLPixelFormatDepth16Unorm: case MTLPixelFormatDepth32Float: case MTLPixelFormatDepth24Unorm_Stencil8:
+    case MTLPixelFormatDepth16Unorm: case MTLPixelFormatDepth32Float: case (MTLPixelFormat)VM_PF_D24S8:
     case MTLPixelFormatDepth32Float_Stencil8: return true;
     default: return false;
     }
@@ -145,8 +148,8 @@ bool vmg_format_is_depth(unsigned f)
 bool vmg_format_is_stencil(unsigned f)
 {
     switch ((MTLPixelFormat)f) {
-    case MTLPixelFormatStencil8: case MTLPixelFormatDepth24Unorm_Stencil8: case MTLPixelFormatDepth32Float_Stencil8:
-    case MTLPixelFormatX32_Stencil8: case MTLPixelFormatX24_Stencil8: return true;
+    case MTLPixelFormatStencil8: case (MTLPixelFormat)VM_PF_D24S8: case MTLPixelFormatDepth32Float_Stencil8:
+    case MTLPixelFormatX32_Stencil8: case (MTLPixelFormat)VM_PF_X24S8: return true;
     default: return false;
     }
 }

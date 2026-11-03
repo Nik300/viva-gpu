@@ -7,6 +7,7 @@
 #import <objc/runtime.h>
 #import <stdatomic.h>
 #import <TargetConditionals.h>
+#import "../../vgpu/iokit_compat.h"   // io_service_t, IORegistryEntryGetRegistryEntryID (no IOKit headers in the iOS SDK)
 
 // Implemented by _MTLDevice (checked at runtime), not declared in its header.
 @interface _MTLDevice (VMLibraries)
@@ -217,7 +218,7 @@ static NSDictionary<NSString *, NSNumber *> *VMLimitOffsets(Ivar ivar, size_t *s
     return MTLSizeMake(n, n, 64);
 }
 - (NSUInteger)maxThreadgroupMemoryLength { return vmg_device_get_info(_vmg)->max_shared_memory; }
-- (BOOL)isDepth24Stencil8PixelFormatSupported { return vmg_format_supported(_vmg, MTLPixelFormatDepth24Unorm_Stencil8, YES, NO); }
+- (BOOL)isDepth24Stencil8PixelFormatSupported { return vmg_format_supported(_vmg, (MTLPixelFormat)VM_PF_D24S8, YES, NO); }
 - (BOOL)supportsSampleCount:(NSUInteger)count { return count == 1 || (count <= vmg_device_get_info(_vmg)->max_samples && !(count & (count - 1))); }
 - (BOOL)supportsTextureSampleCount:(NSUInteger)count { return [self supportsSampleCount:count]; }
 - (BOOL)supportsVertexAmplificationCount:(NSUInteger)count { return count == 1; }

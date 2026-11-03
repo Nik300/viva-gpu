@@ -8,6 +8,9 @@
 #import <IOSurface/IOSurface.h>
 #include "../vmg.h"
 
+// macOS-only Metal pixel formats (marked unavailable in the iOS SDK), by value.
+enum { VM_PF_D24S8 = 255, VM_PF_X24S8 = 262 };
+
 #pragma clang diagnostic ignored "-Wprotocol"
 #pragma clang diagnostic ignored "-Wobjc-property-implementation"
 #pragma clang diagnostic ignored "-Wincomplete-implementation"

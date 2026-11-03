@@ -3,7 +3,7 @@
 #include <errno.h>
 #include <pthread.h>
 #include <stdlib.h>
-#include <IOKit/IOKitLib.h>
+#include "iokit_compat.h"
 
 typedef struct {
     io_connect_t conn;
