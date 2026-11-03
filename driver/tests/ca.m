@@ -193,6 +193,31 @@ static CALayer *settingsScene(void) {
             }
         }
     }
+    // An app's backing store (IOSurface 'BGRA', premultiplied): a white rounded section drawn by CoreGraphics, its
+    // corners transparent, as backboardd receives the Settings app's layers.
+    NSDictionary *props = @{ (id)kIOSurfaceWidth: @656, (id)kIOSurfaceHeight: @176, (id)kIOSurfaceBytesPerElement: @4,
+                             (id)kIOSurfacePixelFormat: @((uint32_t)'BGRA') };
+    IOSurfaceRef bs = IOSurfaceCreate((__bridge CFDictionaryRef)props);
+    if (bs) {
+        IOSurfaceLock(bs, 0, NULL);
+        CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+        CGContextRef c = CGBitmapContextCreate(IOSurfaceGetBaseAddress(bs), 656, 176, 8, IOSurfaceGetBytesPerRow(bs), cs,
+                                               kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little);
+        CGContextClearRect(c, CGRectMake(0, 0, 656, 176));
+        CGPathRef path = CGPathCreateWithRoundedRect(CGRectMake(0, 0, 656, 176), 20, 20, NULL);
+        CGContextAddPath(c, path);
+        CGContextSetRGBFillColor(c, 1, 1, 1, 1);
+        CGContextFillPath(c);
+        CGPathRelease(path);
+        CGContextRelease(c);
+        CGColorSpaceRelease(cs);
+        IOSurfaceUnlock(bs, 0, NULL);
+        CALayer *l = [CALayer layer];
+        l.frame = CGRectMake(16, 600 - 88 - 4, W - 32, 88);
+        l.contents = (__bridge id)bs;
+        l.contentsScale = 2;
+        [root addSublayer:l];
+    }
     Class backdrop = NSClassFromString(@"CABackdropLayer");
     if (backdrop && filter) {                                // navigation bar material
         CALayer *bd = [backdrop layer];
