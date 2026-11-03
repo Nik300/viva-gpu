@@ -10,6 +10,10 @@
 #import <CoreText/CoreText.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <IOSurface/IOSurfaceRef.h>
+#import <mach/mach.h>
+#import <mach-o/dyld.h>
+#import <dlfcn.h>
+#import <pthread.h>
 
 id<MTLDevice> TSMtlCreateDevice(void);
 enum { W = 360, H = 640 };
@@ -234,6 +238,55 @@ static CALayer *settingsScene(void) {
     return root;
 }
 
+// VMG_CA_PROFILE=FILE: a sampler thread suspends every other thread each millisecond and records its PC and frame
+// pointer chain (8 frames) as "image offset" lines, one sample per line, for atos on the Mac (tools/prof.py).
+static volatile bool prof_stop;
+static void *prof_thread(void *arg) {
+    FILE *f = fopen((const char *)arg, "w");
+    if (!f) return NULL;
+    thread_act_t self = mach_thread_self();
+    while (!prof_stop) {
+        thread_act_array_t th; mach_msg_type_number_t n;
+        if (task_threads(mach_task_self(), &th, &n) != KERN_SUCCESS) break;
+        for (unsigned i = 0; i < n; i++) {
+            if (th[i] == self) { mach_port_deallocate(mach_task_self(), th[i]); continue; }
+            arm_thread_state64_t st; mach_msg_type_number_t cnt = ARM_THREAD_STATE64_COUNT;
+            if (thread_suspend(th[i]) == KERN_SUCCESS) {
+                uint64_t pcs[9]; int np = 0;
+                if (thread_get_state(th[i], ARM_THREAD_STATE64, (thread_state_t)&st, &cnt) == KERN_SUCCESS) {
+                    pcs[np++] = arm_thread_state64_get_pc(st);
+                    pcs[np++] = arm_thread_state64_get_lr(st);
+                    uint64_t fp = arm_thread_state64_get_fp(st);
+                    while (np < 9 && fp && !(fp & 7)) {
+                        vm_size_t got = 0; uint64_t fr[2];
+                        if (vm_read_overwrite(mach_task_self(), fp, 16, (vm_address_t)fr, &got) != KERN_SUCCESS || got != 16) break;
+                        if (!fr[1]) break;
+                        pcs[np++] = fr[1];
+                        if (fr[0] <= fp) break;
+                        fp = fr[0];
+                    }
+                }
+                thread_resume(th[i]);
+                fprintf(f, "T%u", i);
+                for (int k = 0; k < np; k++) {
+                    Dl_info di;
+                    uint64_t pc = pcs[k] & 0x0000000fffffffffull;
+                    if (dladdr((void *)pc, &di) && di.dli_fname) {
+                        const char *b = strrchr(di.dli_fname, '/');
+                        fprintf(f, " %s+0x%llx", b ? b + 1 : di.dli_fname, (unsigned long long)(pc - (uint64_t)di.dli_fbase));
+                    } else fprintf(f, " ?");
+                }
+                fputc('\n', f);
+            }
+            mach_port_deallocate(mach_task_self(), th[i]);
+        }
+        vm_deallocate(mach_task_self(), (vm_address_t)th, n * sizeof *th);
+        usleep(1000);
+    }
+    fclose(f);
+    return NULL;
+}
+
 static NSData *render(id<MTLDevice> dev, int frames, NSString *png) {
     MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:W height:H mipmapped:NO];
     td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
@@ -255,8 +308,10 @@ static NSData *render(id<MTLDevice> dev, int frames, NSString *png) {
     // VMG_CA_TIME=1: every frame waits for the GPU; the average frame time is printed (frames after the first).
     bool timed = getenv("VMG_CA_TIME") != NULL;
     double t0 = 0;
+    pthread_t prof = 0;
     for (int f = 0; f < frames; f++) {
         if (f == 1) t0 = CACurrentMediaTime();
+        if (f == 1 && getenv("VMG_CA_PROFILE") && !prof_stop) pthread_create(&prof, NULL, prof_thread, getenv("VMG_CA_PROFILE"));
         [rr beginFrameAtTime:CACurrentMediaTime() timeStamp:NULL];
         [rr addUpdateRect:rr.bounds];
         [rr render];
@@ -267,6 +322,7 @@ static NSData *render(id<MTLDevice> dev, int frames, NSString *png) {
             [w waitUntilCompleted];
         }
     }
+    if (prof) { prof_stop = true; pthread_join(prof, NULL); }
     if (timed && frames > 1)
         printf("%s: %.2f ms per frame (%d frames)\n", dev.name.UTF8String, (CACurrentMediaTime() - t0) * 1000 / (frames - 1), frames - 1);
     id<MTLCommandBuffer> cb = [q commandBuffer];   // wait for CARenderer's command buffers
