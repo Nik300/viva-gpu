@@ -15,6 +15,7 @@ typedef struct LLVMOpaqueMemoryBuffer *LLVMMemoryBufferRef;
 typedef struct LLVMOpaqueTargetData *LLVMTargetDataRef;
 typedef struct LLVMOpaqueError *LLVMErrorRef;
 typedef struct LLVMOpaquePassBuilderOptions *LLVMPassBuilderOptionsRef;
+typedef struct LLVMOpaquePassManager *LLVMPassManagerRef;
 typedef int LLVMBool;
 
 typedef enum {
@@ -56,11 +57,6 @@ typedef enum {
     X(void, LLVMDisposeModule, (LLVMModuleRef)) \
     X(LLVMModuleRef, LLVMCloneModule, (LLVMModuleRef)) \
     X(char *, LLVMPrintModuleToString, (LLVMModuleRef)) \
-    X(LLVMPassBuilderOptionsRef, LLVMCreatePassBuilderOptions, (void)) \
-    X(void, LLVMDisposePassBuilderOptions, (LLVMPassBuilderOptionsRef)) \
-    X(LLVMErrorRef, LLVMRunPasses, (LLVMModuleRef, const char *, void *, LLVMPassBuilderOptionsRef)) \
-    X(char *, LLVMGetErrorMessage, (LLVMErrorRef)) \
-    X(void, LLVMDisposeErrorMessage, (char *)) \
     X(char *, LLVMPrintValueToString, (LLVMValueRef)) \
     X(void, LLVMDisposeMessage, (char *)) \
     X(unsigned, LLVMGetNamedMetadataNumOperands, (LLVMModuleRef, const char *)) \
@@ -109,9 +105,6 @@ typedef enum {
     X(LLVMValueRef, LLVMGetCondition, (LLVMValueRef)) \
     X(LLVMBasicBlockRef, LLVMValueAsBasicBlock, (LLVMValueRef)) \
     X(LLVMTypeRef, LLVMGetAllocatedType, (LLVMValueRef)) \
-    X(LLVMTypeRef, LLVMGetGEPSourceElementType, (LLVMValueRef)) \
-    X(unsigned, LLVMGetNumMaskElements, (LLVMValueRef)) \
-    X(int, LLVMGetMaskValue, (LLVMValueRef, unsigned)) \
     X(LLVMValueRef, LLVMIsAConstantInt, (LLVMValueRef)) \
     X(LLVMValueRef, LLVMIsAConstantFP, (LLVMValueRef)) \
     X(LLVMValueRef, LLVMIsAConstant, (LLVMValueRef)) \
@@ -127,7 +120,6 @@ typedef enum {
     X(LLVMValueRef, LLVMIsAArgument, (LLVMValueRef)) \
     X(LLVMValueRef, LLVMIsAInstruction, (LLVMValueRef)) \
     X(LLVMBool, LLVMIsUndef, (LLVMValueRef)) \
-    X(LLVMBool, LLVMIsPoison, (LLVMValueRef)) \
     X(LLVMOpcode, LLVMGetConstOpcode, (LLVMValueRef)) \
     X(LLVMValueRef, LLVMGetInitializer, (LLVMValueRef)) \
     X(LLVMValueRef, LLVMGetElementAsConstant, (LLVMValueRef, unsigned)) \
@@ -159,7 +151,29 @@ typedef struct LLVMOpaqueAttributeRef *LLVMAttributeRef;
     X(void, LLVMRemoveEnumAttributeAtIndex, (LLVMValueRef, unsigned, unsigned)) \
     X(LLVMAttributeRef, LLVMCreateEnumAttribute, (LLVMContextRef, unsigned, uint64_t)) \
     X(void, LLVMAddAttributeAtIndex, (LLVMValueRef, unsigned, LLVMAttributeRef)) \
-    X(LLVMContextRef, LLVMGetModuleContext, (LLVMModuleRef))
+    X(LLVMContextRef, LLVMGetModuleContext, (LLVMModuleRef)) \
+    /* new pass manager and opaque-pointer era (macOS); iOS 16's libLLVM (~LLVM 11, typed pointers) has the legacy ones */ \
+    X(LLVMPassBuilderOptionsRef, LLVMCreatePassBuilderOptions, (void)) \
+    X(void, LLVMDisposePassBuilderOptions, (LLVMPassBuilderOptionsRef)) \
+    X(LLVMErrorRef, LLVMRunPasses, (LLVMModuleRef, const char *, void *, LLVMPassBuilderOptionsRef)) \
+    X(char *, LLVMGetErrorMessage, (LLVMErrorRef)) \
+    X(void, LLVMDisposeErrorMessage, (char *)) \
+    X(LLVMTypeRef, LLVMGetGEPSourceElementType, (LLVMValueRef)) \
+    X(unsigned, LLVMGetNumMaskElements, (LLVMValueRef)) \
+    X(int, LLVMGetMaskValue, (LLVMValueRef, unsigned)) \
+    X(LLVMBool, LLVMIsPoison, (LLVMValueRef)) \
+    X(LLVMPassManagerRef, LLVMCreatePassManager, (void)) \
+    X(LLVMBool, LLVMRunPassManager, (LLVMPassManagerRef, LLVMModuleRef)) \
+    X(void, LLVMDisposePassManager, (LLVMPassManagerRef)) \
+    X(void, LLVMAddAlwaysInlinerPass, (LLVMPassManagerRef)) \
+    X(void, LLVMAddFunctionInliningPass, (LLVMPassManagerRef)) \
+    X(void, LLVMAddScalarReplAggregatesPass, (LLVMPassManagerRef)) \
+    X(void, LLVMAddPromoteMemoryToRegisterPass, (LLVMPassManagerRef)) \
+    X(void, LLVMAddEarlyCSEPass, (LLVMPassManagerRef)) \
+    X(void, LLVMAddInstructionCombiningPass, (LLVMPassManagerRef)) \
+    X(void, LLVMAddDeadStoreEliminationPass, (LLVMPassManagerRef)) \
+    X(void, LLVMAddAggressiveDCEPass, (LLVMPassManagerRef)) \
+    X(void, LLVMAddCFGSimplificationPass, (LLVMPassManagerRef))
 
 #define TS_LLVM_DECLARE(ret, name, args) extern ret (*ts_##name) args;
 TS_LLVM_FUNCS(TS_LLVM_DECLARE)

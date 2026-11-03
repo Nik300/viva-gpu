@@ -158,6 +158,9 @@ static char *llvm_name(LLVMValueRef v)
 // Panfrost has native fp16 and keeps them 16-bit. Set per translation (thread local: pipelines translate in parallel).
 static _Thread_local bool g_half32;
 
+// LLVM 12+ separates poison from undef; iOS 16's libLLVM has no LLVMIsPoison (and treats both as undef).
+static bool is_undef(LLVMValueRef v) { return ts_LLVMIsUndef(v) || (ts_LLVMIsPoison && ts_LLVMIsPoison(v)); }
+
 static bool is_half_type(LLVMTypeRef t)
 {
     if (ts_LLVMGetTypeKind(t) == LLVMVectorTypeKind) t = ts_LLVMGetElementType(t);
@@ -238,7 +241,7 @@ static nir_def *scalar_const(T *t, LLVMValueRef c, LLVMTypeRef ty)
 {
     unsigned bits; bool flt;
     if (!scalar_info(ty, &bits, &flt)) return NULL;
-    if (ts_LLVMIsUndef(c) || ts_LLVMIsPoison(c) || ts_LLVMIsAConstantAggregateZero(c)) return nir_imm_zero(&t->b, 1, bits);
+    if (is_undef(c) || ts_LLVMIsAConstantAggregateZero(c)) return nir_imm_zero(&t->b, 1, bits);
     if (flt) {
         LLVMBool lost;
         double d = ts_LLVMConstRealGetDouble(c, &lost);
@@ -257,7 +260,7 @@ static val *constant(T *t, LLVMValueRef c)
     LLVMTypeKind k = ts_LLVMGetTypeKind(ty);
     if (ts_LLVMIsAConstantExpr(c)) return const_expr(t, c);
     if (ts_LLVMIsAGlobalVariable(c) || ts_LLVMIsAFunction(c)) return value(t, c);
-    if (ts_LLVMIsUndef(c) || ts_LLVMIsPoison(c) || ts_LLVMIsAConstantAggregateZero(c) || ts_LLVMIsAConstantPointerNull(c))
+    if (is_undef(c) || ts_LLVMIsAConstantAggregateZero(c) || ts_LLVMIsAConstantPointerNull(c))
         return zero_val(t, ty);
     if (k == LLVMVectorTypeKind) {
         unsigned n = ts_LLVMGetVectorSize(ty);
@@ -290,7 +293,7 @@ static bool serialize_const(T *t, LLVMValueRef c, uint8_t *out, uint64_t size)
 {
     LLVMTypeRef ty = ts_LLVMTypeOf(c);
     LLVMTypeKind k = ts_LLVMGetTypeKind(ty);
-    if (ts_LLVMIsUndef(c) || ts_LLVMIsPoison(c) || ts_LLVMIsAConstantAggregateZero(c) || ts_LLVMIsAConstantPointerNull(c)) {
+    if (is_undef(c) || ts_LLVMIsAConstantAggregateZero(c) || ts_LLVMIsAConstantPointerNull(c)) {
         memset(out, 0, size);
         return true;
     }
@@ -552,7 +555,9 @@ static val *gep(T *t, LLVMValueRef inst, unsigned nops)
     val *base = value(t, ts_LLVMGetOperand(inst, 0));
     if (!base) return NULL;
     if (base->kind != V_PTR) FAIL(t, "GEP on a non-pointer");
-    LLVMTypeRef ty = ts_LLVMGetGEPSourceElementType(inst);
+    // Typed pointers (iOS 16's libLLVM): the source element type is the pointee of the base operand.
+    LLVMTypeRef ty = ts_LLVMGetGEPSourceElementType ? ts_LLVMGetGEPSourceElementType(inst)
+                                                    : ts_LLVMGetElementType(ts_LLVMTypeOf(ts_LLVMGetOperand(inst, 0)));
     nir_builder *b = &t->b;
     int64_t cst = 0;
     nir_def *dyn = NULL;
@@ -1118,11 +1123,21 @@ static val *shuffle(T *t, LLVMValueRef inst)
 {
     nir_def *x = ssa(t, ts_LLVMGetOperand(inst, 0)), *y = ssa(t, ts_LLVMGetOperand(inst, 1));
     if (!x || !y) return NULL;
-    unsigned n = ts_LLVMGetNumMaskElements(inst);
+    unsigned n = ts_LLVMGetNumMaskElements ? ts_LLVMGetNumMaskElements(inst) : ts_LLVMGetVectorSize(ts_LLVMTypeOf(inst));
     nir_def *c[16];
     if (n > 16) FAIL(t, "shuffle of %u lanes", n);
+    // Older LLVM (iOS 16): the mask is the third operand, a constant vector.
+    LLVMValueRef mask = ts_LLVMGetMaskValue ? NULL : ts_LLVMGetNumOperands(inst) > 2 ? ts_LLVMGetOperand(inst, 2) : NULL;
+    if (!ts_LLVMGetMaskValue && !mask) FAIL(t, "shuffle mask not readable");
     for (unsigned i = 0; i < n; i++) {
-        int m = ts_LLVMGetMaskValue(inst, i);
+        int m;
+        if (ts_LLVMGetMaskValue) m = ts_LLVMGetMaskValue(inst, i);
+        else if (is_undef(mask)) m = -1;
+        else if (ts_LLVMIsAConstantAggregateZero(mask)) m = 0;
+        else {
+            LLVMValueRef e = ts_LLVMIsAConstantDataSequential(mask) ? ts_LLVMGetElementAsConstant(mask, i) : ts_LLVMGetOperand(mask, i);
+            m = !e || is_undef(e) ? -1 : (int)ts_LLVMConstIntGetZExtValue(e);
+        }
         if (m < 0) c[i] = nir_undef(&t->b, 1, x->bit_size);
         else c[i] = (unsigned)m < x->num_components ? nir_channel(&t->b, x, (unsigned)m) : nir_channel(&t->b, y, (unsigned)m - x->num_components);
     }
@@ -1433,7 +1448,7 @@ static val *texture(T *t, LLVMValueRef inst, const char *name)
     const char *op = name + 4;   // after "air."
     LLVMValueRef texArg = ts_LLVMGetOperand(inst, 0);
     LLVMTypeRef rt = ts_LLVMTypeOf(inst);
-    if (ts_LLVMIsUndef(texArg) || ts_LLVMIsPoison(texArg)) {
+    if (is_undef(texArg)) {
         if (ts_LLVMGetTypeKind(rt) == LLVMVoidTypeKind) return vnew(t, V_NONE);
         return zero_val(t, rt);
     }
@@ -2105,8 +2120,36 @@ static bool emit_function(T *t)
 
 static const char *kCleanupPasses = "inline,function(sroa,early-cse,instcombine,dse,adce,simplifycfg,instcombine,simplifycfg)";
 
+// Legacy pass manager (iOS 16's libLLVM has no LLVMRunPasses): the same two pipelines.
+static char *run_passes_legacy(LLVMModuleRef mod, const char *pipeline)
+{
+    if (!ts_LLVMCreatePassManager || !ts_LLVMRunPassManager || !ts_LLVMAddAlwaysInlinerPass)
+        return strdup("libLLVM has neither the new nor the legacy pass manager");
+    LLVMPassManagerRef pm = ts_LLVMCreatePassManager();
+    if (!strcmp(pipeline, "always-inline")) ts_LLVMAddAlwaysInlinerPass(pm);
+    else {
+#define ADD(p) if (ts_##p) ts_##p(pm)
+        ADD(LLVMAddFunctionInliningPass);
+        ADD(LLVMAddScalarReplAggregatesPass);
+        ADD(LLVMAddPromoteMemoryToRegisterPass);
+        ADD(LLVMAddEarlyCSEPass);
+        ADD(LLVMAddInstructionCombiningPass);
+        ADD(LLVMAddDeadStoreEliminationPass);
+        ADD(LLVMAddAggressiveDCEPass);
+        ADD(LLVMAddCFGSimplificationPass);
+        ADD(LLVMAddInstructionCombiningPass);
+        ADD(LLVMAddCFGSimplificationPass);
+#undef ADD
+    }
+    ts_LLVMRunPassManager(pm, mod);
+    ts_LLVMDisposePassManager(pm);
+    return NULL;
+}
+
 static char *run_passes(LLVMModuleRef mod, const char *pipeline)
 {
+    if (!ts_LLVMRunPasses || !ts_LLVMCreatePassBuilderOptions || getenv("VMG_LLVM_LEGACY_PM"))
+        return run_passes_legacy(mod, pipeline);
     LLVMPassBuilderOptionsRef opts = ts_LLVMCreatePassBuilderOptions();
     LLVMErrorRef err = ts_LLVMRunPasses(mod, pipeline, NULL, opts);
     ts_LLVMDisposePassBuilderOptions(opts);
