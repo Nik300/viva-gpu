@@ -135,6 +135,7 @@ typedef struct {
     nir_variable *color_out[VMG_MAX_COLOR];   // render target variables (also read by programmable blending)
     nir_variable *tex_vars[VMG_MAX_TEXTURES], *img_vars[VMG_MAX_TEXTURES], *smp_vars[32];
     unsigned scratch, shared;
+    bool no_nans;                 // fast math (Metal's default): NaN constants are poison
     char *error;
 } T;
 
@@ -245,6 +246,10 @@ static nir_def *scalar_const(T *t, LLVMValueRef c, LLVMTypeRef ty)
     if (flt) {
         LLVMBool lost;
         double d = ts_LLVMConstRealGetDouble(c, &lost);
+        // Under fast math Apple's compiler leaves NaN constants that the GPU never lets through, e.g. CoreAnimation's
+        // rounded clip (TbdsXc_*: mix(backdrop, NaN, coverage), only coverage 0 survives). NIR folds them through
+        // flrp into NaN everywhere (black corners). They are poison there: any value is right, 0 keeps the rest.
+        if (d != d && t->no_nans) d = 0;
         return nir_imm_floatN_t(&t->b, d, bits);
     }
     if (ts_LLVMIsAConstantInt(c)) {
@@ -2244,7 +2249,19 @@ static nir_shader *translate_module(const nir_shader_compiler_options *options, 
     t.fn = ops.n ? ops.ops[0] : NULL;
     if (!t.fn || !ts_LLVMIsAFunction(t.fn)) { *error = strdup("entry point not found"); ts_LLVMDisposeTargetData(t.td); return NULL; }
 
+    // Fast math unless the function says otherwise (no attribute API: Metal's default, fast math).
+    t.no_nans = true;
+    if (ts_LLVMGetStringAttributeAtIndex && ts_LLVMGetStringAttributeValue) {
+        LLVMAttributeRef a = ts_LLVMGetStringAttributeAtIndex(t.fn, ~0u, "no-nans-fp-math", 15);
+        unsigned len = 0;
+        const char *v = a ? ts_LLVMGetStringAttributeValue(a, &len) : NULL;
+        t.no_nans = v && len == 4 && !strncmp(v, "true", 4);
+    }
     char *fname = llvm_name(t.fn);
+    // VMG_TRACE_AIR=name: the entry point's LLVM IR (after inlining) and its NIR before optimization.
+    const char *trace_air = getenv("VMG_TRACE_AIR");
+    bool dump = trace_air && fname && !strcmp(trace_air, fname);
+    if (dump) { char *txt = ts_LLVMPrintValueToString(t.fn); fprintf(stderr, "%s\n", txt); ts_LLVMDisposeMessage(txt); }
     t.b = nir_builder_init_simple_shader(t.stage, options, "%s", fname ? fname : "air");
     free(fname);
     t.s = t.b.shader;
@@ -2278,6 +2295,7 @@ static nir_shader *translate_module(const nir_shader_compiler_options *options, 
 
         nir_sort_unstructured_blocks(t.impl);
         nir_validate_shader(s, "after AIR translation");
+        if (dump) nir_print_shader(s, stderr);
         NIR_PASS(_, s, nir_lower_goto_ifs);
         if (t.stage == MESA_SHADER_COMPUTE) {
             // dispatchThreads: threads beyond threads_per_grid (system values) do not exist in Metal. The guard is

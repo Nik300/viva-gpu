@@ -146,6 +146,69 @@ static CALayer *scene(void) {
     return root;
 }
 
+
+// VMG_CA_SETTINGS=1: the Settings app (inset grouped table): sections with only their top or bottom corners rounded
+// (maskedCorners, continuous curve), switches (pill + shadowed knob), a navigation bar backdrop over the content.
+static CALayer *settingsScene(void) {
+    CALayer *root = [CALayer layer];
+    root.frame = CGRectMake(0, 0, W, H);
+    root.backgroundColor = rgb(0.949, 0.949, 0.969, 1);
+    Class filter = NSClassFromString(@"CAFilter");
+    for (int s = 0; s < 3; s++) {
+        CGFloat y0 = 100 + s * 170;
+        for (int r = 0; r < 3; r++) {
+            CALayer *cell = [CALayer layer];
+            cell.frame = CGRectMake(16, y0 + r * 44, W - 32, 44);
+            cell.backgroundColor = rgb(1, 1, 1, 1);
+            cell.cornerRadius = 10;
+            if (@available(iOS 13.0, macOS 10.15, *)) cell.cornerCurve = kCACornerCurveContinuous;
+            cell.maskedCorners = r == 0 ? (kCALayerMinXMinYCorner | kCALayerMaxXMinYCorner)
+                               : r == 2 ? (kCALayerMinXMaxYCorner | kCALayerMaxXMaxYCorner) : 0;
+            cell.masksToBounds = s == 1;    // section 1 clips (subviews), the others only round the background
+            [root addSublayer:cell];
+            CALayer *icon = [CALayer layer];
+            icon.frame = CGRectMake(12, 8, 28, 28);
+            icon.backgroundColor = rgb(0.2 + 0.3 * r, 0.4, 0.9 - 0.3 * s, 1);
+            icon.cornerRadius = 7;
+            if (@available(iOS 13.0, macOS 10.15, *)) icon.cornerCurve = kCACornerCurveContinuous;
+            [cell addSublayer:icon];
+            CALayer *pill = [CALayer layer];                 // UISwitch: track
+            pill.frame = CGRectMake(W - 32 - 16 - 51, 6.5, 51, 31);
+            pill.backgroundColor = (r & 1) ? rgb(0.2, 0.78, 0.35, 1) : rgb(0.47, 0.47, 0.5, 0.16);
+            pill.cornerRadius = 15.5;
+            [cell addSublayer:pill];
+            CALayer *knob = [CALayer layer];                 // knob with a shadow
+            knob.frame = CGRectMake((r & 1) ? 22 : 2, 2, 27, 27);
+            knob.backgroundColor = rgb(1, 1, 1, 1);
+            knob.cornerRadius = 13.5;
+            knob.shadowOpacity = 0.25;
+            knob.shadowRadius = 4;
+            knob.shadowOffset = CGSizeMake(0, 3);
+            [pill addSublayer:knob];
+            if (r < 2) {
+                CALayer *sep = [CALayer layer];
+                sep.frame = CGRectMake(52, 43.5, W - 32 - 52, 0.5);
+                sep.backgroundColor = rgb(0.24, 0.24, 0.26, 0.29);
+                [cell addSublayer:sep];
+            }
+        }
+    }
+    Class backdrop = NSClassFromString(@"CABackdropLayer");
+    if (backdrop && filter) {                                // navigation bar material
+        CALayer *bd = [backdrop layer];
+        bd.frame = CGRectMake(0, 0, W, 90);
+        id blur = [filter performSelector:@selector(filterWithType:) withObject:@"gaussianBlur"];
+        [blur setValue:@20 forKey:@"inputRadius"];
+        bd.filters = @[blur];
+        [root addSublayer:bd];
+        CALayer *tint = [CALayer layer];
+        tint.frame = bd.bounds;
+        tint.backgroundColor = rgb(0.97, 0.97, 0.97, 0.8);
+        [bd addSublayer:tint];
+    }
+    return root;
+}
+
 static NSData *render(id<MTLDevice> dev, int frames, NSString *png) {
     MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:W height:H mipmapped:NO];
     td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
@@ -161,7 +224,7 @@ static NSData *render(id<MTLDevice> dev, int frames, NSString *png) {
         tex = [dev newTextureWithDescriptor:td];
     id<MTLCommandQueue> q = [dev newCommandQueue];
     CARenderer *rr = [CARenderer rendererWithMTLTexture:tex options:@{ kCARendererMetalCommandQueue: q }];
-    rr.layer = scene();
+    rr.layer = getenv("VMG_CA_SETTINGS") ? settingsScene() : scene();
     rr.bounds = CGRectMake(0, 0, W, H);
     [CATransaction flush];
     for (int f = 0; f < frames; f++) {

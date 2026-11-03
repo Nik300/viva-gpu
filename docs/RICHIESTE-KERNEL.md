@@ -6,6 +6,20 @@ serve a me per verificarla.
 
 ## Bloccanti per G7
 
+### K0. Sync implicita sui BO in SUBMIT (come `panfrost_job.c` su Linux) — 2026-11-03
+`VivaGPUUserClient::submit` costruisce le dipendenze del job **solo dagli `in_syncs`**. Linux fa attendere ogni job
+l'ultimo job su **ognuno dei BO** che elenca (tutti trattati come scritti: `DMA_RESV_USAGE_WRITE`), e Mesa ci conta:
+il job vertex/tiler (slot 1) e il fragment (slot 0) di un batch sono **due submit senza in-sync tra loro**
+(`jm_submit_batch`: "since there will be an implicit dep between them"), e tutti i batch condividono il tiler heap.
+Da noi il fragment partiva mentre il tiler scriveva ancora le polygon list (o il tiler del batch dopo riscriveva
+l'heap): mezzi triangoli, MMU fault a indirizzi garbage in slot 0, timeout in backboardd. Anche `WAIT_BO` ne soffre:
+`bo->busy` è il fence dell'ultimo job, che su un altro slot può finire prima di un job precedente sullo stesso BO.
+- Serve: in `VivaGPUAccelerator::submit`, prima di `bo->busy = fence`, se `bo->busy` non è segnalato aggiungerlo a
+  `job->deps`. Con la catena ogni `busy` finisce dopo tutti i job precedenti sul BO, quindi `WAIT_BO` torna corretto.
+  Vale anche tra connessioni/processi (IOSurface condivise).
+- Intanto: `libdrm-xnu` serializza tutte le submit di una connessione con un syncobj (`submit_ordered`,
+  `VGPU_NO_IMPLICIT_SYNC=1` lo spegne). Con la patch kernel lo tolgo (o lo lascio: diventa ridondante).
+
 ### K1. Tracciare cosa userspace chiede a `VivaGPUAccelerator` che non gestiamo
 QuartzCore fa soft-link di `IOGPU.framework` per `IOGPUDeviceCreate` e `IOGPUDeviceSetDisplayParams`. Lo fa sul
 servizio `IOAcceleratorES` che trova, cioè il nostro. `IOGPUDeviceCreate` apre un user client di tipo diverso da

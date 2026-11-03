@@ -162,6 +162,8 @@ typedef struct LLVMOpaqueAttributeRef *LLVMAttributeRef;
     X(unsigned, LLVMGetNumMaskElements, (LLVMValueRef)) \
     X(int, LLVMGetMaskValue, (LLVMValueRef, unsigned)) \
     X(LLVMBool, LLVMIsPoison, (LLVMValueRef)) \
+    X(LLVMAttributeRef, LLVMGetStringAttributeAtIndex, (LLVMValueRef, unsigned, const char *, unsigned)) \
+    X(const char *, LLVMGetStringAttributeValue, (LLVMAttributeRef, unsigned *)) \
     X(LLVMPassManagerRef, LLVMCreatePassManager, (void)) \
     X(LLVMBool, LLVMRunPassManager, (LLVMPassManagerRef, LLVMModuleRef)) \
     X(void, LLVMDisposePassManager, (LLVMPassManagerRef)) \
