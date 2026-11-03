@@ -42,7 +42,22 @@ hdiutil detach "$dev"
 trap - EXIT
 rmdir "$mnt" 2>/dev/null || true
 
-python3 "$img2simg" "$out.img" "$out.simg"
+# Write to a temporary name, check that every block is covered, then rename: an interrupted conversion must not
+# leave a truncated OUT.simg (fastboot then fails with "Failed reading from userdata").
+python3 "$img2simg" "$out.img" "$out.simg.part"
+python3 - "$out.simg.part" <<'PY'
+import os, struct, sys
+f = open(sys.argv[1], 'rb'); m, _, _, hs, cs, bs, tb, tc, _ = struct.unpack('<IHHHHIIII', f.read(28))
+f.seek(hs); n = 0
+for _ in range(tc):
+    h = f.read(cs)
+    if len(h) < cs: sys.exit('truncated sparse image')
+    t, _, b, tot = struct.unpack('<HHII', h); f.seek(tot - cs, 1); n += b
+if m != 0xed26ff3a or n != tb or f.tell() != os.path.getsize(sys.argv[1]): sys.exit('invalid sparse image')
+print('sparse image ok: %d blocks' % n)
+PY
+mv "$out.simg.part" "$out.simg"
 chown "${SUDO_USER:-root}" "$out.img" "$out.simg" 2>/dev/null || true
 ls -la "$out.img" "$out.simg"
 echo "flash: fastboot -S 512M flash userdata $out.simg"
+echo "(the conversion takes a few minutes: run it in a terminal, not through a short-lived command)"
