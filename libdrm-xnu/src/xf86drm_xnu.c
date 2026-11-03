@@ -3,6 +3,7 @@
 // selectors with the same structures. A "dma-buf fd" is an IOSurface plane (vmg_drm_surface_fd): importing it maps
 // the surface's pages into the GPU (VGPU_SEL_IMPORT_IOSURFACE). Anything else returns -ENOSYS.
 #include <errno.h>
+#include <stdbool.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -25,6 +26,29 @@ _Static_assert(sizeof(struct drm_panfrost_sync_bo) == sizeof(struct vgpu_sync_bo
 static int ret_errno(int r) { if (r < 0) { errno = -r; return -1; } return r; }
 
 // ---- ioctl ----------------------------------------------------------------------------------------------------------
+
+// Imported IOSurface planes that do not start on a page: the GPU offset is the plane, the CPU mapping starts at the
+// page (uapi). Panfrost expects both to address the same byte, so drmMap adds the plane's offset in the page.
+typedef struct { int fd; uint32_t handle; uint64_t token; uint32_t in_page; } BOInfo;
+static BOInfo g_bo[1024];
+static unsigned g_bo_count;
+static pthread_mutex_t g_bo_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static BOInfo *bo_info(int fd, uint32_t handle, bool create)
+{
+    for (unsigned i = 0; i < g_bo_count; i++) if (g_bo[i].fd == fd && g_bo[i].handle == handle) return &g_bo[i];
+    if (!create || g_bo_count == 1024) return NULL;
+    g_bo[g_bo_count] = (BOInfo){ fd, handle, 0, 0 };
+    return &g_bo[g_bo_count++];
+}
+
+static void bo_forget(int fd, uint32_t handle)
+{
+    pthread_mutex_lock(&g_bo_lock);
+    BOInfo *b = bo_info(fd, handle, false);
+    if (b) *b = g_bo[--g_bo_count];
+    pthread_mutex_unlock(&g_bo_lock);
+}
 
 int drmIoctl(int fd, unsigned long request, void *arg)
 {
@@ -52,7 +76,16 @@ int drmIoctl(int fd, unsigned long request, void *arg)
         errno = ENOSYS;
         return -1;
     }
-    return ret_errno(vgpu_ioctl(fd, sel, arg));
+    int r = vgpu_ioctl(fd, sel, arg);
+    if (!r && sel == VGPU_SEL_MMAP_BO) {
+        struct vgpu_mmap_bo *m = arg;
+        pthread_mutex_lock(&g_bo_lock);
+        BOInfo *b = bo_info(fd, m->handle, false);
+        if (b) b->token = m->offset;
+        pthread_mutex_unlock(&g_bo_lock);
+    }
+    if (!r && sel == VGPU_SEL_GEM_CLOSE) bo_forget(fd, ((struct vgpu_gem_close *)arg)->handle);
+    return ret_errno(r);
 }
 
 drmVersionPtr drmGetVersion(int fd)
@@ -83,25 +116,33 @@ void drmFreeVersion(drmVersionPtr v)
 int drmCloseBufferHandle(int fd, uint32_t handle)
 {
     struct vgpu_gem_close c = { .handle = handle };
-    return ret_errno(vgpu_ioctl(fd, VGPU_SEL_GEM_CLOSE, &c));
+    int r = vgpu_ioctl(fd, VGPU_SEL_GEM_CLOSE, &c);
+    if (!r) bo_forget(fd, handle);
+    return ret_errno(r);
 }
 
 // ---- BO mappings ----------------------------------------------------------------------------------------------------
 
-typedef struct { void *addr; size_t size; int fd; } Mapping;
+typedef struct { void *addr; size_t size; int fd; void *base; size_t map_size; } Mapping;   // addr = returned pointer
 static Mapping *g_maps;
 static size_t g_map_count, g_map_cap;
 static pthread_mutex_t g_map_lock = PTHREAD_MUTEX_INITIALIZER;
 
 int drmMap(int fd, drm_handle_t handle, drmSize size, drmAddressPtr address)
 {
-    void *p = vgpu_mmap(fd, (uint64_t)handle, size);
+    uint32_t in_page = 0;
+    pthread_mutex_lock(&g_bo_lock);
+    for (unsigned i = 0; i < g_bo_count; i++)
+        if (g_bo[i].fd == fd && g_bo[i].token == (uint64_t)handle) { in_page = g_bo[i].in_page; break; }
+    pthread_mutex_unlock(&g_bo_lock);
+    size_t map_size = size + in_page;
+    void *p = vgpu_mmap(fd, (uint64_t)handle, map_size);
     if (!p) return -errno;
     pthread_mutex_lock(&g_map_lock);
     if (g_map_count == g_map_cap) { g_map_cap = g_map_cap ? g_map_cap * 2 : 256; g_maps = realloc(g_maps, g_map_cap * sizeof *g_maps); }
-    g_maps[g_map_count++] = (Mapping){ p, size, fd };
+    g_maps[g_map_count++] = (Mapping){ (uint8_t *)p + in_page, size, fd, p, map_size };
     pthread_mutex_unlock(&g_map_lock);
-    *address = p;
+    *address = (uint8_t *)p + in_page;
     return 0;
 }
 
@@ -110,10 +151,11 @@ int drmUnmap(drmAddress address, drmSize size)
     pthread_mutex_lock(&g_map_lock);
     for (size_t i = 0; i < g_map_count; i++) {
         if (g_maps[i].addr != address) continue;
-        int fd = g_maps[i].fd;
+        Mapping m = g_maps[i];
         g_maps[i] = g_maps[--g_map_count];
         pthread_mutex_unlock(&g_map_lock);
-        return vgpu_munmap(fd, address, size);
+        (void)size;
+        return vgpu_munmap(m.fd, m.base, m.map_size);
     }
     pthread_mutex_unlock(&g_map_lock);
     return -EINVAL;
@@ -132,7 +174,10 @@ int vmg_drm_surface_fd(int device_fd, uint32_t surface_id, unsigned plane)
     (void)device_fd;
     IOSurfaceRef s = IOSurfaceLookup(surface_id);
     if (!s) return -1;
-    size_t size = IOSurfaceGetAllocSize(s);
+    size_t total = IOSurfaceGetAllocSize(s);
+    size_t plane_off = IOSurfaceGetPlaneCount(s)
+        ? (size_t)((uint8_t *)IOSurfaceGetBaseAddressOfPlane(s, plane) - (uint8_t *)IOSurfaceGetBaseAddress(s)) : 0;
+    size_t size = total - plane_off;   // bytes from the plane's first byte to the end, as the kernel reports
     CFRelease(s);
     char path[] = "/tmp/vgpu-surface-XXXXXX";
     const char *tmp = getenv("TMPDIR");
@@ -166,6 +211,12 @@ int drmPrimeFDToHandle(int fd, int prime_fd, uint32_t *handle)
     struct vgpu_import_iosurface im = { .surface_id = sf.surface, .plane = sf.plane };
     int r = vgpu_ioctl(fd, VGPU_SEL_IMPORT_IOSURFACE, &im);
     if (r) { errno = -r; return r; }
+    struct vgpu_version v = {0};
+    uint32_t pg = vgpu_ioctl(fd, VGPU_SEL_GET_VERSION, &v) == 0 && v.page_size ? v.page_size : 16384;
+    pthread_mutex_lock(&g_bo_lock);
+    BOInfo *b = bo_info(fd, im.handle, true);
+    if (b) b->in_page = (uint32_t)(im.offset & (pg - 1));
+    pthread_mutex_unlock(&g_bo_lock);
     *handle = im.handle;
     return 0;
 }

@@ -6,7 +6,7 @@
 #include "vgpu.h"
 #include <errno.h>
 #include <mach/mach.h>
-#include <mach/mach_vm.h>
+#include <mach/vm_map.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,7 +19,8 @@
 
 typedef struct {
     void *addr;          // the BO's memory; NULL = free handle
-    uint64_t va;         // GPU virtual address
+    uint64_t va;         // GPU virtual address (page aligned)
+    uint64_t gpu_offset; // imported IOSurface plane: offset of the plane in its first page (GPU offset = va + this)
     size_t size;
     uint32_t flags, madv;
     bool imported;
@@ -175,7 +176,7 @@ static int mock_ioctl(void *conn, enum vgpu_selector sel, void *arg, size_t size
         if (!va) { ret = -ENOSPC; break; }
         void *p = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
         if (p == MAP_FAILED) { ret = -ENOMEM; break; }
-        c->bos[h] = (MockBO){ p, va, sz, a->flags, VGPU_MADV_WILLNEED, false, NULL };
+        c->bos[h] = (MockBO){ p, va, 0, sz, a->flags, VGPU_MADV_WILLNEED, false, NULL };
         c->nextBO = h + 1;
         a->handle = h;
         a->offset = va;
@@ -191,7 +192,7 @@ static int mock_ioctl(void *conn, enum vgpu_selector sel, void *arg, size_t size
         struct vgpu_get_bo_offset *a = arg;
         MockBO *b = bo(c, a->handle);
         if (!b) { ret = -ENOENT; break; }
-        a->offset = b->va;
+        a->offset = b->va + b->gpu_offset;
         break;
     }
     case VGPU_SEL_GEM_CLOSE: {
@@ -279,18 +280,21 @@ static int mock_ioctl(void *conn, enum vgpu_selector sel, void *arg, size_t size
         uint32_t h = c->nextBO;
         while (h < MAX_HANDLES && c->bos[h].addr) h++;
         if (h >= MAX_HANDLES) { CFRelease(s); ret = -ENOMEM; break; }
+        // As the kernel (patch 0100): the BO covers [page of the plane, end of the surface); the GPU offset is the
+        // plane's first byte, the CPU mapping starts at the page.
+        size_t pg = (size_t)getpagesize();
         uint8_t *base = IOSurfaceGetBaseAddress(s);
         uint8_t *plane = planes ? IOSurfaceGetBaseAddressOfPlane(s, a->plane) : base;
         size_t total = IOSurfaceGetAllocSize(s);
-        size_t psize = total - (size_t)(plane - base);
-        size_t vsize = (psize + getpagesize() - 1) & ~((size_t)getpagesize() - 1);
+        uint8_t *start = (uint8_t *)((uintptr_t)plane & ~(uintptr_t)(pg - 1));
+        size_t vsize = ((size_t)(base + total - start) + pg - 1) & ~(pg - 1);
         uint64_t va = va_alloc(c, vsize);
         if (!va) { CFRelease(s); ret = -ENOSPC; break; }
-        c->bos[h] = (MockBO){ plane, va, psize, 0, VGPU_MADV_WILLNEED, true, s };
+        c->bos[h] = (MockBO){ start, va, (plane - start), vsize, 0, VGPU_MADV_WILLNEED, true, s };
         c->nextBO = h + 1;
         a->handle = h;
-        a->offset = va;
-        a->size = c->bos[h].size;
+        a->offset = va + (uint64_t)(plane - start);
+        a->size = total - (size_t)(plane - base);
         a->bytes_per_row = (uint32_t)(planes ? IOSurfaceGetBytesPerRowOfPlane(s, a->plane) : IOSurfaceGetBytesPerRow(s));
         a->pixel_format = IOSurfaceGetPixelFormat(s);
         a->width = (uint32_t)(planes ? IOSurfaceGetWidthOfPlane(s, a->plane) : IOSurfaceGetWidth(s));
@@ -323,7 +327,7 @@ static int mock_ioctl(void *conn, enum vgpu_selector sel, void *arg, size_t size
         while (h < MAX_HANDLES && c->bos[h].addr) h++;
         uint64_t va = h < MAX_HANDLES ? va_alloc(c, a->size) : 0;
         if (!va) { ret = -ENOSPC; break; }
-        c->bos[h] = (MockBO){ (void *)(uintptr_t)a->addr, va, a->size, 0, VGPU_MADV_WILLNEED, true, NULL };
+        c->bos[h] = (MockBO){ (void *)(uintptr_t)a->addr, va, 0, a->size, 0, VGPU_MADV_WILLNEED, true, NULL };
         c->nextBO = h + 1;
         a->handle = h;
         a->offset = va;
@@ -346,10 +350,10 @@ static void *mock_mmap(void *conn, uint64_t token, size_t size)
     size_t bsize = b ? b->size : 0;
     pthread_mutex_unlock(&c->lock);
     if (!src || size > bsize) { errno = EINVAL; return NULL; }
-    mach_vm_address_t dst = 0;
+    vm_address_t dst = 0;   // vm_remap: mach_vm_remap is not in the iOS SDK
     vm_prot_t cur, max;
-    kern_return_t kr = mach_vm_remap(mach_task_self(), &dst, size, 0, VM_FLAGS_ANYWHERE, mach_task_self(),
-                                     (mach_vm_address_t)(uintptr_t)src, FALSE, &cur, &max, VM_INHERIT_SHARE);
+    kern_return_t kr = vm_remap(mach_task_self(), &dst, size, 0, VM_FLAGS_ANYWHERE, mach_task_self(),
+                                (vm_address_t)(uintptr_t)src, FALSE, &cur, &max, VM_INHERIT_SHARE);
     if (kr != KERN_SUCCESS) { errno = ENOMEM; return NULL; }
     return (void *)(uintptr_t)dst;
 }

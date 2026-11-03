@@ -107,6 +107,52 @@ int main(void)
         CFRelease(surf);
     }
 
+    // A plane that does not start on a page: GPU offset = the plane's first byte, CPU mapping = its page.
+    {
+        int w = 100, h = 10, bpe = 4, bpr = 448, size = bpr * h * 2 + 4096 + 448 * 3;   // plane 1 lands mid-page
+        CFMutableDictionaryRef d = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+        CFMutableDictionaryRef p0 = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+        CFMutableDictionaryRef p1 = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+        int off1 = bpr * h + 448;   // not a multiple of the page
+        int nums[] = { w, h, bpe, bpr, 0, off1, size, 'BGRA' };
+        CFNumberRef n[8];
+        for (int i = 0; i < 8; i++) n[i] = CFNumberCreate(NULL, kCFNumberIntType, &nums[i]);
+        CFDictionarySetValue(p0, kIOSurfacePlaneWidth, n[0]); CFDictionarySetValue(p0, kIOSurfacePlaneHeight, n[1]);
+        CFDictionarySetValue(p0, kIOSurfacePlaneBytesPerElement, n[2]); CFDictionarySetValue(p0, kIOSurfacePlaneBytesPerRow, n[3]);
+        CFDictionarySetValue(p0, kIOSurfacePlaneOffset, n[4]);
+        CFDictionarySetValue(p1, kIOSurfacePlaneWidth, n[0]); CFDictionarySetValue(p1, kIOSurfacePlaneHeight, n[1]);
+        CFDictionarySetValue(p1, kIOSurfacePlaneBytesPerElement, n[2]); CFDictionarySetValue(p1, kIOSurfacePlaneBytesPerRow, n[3]);
+        CFDictionarySetValue(p1, kIOSurfacePlaneOffset, n[5]);
+        const void *pl[2] = { p0, p1 };
+        CFArrayRef arr = CFArrayCreate(NULL, pl, 2, &kCFTypeArrayCallBacks);
+        CFDictionarySetValue(d, kIOSurfaceWidth, n[0]); CFDictionarySetValue(d, kIOSurfaceHeight, n[1]);
+        CFDictionarySetValue(d, kIOSurfaceAllocSize, n[6]); CFDictionarySetValue(d, kIOSurfacePixelFormat, n[7]);
+        CFDictionarySetValue(d, kIOSurfacePlaneInfo, arr);
+        IOSurfaceRef s2 = IOSurfaceCreate(d);
+        uint32_t pg = v.page_size ? v.page_size : 16384;
+        if (s2 && IOSurfaceGetPlaneCount(s2) == 2) {
+            size_t real_off = (size_t)((uint8_t *)IOSurfaceGetBaseAddressOfPlane(s2, 1) - (uint8_t *)IOSurfaceGetBaseAddress(s2));
+            struct vgpu_import_iosurface im = { .surface_id = IOSurfaceGetID(s2), .plane = 1 };
+            int r = vgpu_ioctl(fd, VGPU_SEL_IMPORT_IOSURFACE, &im);
+            CHECK(r == 0 && (im.offset & (pg - 1)) == (real_off & (pg - 1)), "plane 1 GPU offset keeps its offset in the page (%llx, plane at %zu)",
+                  (unsigned long long)im.offset, real_off);
+            struct vgpu_mmap_bo ms = { .handle = im.handle };
+            if (r == 0 && vgpu_ioctl(fd, VGPU_SEL_MMAP_BO, &ms) == 0) {
+                uint8_t *m = vgpu_mmap(fd, ms.offset, (im.offset & (pg - 1)) + im.size);
+                IOSurfaceLock(s2, 0, NULL);
+                ((uint32_t *)IOSurfaceGetBaseAddressOfPlane(s2, 1))[0] = 0xabcdef01;
+                IOSurfaceUnlock(s2, 0, NULL);
+                CHECK(m && *(uint32_t *)(m + (im.offset & (pg - 1))) == 0xabcdef01, "CPU mapping starts at the page; plane at + offset in page");
+                if (m) vgpu_munmap(fd, m, (im.offset & (pg - 1)) + im.size);
+            }
+            struct vgpu_gem_close g2 = { .handle = im.handle };
+            vgpu_ioctl(fd, VGPU_SEL_GEM_CLOSE, &g2);
+        } else CHECK(0, "biplanar IOSurface");
+        if (s2) CFRelease(s2);
+        for (int i = 0; i < 8; i++) CFRelease(n[i]);
+        CFRelease(arr); CFRelease(p0); CFRelease(p1); CFRelease(d);
+    }
+
     struct vgpu_gem_close gc = { .handle = cb.handle };
     CHECK(vgpu_ioctl(fd, VGPU_SEL_GEM_CLOSE, &gc) == 0, "gem close");
     CHECK(vgpu_ioctl(fd, VGPU_SEL_GET_BO_OFFSET, &go) == -ENOENT, "closed handle is gone");

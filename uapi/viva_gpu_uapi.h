@@ -117,7 +117,9 @@ struct vgpu_syncobj_wait {
 struct vgpu_syncobj_array { uint64_t handles; uint32_t count_handles, pad; };
 
 // Imports an IOSurface plane as a BO: same pages (no copy), mapped at a GPU VA, linear layout. The surface stays
-// alive until the BO is closed.
+// alive until the BO is closed. The BO starts at the page holding the plane's first byte: the GPU offset (here and
+// in GET_BO_OFFSET) is the plane's first byte, while the CPU mapping (MMAP_BO + IOConnectMapMemory64) starts at the
+// page, so the plane is at mapping + (offset & (page_size - 1)) (libdrm-xnu adds it in drmMap).
 struct vgpu_import_iosurface {
     uint32_t surface_id, plane;     // in: IOSurfaceGetID, plane index
     uint32_t handle, pad;           // out
