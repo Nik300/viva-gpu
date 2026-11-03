@@ -133,7 +133,7 @@ typedef struct {
     nir_variable *out[40];
     bool out_int_cast[40];
     nir_variable *color_out[VMG_MAX_COLOR];   // render target variables (also read by programmable blending)
-    nir_variable *tex_vars[VMG_MAX_TEXTURES], *img_vars[VMG_MAX_TEXTURES];
+    nir_variable *tex_vars[VMG_MAX_TEXTURES], *img_vars[VMG_MAX_TEXTURES], *smp_vars[32];
     unsigned scratch, shared;
     char *error;
 } T;
@@ -707,6 +707,11 @@ static bool declare_inputs(T *t, LLVMValueRef node)
             const char *key = o.n > 2 ? md_string(o.ops[2], &klen) : NULL;
             int slot = key ? varying_slot(t, key, klen) : -1;
             if (!scalar) FAILB(t, "aggregate fragment input");
+            if (slot < 0 && getenv("VMG_TRACE")) {
+                fprintf(stderr, "vmg: fragment input %.*s not written by the vertex function; table:", key ? (int)klen : 1, key ? key : "?");
+                for (unsigned k = 0; k < t->in->varying_count; k++) fprintf(stderr, " [%s]", t->in->varyings[k]);
+                fprintf(stderr, "\n");
+            }
             if (slot < 0) {
                 // Not written by the vertex function: Metal leaves it undefined; read zeros.
                 v = vssa(t, nir_imm_zero(b, comps, bits));
@@ -1220,13 +1225,34 @@ static val *math(T *t, LLVMValueRef inst, const char *name)
     else if (IS("any")) r = a[0]->num_components > 1 ? nir_bany(b, a[0]) : a[0];
     else if (IS("select")) r = nir_bcsel(b, a[2], a[1], a[0]);
     else if (IS("pack") || IS("unpack")) {
+        // Spelled out (portable: llvmpipe lacks some of NIR's packing opcodes after lowering).
         const char *fmt = dot ? dot + 1 : "";
         bool pack = IS("pack");
-        if (name_is(fmt, "unorm4x8")) r = pack ? nir_pack_unorm_4x8(b, nir_f2f32(b, a[0])) : nir_unpack_unorm_4x8(b, nir_u2u32(b, a[0]));
-        else if (name_is(fmt, "snorm4x8")) r = pack ? nir_pack_snorm_4x8(b, nir_f2f32(b, a[0])) : nir_unpack_snorm_4x8(b, nir_u2u32(b, a[0]));
-        else if (name_is(fmt, "unorm2x16")) r = pack ? nir_pack_unorm_2x16(b, nir_f2f32(b, a[0])) : nir_unpack_unorm_2x16(b, nir_u2u32(b, a[0]));
-        else if (name_is(fmt, "snorm2x16")) r = pack ? nir_pack_snorm_2x16(b, nir_f2f32(b, a[0])) : nir_unpack_snorm_2x16(b, nir_u2u32(b, a[0]));
-        if (r && !pack && is_float(rt)) r = nir_f2fN(b, r, ts_LLVMGetTypeKind(rt) == LLVMVectorTypeKind ? (ts_LLVMGetTypeKind(ts_LLVMGetElementType(rt)) == LLVMHalfTypeKind ? 16 : 32) : 32);
+        bool snorm = name_is(fmt, "snorm");
+        unsigned lanes = name_is(fmt + 5, "4x8") ? 4 : name_is(fmt + 5, "2x16") ? 2 : 0;
+        if (lanes) {
+            unsigned bits = 32 / lanes;
+            double scale = snorm ? (double)((1u << (bits - 1)) - 1) : (double)((1u << bits) - 1);
+            nir_def *mask = nir_imm_int(b, (int)((1u << bits) - 1));
+            if (pack) {
+                nir_def *x = nir_f2f32(b, a[0]);
+                x = snorm ? nir_fmin(b, nir_fmax(b, x, nir_imm_float(b, -1)), nir_imm_float(b, 1)) : nir_fsat(b, x);
+                nir_def *q = nir_f2i32(b, nir_fround_even(b, nir_fmul_imm(b, x, scale)));
+                nir_def *w = nir_imm_int(b, 0);
+                for (unsigned k = 0; k < lanes; k++)
+                    w = nir_ior(b, w, nir_ishl_imm(b, nir_iand(b, nir_channel(b, q, k), mask), k * bits));
+                r = w;
+            } else {
+                nir_def *w = nir_u2u32(b, a[0]), *c[4];
+                for (unsigned k = 0; k < lanes; k++) {
+                    nir_def *f = snorm ? nir_i2f32(b, nir_ibitfield_extract(b, w, nir_imm_int(b, (int)(k * bits)), nir_imm_int(b, (int)bits)))
+                                       : nir_u2f32(b, nir_ubitfield_extract(b, w, nir_imm_int(b, (int)(k * bits)), nir_imm_int(b, (int)bits)));
+                    f = nir_fmul_imm(b, f, 1.0 / scale);
+                    c[k] = snorm ? nir_fmax(b, f, nir_imm_float(b, -1)) : f;
+                }
+                r = nir_vec(b, c, lanes);
+            }
+        }
     }
 #undef IS
     if (!r) FAIL(t, "unsupported intrinsic %s", name);
@@ -1567,6 +1593,12 @@ static val *texture(T *t, LLVMValueRef inst, const char *name)
     nir_builder_instr_insert(b, &tex->instr);
     use_texture(t, tv->index, false, dim, array, type);
     BITSET_SET(t->s->info.samplers_used, sv->index);
+    if (sv->index < 32 && !t->smp_vars[sv->index]) {
+        // Sampler variables: some drivers (llvmpipe) size their sampler state from them.
+        nir_variable *v = nir_variable_create(t->s, nir_var_uniform, glsl_bare_sampler_type(), "sampler");
+        v->data.binding = sv->index;
+        t->smp_vars[sv->index] = v;
+    }
     nir_def *d = &tex->def;
     if ((depth && !gather) || cmp) d = nir_channel(b, d, 0);
     return tex_result(t, rt, d);

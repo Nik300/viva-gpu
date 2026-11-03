@@ -136,7 +136,12 @@ static const void *const VMGPUQueueKey = &VMGPUQueueKey;
 - (NSString *)productName { return _name; }
 - (NSString *)vendorName { return @"ARM"; }
 - (unsigned long long)featureProfile { return VMFeatureProfile; }
-- (uint64_t)registryID { uint64_t id = 0; if (_accelerator) IORegistryEntryGetRegistryEntryID(_accelerator, &id); return id; }
+// The IOAcceleratorES service's id on iOS; a stable synthetic one when there is no service (tests on the Mac).
+- (uint64_t)registryID {
+    uint64_t id = 0;
+    if (_accelerator) IORegistryEntryGetRegistryEntryID(_accelerator, &id);
+    return id ? id : 0x5649564147505531ull;   // 'VIVAGPU1'
+}
 - (unsigned int)acceleratorPort { return _accelerator; }
 - (uint64_t)dedicatedMemorySize { return 0; }
 - (uint64_t)sharedMemorySize { return vmg_device_get_info(_vmg)->video_memory; }

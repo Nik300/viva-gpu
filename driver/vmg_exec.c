@@ -107,6 +107,7 @@ void vmg_cmd_begin_pass(vmg_device *dev, const vmg_pass_desc *pass)
     uint32_t samples = 1;
     for (unsigned i = 0; i < ncb; i++) if (pass->color[i].texture) samples = MAX2(samples, (uint32_t)MAX2(pass->color[i].texture->res->nr_samples, 1));
     dev->pass.samples = samples;
+    dev->raster.multisample = samples > 1;   // single-sample: pixel centers (llvmpipe uses sample positions otherwise)
 
     // Load actions.
     for (unsigned i = 0; i < ncb; i++) {
@@ -446,6 +447,9 @@ static void bind_stage(vmg_device *dev, enum vmg_stage stage, vmg_shader *sh, co
     }
     for (unsigned i = 0; i < scount; i++) if (!samplers[i]) samplers[i] = dev->sampler_default;
     if (scount) pipe->bind_sampler_states(pipe, gs, 0, scount, samplers);
+    if (trace && scount)
+        for (unsigned i = 0; i < scount; i++)
+            fprintf(stderr, "vmg: stage %d sampler %u %p%s\n", stage, i, samplers[i], samplers[i] == dev->sampler_default ? " (default)" : "");
 }
 
 static void flush_raster(vmg_device *dev)

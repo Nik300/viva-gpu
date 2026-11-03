@@ -489,6 +489,10 @@ vmg_sampler *vmg_sampler_create_constexpr(vmg_device *dev, uint64_t w)
     d.lod_max = _mesa_half_to_float((uint16_t)(w >> 40));
     d.border = (uint8_t)((w >> 56) & 3);
     d.normalized = true;   // coord::pixel is divided by the texture size in the shader (vmg_air.c)
+    if (getenv("VMG_TRACE"))
+        fprintf(stderr, "vmg: constexpr sampler 0x%016llx: min %u mag %u mip %u addr %u %u %u lod %g..%g border %u\n",
+                (unsigned long long)w, d.min_filter, d.mag_filter, d.mip_filter, d.address[0], d.address[1], d.address[2],
+                d.lod_min, d.lod_max, d.border);
     return sampler_create(dev, &d);
 }
 
@@ -566,6 +570,10 @@ vmg_shader *vmg_shader_create(vmg_device *dev, const vmg_air_input *in, vmg_refl
             if (r.textures_used & (1u << i)) BITSET_SET(nir->info.textures_used, i);
             if (r.textures_written & (1u << i)) BITSET_SET(nir->info.images_used, i);
         }
+        for (unsigned i = 0; i < 32; i++)
+            if ((i < VMG_MAX_SAMPLERS && (r.samplers_used & (1u << i))) ||
+                (i >= VMG_CONSTEXPR_SAMPLER_BASE && i - VMG_CONSTEXPR_SAMPLER_BASE < r.constexpr_samplers))
+                BITSET_SET(nir->info.samplers_used, i);
         nir->info.num_ssbos = VMG_MAX_BUFFERS;
         nir->info.num_ubos = 2;
     }

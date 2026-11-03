@@ -60,7 +60,7 @@ VM_CATCH_ALL(VMBuffer)
 - (void)makeAliasable {}
 - (id<MTLHeap>)heap { return nil; }
 - (NSUInteger)heapOffset { return 0; }
-- (uint64_t)gpuAddress { return 0; }
+- (uint64_t)gpuAddress { return (uint64_t)(uintptr_t)_contents; }   // Metal 3 API (not in Apple4): unique and non-zero
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)desc offset:(NSUInteger)offset bytesPerRow:(NSUInteger)bpr {
     return [[VMTexture alloc] initWithDevice:_device descriptor:desc buffer:self offset:offset bytesPerRow:bpr];
 }
