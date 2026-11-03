@@ -129,7 +129,5 @@ bool vmg_format_is_integer(unsigned mtl_format), vmg_format_is_signed_integer(un
 // VGPU_SEL_IMPORT_IOSURFACE (so Panfrost's resource_from_handle needs no change).
 int vmg_drm_surface_fd(int device_fd, uint32_t surface_id, unsigned plane);
 void vmg_drm_surface_fd_close(int fd);
-// libdrm-xnu: the DRM fd's connection is closing (its implicit-sync chain is forgotten).
-void vmg_drm_fd_close(int fd);
 
 char *vmg_strdup_printf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));

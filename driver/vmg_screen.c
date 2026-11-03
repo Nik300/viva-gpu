@@ -90,7 +90,7 @@ vmg_device *vmg_device_create(const char *which, char *error, size_t error_size)
     }
     if (!dev->screen) {
         snprintf(error, error_size, "%s: screen creation failed", which);
-        if (dev->fd >= 0) { vmg_drm_fd_close(dev->fd); vgpu_close(dev->fd); }
+        if (dev->fd >= 0) vgpu_close(dev->fd);
         free(dev);
         return NULL;
     }
@@ -175,7 +175,7 @@ void vmg_device_destroy(vmg_device *dev)
     pipe_sampler_view_reference(&dev->null_view, NULL);
     dev->pipe->destroy(dev->pipe);
     dev->screen->destroy(dev->screen);
-    if (dev->fd >= 0) { vmg_drm_fd_close(dev->fd); vgpu_close(dev->fd); }
+    if (dev->fd >= 0) vgpu_close(dev->fd);
     glsl_type_singleton_decref();
     free(dev);
 }

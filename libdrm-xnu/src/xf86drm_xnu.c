@@ -52,70 +52,6 @@ static void bo_forget(int fd, uint32_t handle)
     pthread_mutex_unlock(&g_bo_lock);
 }
 
-// Implicit sync. Linux's panfrost makes every job wait for the last job on each of its BOs (all BOs are written), and
-// Mesa relies on it: a batch's vertex/tiler job (slot 1) and fragment job (slot 0) are two submits without an in-sync
-// between them, and batches share the tiler heap. The Viva kernel orders jobs only by in-syncs, so the fragment job
-// ran while its tiler job was still writing the polygon lists, or while the next batch's tiler job rewrote the heap
-// (half triangles, MMU faults at garbage addresses in slot 0, timeouts). Every graphics job lists the tiler heap, so
-// on Linux they are serialized anyway: here every submit on a connection waits for the previous one through a
-// per-connection syncobj (chain). The kernel takes the in-sync fences before replacing the out-sync, so the chain
-// can be both. VGPU_NO_IMPLICIT_SYNC=1 turns it off (comparisons only).
-typedef struct { int fd; uint32_t chain; pthread_mutex_t lock; } SubmitChain;
-static SubmitChain g_chain[16];
-static pthread_mutex_t g_chain_lock = PTHREAD_MUTEX_INITIALIZER;
-
-static SubmitChain *submit_chain(int fd)
-{
-    static int off = -1;
-    if (off < 0) off = getenv("VGPU_NO_IMPLICIT_SYNC") != NULL;
-    if (off) return NULL;
-    SubmitChain *c = NULL;
-    pthread_mutex_lock(&g_chain_lock);
-    for (unsigned i = 0; i < 16 && !c; i++) if (g_chain[i].chain && g_chain[i].fd == fd) c = &g_chain[i];
-    for (unsigned i = 0; i < 16 && !c; i++) {
-        if (g_chain[i].chain) continue;
-        struct vgpu_syncobj_create s = { .flags = 0 };
-        if (vgpu_ioctl(fd, VGPU_SEL_SYNCOBJ_CREATE, &s)) break;
-        g_chain[i].fd = fd;
-        g_chain[i].chain = s.handle;
-        pthread_mutex_init(&g_chain[i].lock, NULL);
-        c = &g_chain[i];
-    }
-    pthread_mutex_unlock(&g_chain_lock);
-    return c;
-}
-
-static int submit_ordered(int fd, struct vgpu_submit *s)
-{
-    SubmitChain *c = submit_chain(fd);
-    if (!c) return vgpu_ioctl(fd, VGPU_SEL_SUBMIT, s);
-    uint32_t stack[8], *in = stack;
-    if (s->in_sync_count >= 8 && !(in = malloc((s->in_sync_count + 1) * sizeof *in))) return -ENOMEM;
-    if (s->in_sync_count) memcpy(in, (const uint32_t *)(uintptr_t)s->in_syncs, s->in_sync_count * sizeof *in);
-    in[s->in_sync_count] = c->chain;
-    struct vgpu_submit k = *s;
-    k.in_syncs = (uintptr_t)in;
-    k.in_sync_count = s->in_sync_count + 1;
-    if (!k.out_sync) k.out_sync = c->chain;
-    pthread_mutex_lock(&c->lock);
-    int r = vgpu_ioctl(fd, VGPU_SEL_SUBMIT, &k);
-    if (!r && s->out_sync) {
-        struct vgpu_syncobj_transfer t = { .src = s->out_sync, .dst = c->chain };
-        r = vgpu_ioctl(fd, VGPU_SEL_SYNCOBJ_TRANSFER, &t);
-    }
-    pthread_mutex_unlock(&c->lock);
-    if (in != stack) free(in);
-    return r;
-}
-
-// The connection behind fd is closing (vmg_screen, before vgpu_close): forget its chain, the number may be reused.
-void vmg_drm_fd_close(int fd)
-{
-    pthread_mutex_lock(&g_chain_lock);
-    for (unsigned i = 0; i < 16; i++) if (g_chain[i].chain && g_chain[i].fd == fd) g_chain[i].chain = 0;
-    pthread_mutex_unlock(&g_chain_lock);
-}
-
 int drmIoctl(int fd, unsigned long request, void *arg)
 {
     enum vgpu_selector sel;
@@ -146,7 +82,7 @@ int drmIoctl(int fd, unsigned long request, void *arg)
     static int trace_bo = -1;
     if (trace_bo < 0) trace_bo = getenv("VGPU_TRACE_BO") != NULL;
     if (trace_bo && sel == VGPU_SEL_GEM_CLOSE) fprintf(stderr, "vgpu: close %u\n", ((struct vgpu_gem_close *)arg)->handle);
-    int r = sel == VGPU_SEL_SUBMIT ? submit_ordered(fd, arg) : vgpu_ioctl(fd, sel, arg);
+    int r = vgpu_ioctl(fd, sel, arg);
     if (trace_bo && !r && sel == VGPU_SEL_CREATE_BO) {
         struct vgpu_create_bo *c = arg;
         fprintf(stderr, "vgpu: bo %u 0x%llx-0x%llx flags %x\n", c->handle, (unsigned long long)c->offset,
