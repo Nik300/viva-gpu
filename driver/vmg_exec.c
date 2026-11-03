@@ -47,12 +47,15 @@ void vmg_texture_sync(vmg_device *dev, vmg_texture *t, bool to_texture)
     static int trace_surf = -1;
     if (trace_surf < 0) trace_surf = getenv("VMG_TRACE_SURF") != NULL;
     if (trace_surf && (s || t->buffer)) {
-        unsigned zero = 0, n = 0;
+        unsigned zero = 0, n = 0, black = 0;
+        uint64_t lum = 0;
         for (uint32_t y = 0; y < h; y += h / 16 + 1)
             for (uint32_t x = 0; x < w; x += w / 16 + 1, n++) {
                 unsigned bs = util_format_get_blocksize(t->res->format), nz = 0;
-                for (unsigned k = 0; k < bs; k++) nz |= base[y * bpr + (x / util_format_get_blockwidth(t->res->format)) * bs + k];
+                const uint8_t *px = base + y * bpr + (x / util_format_get_blockwidth(t->res->format)) * bs;
+                for (unsigned k = 0; k < bs; k++) nz |= px[k];
                 zero += !nz;
+                if (bs == 4) { black += !(px[0] | px[1] | px[2]); lum += px[0] + px[1] + px[2]; }
             }
         struct timespec ts;
         clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -60,9 +63,9 @@ void vmg_texture_sync(vmg_device *dev, vmg_texture *t, bool to_texture)
             fprintf(stderr, "vmg: surf %u %ux%u %s seed %u, %u/%u samples zero, t %ld.%03ld\n", t->surface_id, w, h,
                     to_texture ? "in" : "out", IOSurfaceGetSeed(s), zero, n, (long)ts.tv_sec, ts.tv_nsec / 1000000);
         else
-            fprintf(stderr, "vmg: buftex %p %ux%u %s %s, %u/%u samples zero, t %ld.%03ld\n", (void *)t, w, h,
-                    util_format_short_name(t->res->format), to_texture ? "in" : "out", zero, n, (long)ts.tv_sec,
-                    ts.tv_nsec / 1000000);
+            fprintf(stderr, "vmg: buftex %p %ux%u %s %s, %u/%u samples zero, %u rgb black, mean %u, t %ld.%03ld\n", (void *)t,
+                    w, h, util_format_short_name(t->res->format), to_texture ? "in" : "out", zero, n, black,
+                    n ? (unsigned)(lum / (3 * n)) : 0, (long)ts.tv_sec, ts.tv_nsec / 1000000);
     }
     if (to_texture) {
         struct pipe_box box;
