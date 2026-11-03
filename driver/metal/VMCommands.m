@@ -461,14 +461,20 @@ static void VMWaitCompletion(VMDevice *device, VMCommandQueue *queue, VMCommandB
     if (poll < 0) poll = getenv("VMG_POLL_COMPLETION") != NULL;
     if (poll) { VMPollCompletion(device, queue, cb, fence, start); return; }
     dispatch_async(device.completionQueue, ^{
-        // No finite timeout: the kernel compares absolute deadlines with mach_continuous_time, Mesa computes them
-        // from the userspace monotonic clock, and on the phone a deadline 1 s ahead came back expired at once (the
-        // loop then slept 1 ms per try: +10 ms per frame). UINT64_MAX is "forever" on both sides.
+        // Deadlines are absolute CLOCK_MONOTONIC (Mesa's os_time_get_nano; on Darwin gettimeofday - boottime), the
+        // clock the kernel compares them with since 0120. Before 0120 the kernel used mach_continuous_time and a
+        // deadline 1 s ahead came back expired at once (then 1 ms sleeps here: +10 ms per frame).
+        unsigned waited_s = 0;
         for (;;) {
             uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-            if (vmg_fence_wait_gpu(device.vmg, fence, UINT64_MAX)) break;
-            // An error answered at once: retry like the poll did, without spinning.
-            if (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0 < NSEC_PER_MSEC) usleep(1000);
+            if (vmg_fence_wait_gpu(device.vmg, fence, NSEC_PER_SEC)) break;
+            uint64_t took = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0;
+            if (took >= NSEC_PER_SEC / 2) {
+                if (++waited_s == 1 || waited_s % 10 == 0)
+                    fprintf(stderr, "vmg: command buffer still running after %u s (GPU hang?)\n", waited_s);
+            } else if (took < NSEC_PER_MSEC) {
+                usleep(1000);   // an error or a deadline taken as expired at once: retry without spinning
+            }
         }
         if (vmg_fence_has_results(fence)) [device gpuSync:^{ vmg_fence_wait(device.vmg, fence, 0); }];
         VMDidComplete(device, queue, cb, fence, start);

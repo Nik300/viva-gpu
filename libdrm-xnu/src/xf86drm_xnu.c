@@ -11,6 +11,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <IOSurface/IOSurfaceRef.h>
 #include "xf86drm.h"
 #include "libdrm/drm.h"
@@ -192,6 +193,16 @@ static int submit(int fd, struct vgpu_submit *a)
     return 0;
 }
 
+// The uapi's timeouts are absolute CLOCK_MONOTONIC ns, the clock Mesa computes them from (os_time_get_nano) and the
+// kernel compares them with (0120). A deadline at or before now is a poll.
+static bool deadline_passed(int64_t timeout_ns)
+{
+    struct timespec ts;
+    if (timeout_ns <= 0) return true;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts)) return false;
+    return timeout_ns <= (int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec;
+}
+
 // WAIT_BO: 0 / -EBUSY answered here when the completion page settles it, else 1 (ask the kernel). A BO used by a
 // queued submit sends the queue first.
 static int wait_bo_local(int fd, struct vgpu_wait_bo *w)
@@ -205,7 +216,7 @@ static int wait_bo_local(int fd, struct vgpu_wait_bo *w)
             if (h[k] != w->handle) continue;
             // Its job is not even submitted: a poll is busy (Panfrost's BO cache polls the BO it just released),
             // a real wait sends the queue first.
-            if (w->timeout_ns == 0) { pthread_mutex_unlock(&st->lock); return -EBUSY; }
+            if (deadline_passed(w->timeout_ns)) { pthread_mutex_unlock(&st->lock); return -EBUSY; }
             flush_locked(fd, st);
             goto flushed;
         }
@@ -216,7 +227,7 @@ flushed:;
         uint32_t seq = st->bo_seq[w->handle];
         uint32_t done = __atomic_load_n(&st->page->completed, __ATOMIC_ACQUIRE);
         if (!seq || (int32_t)(done - seq) >= 0) answer = 0;
-        else if (w->timeout_ns == 0) answer = -EBUSY;   // a poll: the job is ours and not finished
+        else if (deadline_passed(w->timeout_ns)) answer = -EBUSY;   // a poll: the job is ours and not finished
     } else if (st->local_wait && w->handle >= st->bo_cap) {
         answer = 0;   // never submitted, never imported (imports are tracked)
     }
