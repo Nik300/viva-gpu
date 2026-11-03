@@ -11,3 +11,4 @@ mesa/out/
 .venv/
 *.dSYM/
 .DS_Store
+vgpu/out/
