@@ -163,8 +163,6 @@ static bool copy_in_allowed(vmg_device *dev, vmg_texture *t)
     return true;
 }
 
-static void bound_reset(vmg_device *dev);
-
 // ---- Render passes --------------------------------------------------------------------------------------------------
 
 static void set_surface(struct pipe_surface *ps, vmg_texture *t, unsigned level, unsigned slice, unsigned plane)
@@ -229,7 +227,6 @@ void vmg_cmd_begin_pass(vmg_device *dev, const vmg_pass_desc *pass)
     fb->samples = (uint8_t)(pass->samples > 1 ? pass->samples : 0);
     pipe->set_framebuffer_state(pipe, fb);
     dev->in_pass = true;
-    bound_reset(dev);
 
     // Metal defaults for the pass: viewport and scissor cover the framebuffer.
     vmg_viewport vp = { 0, 0, w, h, 0, 1 };
@@ -312,7 +309,6 @@ void vmg_cmd_end_pass(vmg_device *dev)
         else vmg_texture_written(dev, a->texture);
     }
     dev->in_pass = false;
-    bound_reset(dev);
     // Neutral state: the pipeline objects of this pass may be released (on this queue) before the next one.
     pipe->bind_vertex_elements_state(pipe, dev->velems_empty);
     pipe->bind_blend_state(pipe, dev->blend_default);
@@ -502,19 +498,6 @@ void vmg_cmd_set_visibility(vmg_device *dev, uint8_t mode, size_t offset)
 
 // ---- Draw-time binding ----------------------------------------------------------------------------------------------
 
-// The bound-state cache of bind_stage is reset wherever vmg sets these states itself (pass boundaries, after dispatches).
-static void bound_reset(vmg_device *dev)
-{
-    for (unsigned s = 0; s < VMG_STAGES; s++) dev->stage[s].bound_valid = false;
-}
-
-static bool state_filter(void)
-{
-    static int off = -1;   // VMG_NO_STATE_FILTER=1: every state set at every draw, as before
-    if (off < 0) off = getenv("VMG_NO_STATE_FILTER") != NULL;
-    return !off;
-}
-
 static void bind_stage(vmg_device *dev, enum vmg_stage stage, vmg_shader *sh, const uint32_t *extra_header, unsigned extra_words)
 {
     struct pipe_context *pipe = dev->pipe;
@@ -540,14 +523,7 @@ static void bind_stage(vmg_device *dev, enum vmg_stage stage, vmg_shader *sh, co
         ssbo[i].buffer_offset = aligned;
         ssbo[i].buffer_size = ssbo[i].buffer->width0 - aligned;
     }
-    bool filter = b->bound_valid && state_filter();
-    if (!filter || count != b->bound_ssbo_count || r->buffers_written != b->bound_ssbo_written ||
-        (count && memcmp(ssbo, b->bound_ssbo, count * sizeof ssbo[0]))) {
-        pipe->set_shader_buffers(pipe, gs, 0, count, count ? ssbo : NULL, r->buffers_written);
-        if (count) memcpy(b->bound_ssbo, ssbo, count * sizeof ssbo[0]);
-        b->bound_ssbo_count = count;
-        b->bound_ssbo_written = r->buffers_written;
-    }
+    pipe->set_shader_buffers(pipe, gs, 0, count, count ? ssbo : NULL, r->buffers_written);
     static int trace = -1;
     if (trace < 0) trace = getenv("VMG_TRACE") != NULL;
     if (trace)
@@ -584,11 +560,7 @@ static void bind_stage(vmg_device *dev, enum vmg_stage stage, vmg_shader *sh, co
         if (t->surface_copy) vmg_texture_sync(dev, t, true);   // also inside a pass: CoreAnimation samples them in draws
         views[i] = t->view;
     }
-    if (!filter || tcount != b->bound_view_count || (tcount && memcmp(views, b->bound_views, tcount * sizeof views[0]))) {
-        pipe->set_sampler_views(pipe, gs, 0, tcount, 0, views);
-        if (tcount) memcpy(b->bound_views, views, tcount * sizeof views[0]);
-        b->bound_view_count = tcount;
-    }
+    pipe->set_sampler_views(pipe, gs, 0, tcount, 0, views);
     uint32_t iused = r->textures_written;
     if (iused) {
         struct pipe_image_view img[VMG_MAX_TEXTURES];
@@ -623,16 +595,7 @@ static void bind_stage(vmg_device *dev, enum vmg_stage stage, vmg_shader *sh, co
         scount = VMG_CONSTEXPR_SAMPLER_BASE + i + 1;
     }
     for (unsigned i = 0; i < scount; i++) if (!samplers[i]) samplers[i] = dev->sampler_default;
-    // Samplers only on Panfrost: it re-emits everything at every new batch (panfrost_dirty_state_all), while llvmpipe
-    // starting a new scene inside a pass needs them bound again (ca renders differently without).
-    if (scount && (!filter || !dev->panfrost || scount != b->bound_sampler_count || memcmp(samplers, b->bound_samplers, scount * sizeof samplers[0]))) {
-        pipe->bind_sampler_states(pipe, gs, 0, scount, samplers);
-        memcpy(b->bound_samplers, samplers, scount * sizeof samplers[0]);
-        b->bound_sampler_count = scount;
-    }
-    // Images are not filtered (rare); everything else above now matches what is bound. Compute is unbound after
-    // every dispatch, so its cache never becomes valid.
-    b->bound_valid = stage != VMG_COMPUTE && dev->in_pass;
+    if (scount) pipe->bind_sampler_states(pipe, gs, 0, scount, samplers);
     if (trace && scount)
         for (unsigned i = 0; i < scount; i++)
             fprintf(stderr, "vmg: stage %d sampler %u %p%s\n", stage, i, samplers[i], samplers[i] == dev->sampler_default ? " (default)" : "");

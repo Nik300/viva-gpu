@@ -88,12 +88,6 @@ struct vmg_stage_bindings {
     vmg_texture *textures[VMG_MAX_TEXTURES];
     vmg_sampler *samplers[VMG_MAX_SAMPLERS];
     uint32_t dirty_buffers, dirty_textures, dirty_samplers;
-    // What the pipe_context has bound for this stage (bind_stage skips identical calls: Panfrost re-emits the
-    // descriptors at every set). Valid inside a pass only.
-    bool bound_valid;
-    struct pipe_sampler_view *bound_views[VMG_MAX_TEXTURES]; unsigned bound_view_count;
-    void *bound_samplers[32]; unsigned bound_sampler_count;
-    struct pipe_shader_buffer bound_ssbo[VMG_MAX_BUFFERS]; unsigned bound_ssbo_count; uint32_t bound_ssbo_written;
 };
 
 struct vmg_device {

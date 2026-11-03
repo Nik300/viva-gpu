@@ -6,6 +6,23 @@ serve a me per verificarla.
 
 ## Bloccanti per G7
 
+### K0j. Promesse K0i: stallo tra processi; fault dopo kill di backboardd (2026-11-04, 0120 sul telefono)
+1. **Stallo** (schermo bloccato, visto anche dall'utente): backboardd fa commit di un command buffer che scrive una
+   IOSurface (promessa fatta), poi la sua riesecuzione chiama WAIT_BO (copia CPU di una texture su quella superficie).
+   `boBusyFence` restituisce l'ultimo fence della superficie, che ora è un job di SpringBoard, il quale dipende dalla
+   nostra promessa: la promessa si risolve solo a fine riesecuzione. Lo stesso può succedere con le dipendenze
+   implicite di un nostro job. Stato visto: `surface promises: 170 made, 0 pending, 13 timed out`, `jobs ... queued 1/1,
+   running 0/0` per sempre, thread della coda GPU fermo in `panfrost_bo_wait` -> WAIT_BO (spindump). Quindi anche
+   dopo i timeout il job in coda non è ripartito.
+   - Serve: (a) per chi possiede una promessa pendente sulla superficie, WAIT_BO e le dipendenze implicite non
+     devono aspettare fence arrivati dopo la promessa (dipendono da essa); (b) il timeout di una promessa deve
+     sbloccare davvero i job che la aspettano (oggi restano in coda).
+   - Userspace intanto: promesse spente di default (`VMG_SURFACE_PROMISE=1` per provarle).
+2. **Fault dopo `vctl kill backboardd`** (riavvio del solo render server, usato per i test): 58 job fault / MMU fault
+   subito dopo, nessuno dopo. Sembrano i job ancora in coda della connessione chiusa eseguiti dopo lo smontaggio del
+   suo spazio di indirizzi: andrebbero scartati (o la chiusura dovrebbe attenderli) senza fault.
+
+
 ### K0h. Submit a lotti e contatore di completamento condiviso (2026-11-04, analisi userspace) — adottato con 0119
 Userspace (libdrm-xnu, minor >= 2): SUBMIT_BATCH ogni 16 submit e prima di ogni altra chiamata, WAIT_BO risposte dalla
 pagina di completamento (non per le IOSurface importate né per i BO WB). K0i: promessa al commit per i command buffer
@@ -278,3 +295,11 @@ Avvertenze K0i:
   sostituiscono come ultimo fence: chi legge dopo la risoluzione potrebbe non aspettare il job dell'altro. Per CA (un
   solo scrittore per superficie) non succede.
 - Contatori: `cmd gpu calls` (righe `submit_batch`, `surf_promise` e `surface promises: made, pending, timed out`).
+
+## Risposta del kernel (2026-11-04, patch 0120): orologio dei timeout
+Avevate ragione: il kernel confrontava le scadenze assolute con `mach_continuous_time`, mentre Mesa le calcola con
+`clock_gettime(CLOCK_MONOTONIC)`, che su Darwin Libc ricava come `gettimeofday - kern.boottime` (segue il calendario,
+impostato e corretto da timed/NTP): i due divergono. Dalla 0120 il kernel usa la stessa formula (calendario - boottime,
+risoluzione µs), quindi `timeout_ns`/`timeout_nsec` sono davvero CLOCK_MONOTONIC dello userspace. `cmd gpu clocks`
+stampa i due orologi e la differenza. Il workaround (attese senza timeout finito, 7bfdc01) può restare o essere tolto
+dopo aver visto `gpu clocks` sulla 0120. Immagine: `out/xnu-ufs-rw-0120.img` (0118 + 0119 + 0120).
