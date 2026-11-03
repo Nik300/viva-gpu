@@ -294,13 +294,34 @@ vmg_texture *vmg_texture_create_iosurface(vmg_device *dev, const vmg_texture_des
         wh.type = WINSYS_HANDLE_TYPE_FD;
         wh.handle = (unsigned)vmg_drm_surface_fd(dev->fd, surface_id, plane);
         IOSurfaceRef s = IOSurfaceLookup(surface_id);
+        uint32_t sfmt = 0, sw = 0, sh = 0;
         if (s) {
             wh.stride = (unsigned)(IOSurfaceGetPlaneCount(s) ? IOSurfaceGetBytesPerRowOfPlane(s, plane) : IOSurfaceGetBytesPerRow(s));
+            sfmt = IOSurfaceGetPixelFormat(s);
+            sw = (uint32_t)IOSurfaceGetWidth(s); sh = (uint32_t)IOSurfaceGetHeight(s);
             CFRelease(s);
         }
+        static int logged;
+        if ((wh.stride & 63) && logged < 32) {
+            logged++;
+            fprintf(stderr, "vmg: IOSurface %u plane %u %ux%u '%c%c%c%c' bpr %u: pitch not 64-aligned, copied (texture %ux%u %s)\n",
+                    surface_id, plane, sw, sh, sfmt >> 24, (sfmt >> 16) & 0xff, (sfmt >> 8) & 0xff, sfmt & 0xff, wh.stride,
+                    templ.width0, templ.height0, util_format_short_name(templ.format));
+        }
         wh.modifier = 0;   // DRM_FORMAT_MOD_LINEAR
-        res = dev->screen->resource_from_handle(dev->screen, &templ, &wh, PIPE_HANDLE_USAGE_FRAMEBUFFER_WRITE);
+        // Valhall wants linear rows aligned to 64 bytes: surfaces with other pitches (many of CoreAnimation's layer
+        // surfaces) cannot be imported and get a separate texture, copied from/to the surface around each use.
+        if (wh.stride && !(wh.stride & 63))
+            res = dev->screen->resource_from_handle(dev->screen, &templ, &wh, PIPE_HANDLE_USAGE_FRAMEBUFFER_WRITE);
         vmg_drm_surface_fd_close((int)wh.handle);
+        if (!res) {
+            templ.bind &= ~(unsigned)PIPE_BIND_SHARED;
+            res = dev->screen->resource_create(dev->screen, &templ);
+            if (!res) return NULL;
+            vmg_texture *t = texture_wrap(res, d);
+            t->surface_id = surface_id; t->plane = plane; t->surface_copy = true;
+            return t;
+        }
     } else {
         // llvmpipe: alias the surface memory when the layout matches (stride checked after creation), else copy.
         IOSurfaceRef s = IOSurfaceLookup(surface_id);
