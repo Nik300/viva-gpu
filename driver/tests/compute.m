@@ -26,7 +26,16 @@ static NSString *const kMSL = @
     "  out[p.y * 4 + p.x] = t.read(p); }\n"
     "kernel void grid_size(device uint *out [[buffer(0)]], uint i [[thread_position_in_grid]], uint n [[threads_per_grid]]) { out[i] = n; }\n"
     "kernel void tg_arg(device uint *a [[buffer(0)]], threadgroup uint *s [[threadgroup(0)]], uint l [[thread_position_in_threadgroup]]) {\n"
-    "  s[l] = l * 3; threadgroup_barrier(mem_flags::mem_threadgroup); a[l] = s[(l + 1) % 32]; }\n";
+    "  s[l] = l * 3; threadgroup_barrier(mem_flags::mem_threadgroup); a[l] = s[(l + 1) % 32]; }\n"
+    // Programmable blending (framebuffer fetch), as CoreAnimation's fixed_frag_lph_cph on iOS: a clip mask in a
+    // second, memoryless attachment, then a draw without blending that mixes the destination by the mask.
+    "struct VOut { float4 pos [[position]]; };\n"
+    "vertex VOut fs_quad(uint v [[vertex_id]]) { float2 p = float2((v << 1) & 2, v & 2); VOut o; o.pos = float4(p * 2 - 1, 0, 1); return o; }\n"
+    "fragment half4 fetch_one(half4 dst [[color(0)]]) { return dst * half4(0.5h, 1, 1, 1) + half4(0, 0, 0.25h, 0); }\n"
+    "struct Two { half4 c0 [[color(0)]]; half4 c1 [[color(1)]]; };\n"
+    "fragment Two clip_write(VOut i [[stage_in]]) { Two o; o.c0 = 0; o.c1 = half4(i.pos.x < 4 ? 1.0h : 0.0h); return o; }\n"
+    "fragment Two clip_apply(half4 dst [[color(0)]], half4 clip [[color(1)]]) {\n"
+    "  Two o; o.c0 = mix(dst, half4(1, 0, 0, 1), clip.r); o.c1 = clip; return o; }\n";
 
 static id<MTLDevice> dev;
 static id<MTLCommandQueue> queue;
@@ -145,6 +154,63 @@ int main(void) { @autoreleasepool {
     });
     uint32_t *tr = tb.contents;
     CHECK(tr[0] == 3 && tr[31] == 0, "[[threadgroup(0)]] sized by the encoder (%u %u)", tr[0], tr[31]);
+
+    printf("framebuffer fetch\n");
+    MTLTextureDescriptor *fd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:8 height:8 mipmapped:NO];
+    fd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    fd.storageMode = MTLStorageModeShared;
+    id<MTLTexture> c0 = [dev newTextureWithDescriptor:fd];
+    fd.storageMode = MTLStorageModeMemoryless;
+    id<MTLTexture> c1 = [dev newTextureWithDescriptor:fd];
+    if (!c1) { fd.storageMode = MTLStorageModePrivate; c1 = [dev newTextureWithDescriptor:fd]; }
+    id<MTLRenderPipelineState> (^rpipe)(NSString *, unsigned) = ^id<MTLRenderPipelineState>(NSString *fs, unsigned n) {
+        MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
+        d.vertexFunction = [lib newFunctionWithName:@"fs_quad"];
+        d.fragmentFunction = [lib newFunctionWithName:fs];
+        for (unsigned i = 0; i < n; i++) d.colorAttachments[i].pixelFormat = MTLPixelFormatBGRA8Unorm;
+        if ([fs isEqualToString:@"clip_write"]) d.colorAttachments[0].writeMask = MTLColorWriteMaskNone;
+        NSError *e = nil;
+        id<MTLRenderPipelineState> p = [dev newRenderPipelineStateWithDescriptor:d error:&e];
+        if (!p) printf("  pipeline %s: %s\n", fs.UTF8String, e.description.UTF8String);
+        return p;
+    };
+    void (^pass)(unsigned, NSArray *) = ^(unsigned n, NSArray *pipes) {
+        MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+        rp.colorAttachments[0].texture = c0;
+        rp.colorAttachments[0].loadAction = MTLLoadActionClear;
+        rp.colorAttachments[0].clearColor = MTLClearColorMake(0.5, 0.5, 0.5, 1);
+        rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+        if (n > 1) {
+            rp.colorAttachments[1].texture = c1;
+            rp.colorAttachments[1].loadAction = MTLLoadActionDontCare;
+            rp.colorAttachments[1].storeAction = MTLStoreActionDontCare;
+        }
+        id<MTLCommandBuffer> cb = [queue commandBuffer];
+        id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
+        for (id<MTLRenderPipelineState> p in pipes) {
+            [e setRenderPipelineState:p];
+            [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        }
+        [e endEncoding];
+        [cb commit];
+        [cb waitUntilCompleted];
+    };
+    uint8_t fb[8 * 8 * 4];
+    id<MTLRenderPipelineState> one = rpipe(@"fetch_one", 1);
+    if (one) {
+        pass(1, @[one]);
+        [c0 getBytes:fb bytesPerRow:32 fromRegion:MTLRegionMake2D(0, 0, 8, 8) mipmapLevel:0];
+        // BGRA: expect r 0.25 (64), g 0.5 (128), b 0.75 (191)
+        CHECK(abs(fb[2] - 64) <= 2 && abs(fb[1] - 128) <= 2 && abs(fb[0] - 191) <= 2, "[[color(0)]] read (rgb %u %u %u)", fb[2], fb[1], fb[0]);
+    }
+    id<MTLRenderPipelineState> w = rpipe(@"clip_write", 2), a = rpipe(@"clip_apply", 2);
+    if (w && a) {
+        pass(2, @[w, a]);
+        [c0 getBytes:fb bytesPerRow:32 fromRegion:MTLRegionMake2D(0, 0, 8, 8) mipmapLevel:0];
+        const uint8_t *in = fb + (2 * 8 + 1) * 4, *out = fb + (2 * 8 + 6) * 4;   // x 1: clipped in, x 6: out
+        CHECK(in[2] == 255 && in[1] == 0 && abs(out[2] - 128) <= 2 && abs(out[1] - 128) <= 2,
+              "clip mask in [[color(1)]], mix with [[color(0)]] (in %u %u %u, out %u %u %u)", in[2], in[1], in[0], out[2], out[1], out[0]);
+    }
 
     printf("%d/%d checks passed\n", checks - failures, checks);
     return failures != 0;
