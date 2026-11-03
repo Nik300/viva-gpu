@@ -6,6 +6,21 @@ serve a me per verificarla.
 
 ## Bloccanti per G7
 
+### K0b. Latenza per job: è il collo di bottiglia del rendering (2026-11-03, misurato)
+Scena "Impostazioni" del test `ca` (`VMG_CA_TIME=1 VMG_CA_SETTINGS=1 ca 61`, frame 360x640): **42 ms per frame
+sia a 300 sia a 950 MHz**, ~100 job GPU per frame (CoreAnimation fa ~50 pass, quasi tutti offscreen 64x64 per
+ombre/maschere; ogni pass = job vertex/tiler + job fragment). Profilo (`VMG_CA_PROFILE`): tutti i thread ~90% fermi
+nel kernel; quindi ~0,4 ms fissi per job, 100 x 0,4 = 42 ms. `gpu status`: submit maintenance avg ~150 us e
+**completion maintenance avg ~150 us, ~2,3 MB per job** (tutti i BO del job, non solo quelli che la CPU leggerà).
+- Serve (in ordine di resa):
+  1. togliere la manutenzione cache dal percorso critico del completamento: segnalare il fence subito e invalidare
+     le cache CPU solo dei BO che la CPU poi mappa/legge (pigra, su `SYNC_BO`/mmap o su `WAIT_BO`), o solo dei BO
+     scritti dalla GPU (render target), non di pool/shader/texture in sola lettura;
+  2. lo stesso al submit: pulire solo i BO che la CPU ha scritto dall'ultima volta (dirty tracking per BO);
+  3. accodare il job successivo già pronto in `JS_HEAD_NEXT`/`JS_COMMAND_NEXT` (niente bolla IRQ->kick tra job
+     dipendenti dello stesso slot: le dipendenze di K0 sono quasi sempre "il job prima").
+- Per verificare: `ca` come sopra (oggi 42 ms) e `cmd gpu status` (completion maintenance).
+
 ### K0. Sync implicita sui BO in SUBMIT (come `panfrost_job.c` su Linux) — 2026-11-03
 `VivaGPUUserClient::submit` costruisce le dipendenze del job **solo dagli `in_syncs`**. Linux fa attendere ogni job
 l'ultimo job su **ognuno dei BO** che elenca (tutti trattati come scritti: `DMA_RESV_USAGE_WRITE`), e Mesa ci conta:
