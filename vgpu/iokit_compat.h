@@ -1,6 +1,14 @@
 // IOKit user API: the iOS SDK ships IOKit.framework without headers. When <IOKit/IOKitLib.h> is missing, declare
 // the few functions and constants the Viva GPU client and the Metal driver use (stable since iOS 2 / macOS 10.0).
 #pragma once
+#include <mach/mach.h>
+#include <stdint.h>
+// IOConnectTrap2 is exported by IOKit on iOS too, but the iOS SDK's IOKitLib.h marks it unavailable: declared here
+// under another name bound to the same symbol.
+#ifdef __cplusplus
+extern "C"
+#endif
+kern_return_t vgpu_IOConnectTrap2(mach_port_t connect, uint32_t index, uintptr_t p1, uintptr_t p2) __asm__("_IOConnectTrap2");
 #if __has_include(<IOKit/IOKitLib.h>)
 #include <IOKit/IOKitLib.h>
 #else
@@ -40,7 +48,6 @@ kern_return_t IOObjectRelease(io_object_t object);
 kern_return_t IORegistryEntryGetRegistryEntryID(io_registry_entry_t entry, uint64_t *entryID);
 kern_return_t IOConnectCallStructMethod(mach_port_t connection, uint32_t selector, const void *inputStruct,
                                         size_t inputStructCnt, void *outputStruct, size_t *outputStructCnt);
-kern_return_t IOConnectTrap2(io_connect_t connect, uint32_t index, uintptr_t p1, uintptr_t p2);
 kern_return_t IOConnectMapMemory64(io_connect_t connect, uint32_t memoryType, task_port_t intoTask,
                                    mach_vm_address_t *atAddress, mach_vm_size_t *ofSize, IOOptionBits options);
 kern_return_t IOConnectUnmapMemory64(io_connect_t connect, uint32_t memoryType, task_port_t fromTask,

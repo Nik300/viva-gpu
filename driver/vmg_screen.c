@@ -489,6 +489,8 @@ void vmg_texture_release(vmg_device *dev, vmg_texture *t)
     free(t);
 }
 
+bool vmg_texture_is_copied(vmg_texture *t) { return t && t->surface_copy; }
+
 static unsigned layer_of(vmg_texture *t, unsigned slice, uint32_t z) { return t->res->target == PIPE_TEXTURE_3D ? z : t->first_layer + slice; }
 
 void vmg_texture_write(vmg_device *dev, vmg_texture *t, unsigned level, unsigned slice, uint32_t x, uint32_t y, uint32_t z,

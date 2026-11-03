@@ -19,8 +19,9 @@
 #define VGPU_SERVICE_CLASS   "VivaGPUAccelerator"   // subclass of IOAcceleratorES (Metal matches that class)
 #define VGPU_CLIENT_TYPE     0x76677075u           // 'vgpu'
 #define VGPU_UAPI_MAJOR      1
-#define VGPU_UAPI_MINOR      1
+#define VGPU_UAPI_MINOR      2
 #define VGPU_TRAP_CALL       0                     // IOConnectTrap2 index (minor >= 1)
+#define VGPU_MAP_COMPLETION  0x10000u              // IOConnectMapMemory64 type: struct vgpu_completion (minor >= 2)
 
 // GPU virtual addresses: Mesa's Panfrost (panfrost_kmod) assumes the Linux driver's range, [32 MiB, 4 GiB) per
 // connection, with VA management in the kernel. Every offset the kernel returns lies in it.
@@ -50,6 +51,8 @@ enum vgpu_selector {
     VGPU_SEL_SYNCOBJ_TRANSFER,      // struct vgpu_syncobj_transfer     (Viva: dst takes src's current fence; stands in
                                     //  for sync-file export/import, which XNU lacks)
     VGPU_SEL_IMPORT_USERPTR,        // struct vgpu_import_userptr       (Viva: newBufferWithBytesNoCopy; pages wired)
+    VGPU_SEL_SUBMIT_BATCH,          // struct vgpu_submit_batch         (Viva, minor >= 2: N SUBMITs in one call)
+    VGPU_SEL_SURFACE_PROMISE,       // struct vgpu_surface_promise      (Viva, minor >= 2: K0i)
     VGPU_SEL_COUNT
 };
 
@@ -101,8 +104,31 @@ struct vgpu_submit {
     uint64_t bo_handles;            // user pointer: uint32_t[bo_handle_count] BOs the chain uses (kept alive)
     uint32_t bo_handle_count;
     uint32_t requirements;
-    uint32_t jm_ctx_handle, pad;    // unused (single context per client)
+    uint32_t jm_ctx_handle;         // unused (single context per client)
+    uint32_t seq;                   // out (minor >= 2, was pad): the job's number in the connection, see vgpu_completion
 };
+
+// N submits in one call (K0h), handled in order exactly as N SUBMIT calls (same implicit dependencies), under one
+// gate acquisition. Stops at the first failing one: `done` = how many were queued, the call returns that one's error.
+// Each element's `seq` is written back. count <= 64, stride = sizeof(struct vgpu_submit).
+struct vgpu_submit_batch { uint64_t submits; uint32_t count, stride; uint32_t done, pad; };
+
+// Completion page (K0h), one per connection, mapped read-only with IOConnectMapMemory64(type VGPU_MAP_COMPLETION):
+// every job of the connection with seq <= completed has finished (successfully or not), as its out_sync would say.
+// Jobs end out of order across slots: this is a watermark. Compare wrap-safe: (int32_t)(completed - seq) >= 0.
+// It does not cover other processes' jobs on a shared IOSurface (WAIT_BO does).
+struct vgpu_completion {
+    uint32_t completed, submitted;  // low 32 bits
+    uint64_t completed64, submitted64;
+};
+
+// K0i: a fence for IOSurfaces whose jobs are not submitted yet. The kernel puts a new unsignalled fence into
+// `syncobj` and makes it the surfaces' last GPU fence: IOSurfaceLock, the display (K0c), WAIT_BO on the surface and
+// other processes' jobs wait for it. This connection's own jobs on those surfaces do not (they wait for what came
+// before). It is resolved when the syncobj's fence is replaced: SYNCOBJ_TRANSFER into it or a SUBMIT with it as
+// out_sync = it signals with that fence; RESET/SIGNAL/DESTROY = at once. Unresolved after timeout_ms (0 = 1000,
+// max 5000) it signals with an error. count <= 16.
+struct vgpu_surface_promise { uint64_t surface_ids; uint32_t count, syncobj; uint32_t timeout_ms, pad; };
 struct vgpu_wait_bo { uint32_t handle, pad; int64_t timeout_ns; };              // absolute, CLOCK_MONOTONIC
 #define VGPU_MADV_WILLNEED 0
 #define VGPU_MADV_DONTNEED 1
@@ -156,6 +182,7 @@ static const uint32_t vgpu_selector_size[VGPU_SEL_COUNT] = {
     sizeof(struct vgpu_syncobj_create), sizeof(struct vgpu_syncobj_destroy), sizeof(struct vgpu_syncobj_wait),
     sizeof(struct vgpu_syncobj_array), sizeof(struct vgpu_syncobj_array), sizeof(struct vgpu_import_iosurface),
     sizeof(struct vgpu_sync_bo), sizeof(struct vgpu_query_bo_info), sizeof(struct vgpu_jm_ctx), sizeof(struct vgpu_jm_ctx),
-    sizeof(struct vgpu_syncobj_transfer), sizeof(struct vgpu_import_userptr),
+    sizeof(struct vgpu_syncobj_transfer), sizeof(struct vgpu_import_userptr), sizeof(struct vgpu_submit_batch),
+    sizeof(struct vgpu_surface_promise),
 };
 #endif

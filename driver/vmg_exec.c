@@ -12,6 +12,7 @@
 #include "util/format/u_format.h"
 #include "compiler/shader_enums.h"
 #include <IOSurface/IOSurfaceRef.h>
+#include "panfrost/pan_fence.h"   // vmg_surface_promise_resolve (Panfrost only)
 
 static mesa_shader_stage gl_stage(enum vmg_stage s)
 {
@@ -935,6 +936,22 @@ bool vmg_fence_wait_gpu(vmg_device *dev, vmg_fence *fence, uint64_t timeout_ns)
 {
     // fence_finish only touches the screen (thread safe), never the pipe_context.
     return !fence || !fence->fence || dev->screen->fence_finish(dev->screen, NULL, fence->fence, timeout_ns);
+}
+
+uint32_t vmg_surface_promise(vmg_device *dev, const uint32_t *surface_ids, unsigned count)
+{
+    uint32_t h = 0;
+    if (!dev->panfrost || !count || count > 16 || drmSurfacePromiseXNU(dev->fd, surface_ids, count, 0, &h)) return 0;
+    return h;
+}
+
+void vmg_surface_promise_resolve(vmg_device *dev, uint32_t promise, vmg_fence *fence)
+{
+    if (!promise) return;
+    // Panfrost's fence is a syncobj holding the fence of the flush's last job (pan_fence.h).
+    struct pipe_fence_handle *f = fence ? fence->fence : NULL;
+    if (f && !drmSyncobjCopyXNU(dev->fd, promise, f->syncobj)) drmSyncobjReleaseXNU(dev->fd, promise);
+    else drmSyncobjDestroy(dev->fd, promise);   // destroying it signals the promise at once
 }
 
 bool vmg_fence_has_results(vmg_fence *fence)

@@ -41,7 +41,7 @@ VM_CATCH_ALL(VMBlitEncoder)
     VMDevice *d = VMEncoderDevice(self);
     VMBuffer *b = (VMBuffer *)src;
     VMTexture *t = (VMTexture *)dst;
-    [VMEncoderCB(self) useSurface:dst.iosurface];
+    [VMEncoderCB(self) writeTexture:dst];
     [VMEncoderCB(self) recordCommand:^{
         vmg_cmd_copy_buffer_to_texture(d.vmg, b.vmg, off, bpr, bpi, t.vmg, (unsigned)slice, (unsigned)level, (uint32_t)o.x,
                                        (uint32_t)o.y, (uint32_t)o.z, (uint32_t)size.width, (uint32_t)size.height,
@@ -81,7 +81,7 @@ VM_CATCH_ALL(VMBlitEncoder)
     VMDevice *d = VMEncoderDevice(self);
     VMTexture *s = (VMTexture *)src, *t = (VMTexture *)dst;
     [VMEncoderCB(self) useSurface:src.iosurface];
-    [VMEncoderCB(self) writeSurface:dst.iosurface];
+    [VMEncoderCB(self) writeTexture:dst];
     [VMEncoderCB(self) recordCommand:^{
         vmg_cmd_copy_texture(d.vmg, s.vmg, (unsigned)ss, (unsigned)sl, (uint32_t)so.x, (uint32_t)so.y, (uint32_t)so.z,
                              (uint32_t)size.width, (uint32_t)size.height, (uint32_t)MAX(size.depth, 1), t.vmg, (unsigned)ds,
@@ -158,7 +158,7 @@ VM_CATCH_ALL(VMComputeEncoder)
 - (void)setTexture:(id<MTLTexture>)texture atIndex:(NSUInteger)index {
     VMDevice *d = VMEncoderDevice(self);
     VMTexture *t = (VMTexture *)texture;
-    if (texture.usage & MTLTextureUsageShaderWrite) [VMEncoderCB(self) writeSurface:texture.iosurface];
+    if (texture.usage & MTLTextureUsageShaderWrite) [VMEncoderCB(self) writeTexture:texture];
     else [VMEncoderCB(self) useSurface:texture.iosurface];
     [VMEncoderCB(self) recordCommand:^{ vmg_cmd_set_texture(d.vmg, VMG_COMPUTE, (unsigned)index, t.vmg); }];
 }
@@ -237,7 +237,8 @@ enum { VMInlineChunk = 64 << 10, VMInlineAlign = 16 };
     NSMutableArray *_keep;
     NSLock *_lock;
     CFMutableSetRef _surfaces;
-    BOOL _writesSurface;
+    CFMutableSetRef _written;          // IOSurfaces the GPU writes
+    BOOL _writesCopiedSurface;         // one of them through a copied texture (CPU copy-out during the replay)
     VMBuffer *_inline;
     NSUInteger _inlineUsed;
     NSMutableArray<VMBuffer *> *_inlineChunks;   // back to the device's pool at completion
@@ -255,7 +256,7 @@ VM_CATCH_ALL(VMCommandBuffer)
     }
     return self;
 }
-- (void)dealloc { if (_surfaces) CFRelease(_surfaces); }
+- (void)dealloc { if (_surfaces) CFRelease(_surfaces); if (_written) CFRelease(_written); }
 - (id<MTLDevice>)device { return [(id<MTLCommandQueue>)[self commandQueue] device]; }
 
 - (void)recordCommand:(dispatch_block_t)command {
@@ -300,12 +301,35 @@ VM_CATCH_ALL(VMCommandBuffer)
     CFSetAddValue(_surfaces, surface);
     [_lock unlock];
 }
-- (void)writeSurface:(IOSurfaceRef)surface {
+- (void)writeTexture:(id<MTLTexture>)texture {
+    IOSurfaceRef surface = texture.iosurface;
     if (!surface) return;
     [self useSurface:surface];
-    _writesSurface = YES;
+    [_lock lock];
+    if (!_written) _written = CFSetCreateMutable(NULL, 0, &kCFTypeSetCallBacks);
+    CFSetAddValue(_written, surface);
+    if (vmg_texture_is_copied(((VMTexture *)texture).vmg)) _writesCopiedSurface = YES;
+    [_lock unlock];
 }
-- (BOOL)writesSurface { return _writesSurface; }
+- (BOOL)writesSurface { return _written != NULL; }
+
+// K0i: promises the written IOSurfaces to the kernel (0: not possible). Not for copied surfaces: their copy-out locks
+// the surface from this process during the replay, and IOSurfaceLock would wait for our own promise.
+static void VMCollectSurfaceID(const void *value, void *ctx) {
+    NSMutableData *ids = (__bridge NSMutableData *)ctx;
+    uint32_t id = IOSurfaceGetID((IOSurfaceRef)value);
+    [ids appendBytes:&id length:sizeof id];
+}
+- (uint32_t)promiseWrittenSurfaces:(VMDevice *)device {
+    [_lock lock];
+    BOOL copied = _writesCopiedSurface;
+    NSMutableData *ids = [NSMutableData data];
+    if (_written) CFSetApplyFunction(_written, VMCollectSurfaceID, (__bridge void *)ids);
+    [_lock unlock];
+    unsigned n = (unsigned)(ids.length / sizeof(uint32_t));
+    if (copied || !n) return 0;
+    return vmg_surface_promise(device.vmg, ids.bytes, n);
+}
 static void VMSurfaceUse(const void *value, void *ctx) {
     if (ctx) IOSurfaceIncrementUseCount((IOSurfaceRef)value); else IOSurfaceDecrementUseCount((IOSurfaceRef)value);
 }
@@ -459,16 +483,24 @@ static void VMWaitCompletion(VMDevice *device, VMCommandQueue *queue, VMCommandB
         // rendered by backboardd. The kernel makes readers (IOSurfaceLock, their GPU jobs) wait only for jobs it knows;
         // submitted later, the snapshot was read half drawn (black launch cards). Apple's driver registers the work at
         // commit too. VMG_ASYNC_SURFACE_COMMIT=1: asynchronous as before (comparisons).
-        static int async_surface = -1;
+        //
+        // Kernel uapi minor >= 2 (K0i): the written surfaces are promised to the kernel instead, and the replay stays
+        // asynchronous: readers wait for the promise, which the replay resolves with the fence of its jobs. CA's thread
+        // goes on with the next frame meanwhile. VMG_NO_SURFACE_PROMISE=1: synchronous as before.
+        static int async_surface = -1, no_promise = -1;
         if (async_surface < 0) async_surface = getenv("VMG_ASYNC_SURFACE_COMMIT") != NULL;
-        void (^submit)(dispatch_block_t) = cb.writesSurface && !async_surface ? ^(dispatch_block_t b) { [device gpuSync:b]; }
-                                                                              : ^(dispatch_block_t b) { [device gpuAsync:b]; };
+        if (no_promise < 0) no_promise = getenv("VMG_NO_SURFACE_PROMISE") != NULL;
+        uint32_t promise = cb.writesSurface && !async_surface && !no_promise ? [cb promiseWrittenSurfaces:device] : 0;
+        void (^submit)(dispatch_block_t) = cb.writesSurface && !async_surface && !promise
+                                               ? ^(dispatch_block_t b) { [device gpuSync:b]; }
+                                               : ^(dispatch_block_t b) { [device gpuAsync:b]; };
         submit(^{
             uint64_t start = mach_absolute_time();
             TSMtlStat(TSStatCommandBuffers, 1);
             [cb execute];
             vmg_fence *fence = NULL;
             vmg_flush(device.vmg, &fence);
+            vmg_surface_promise_resolve(device.vmg, promise, fence);
             // "Scheduled" after the flush: presentDrawable hands the IOSurface to the compositor from there.
             [cb didScheduleWithStartTime:start endTime:mach_absolute_time() error:nil];
             VMWaitCompletion(device, self, cb, fence, start);

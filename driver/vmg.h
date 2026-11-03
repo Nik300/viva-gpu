@@ -75,6 +75,8 @@ vmg_texture *vmg_texture_create_view(vmg_device *dev, vmg_texture *parent, unsig
                                      uint32_t first_level, uint32_t levels, uint32_t first_slice, uint32_t slices,
                                      const uint8_t swizzle[4]);
 void vmg_texture_release(vmg_device *dev, vmg_texture *tex);
+// The texture is a copy of its IOSurface/buffer (the driver could not alias it): copied in and out by the CPU.
+bool vmg_texture_is_copied(vmg_texture *tex);
 // GPU queue. Region in texels of `level`; slice = array layer / cube face / 3D z for 2D regions (depth = 1).
 void vmg_texture_write(vmg_device *dev, vmg_texture *tex, unsigned level, unsigned slice, uint32_t x, uint32_t y,
                        uint32_t z, uint32_t w, uint32_t h, uint32_t d, const void *data, size_t row_pitch, size_t image_pitch);
@@ -253,6 +255,14 @@ bool vmg_fence_wait_gpu(vmg_device *dev, vmg_fence *fence, uint64_t timeout_ns);
 bool vmg_fence_has_results(vmg_fence *fence);
 // Any thread once vmg_fence_has_results is false (else the GPU queue).
 void vmg_fence_release(vmg_device *dev, vmg_fence *fence);
+
+// Any thread (kernel uapi minor >= 2): a promise that the GPU will write these IOSurfaces. Their readers (other
+// processes' jobs, IOSurfaceLock, the display) wait for it until vmg_surface_promise_resolve hands it the fence of the
+// work that writes them (or for at most a second). Lets a command buffer that writes IOSurfaces return from commit
+// before its replay. 0 = not available (too many surfaces, older kernel, llvmpipe).
+uint32_t vmg_surface_promise(vmg_device *dev, const uint32_t *surface_ids, unsigned count);
+// Any thread: the promise follows `fence` (NULL: signalled now) and is given back.
+void vmg_surface_promise_resolve(vmg_device *dev, uint32_t promise, vmg_fence *fence);
 
 #ifdef __cplusplus
 }

@@ -32,6 +32,8 @@ static const uint32_t selector_size[VGPU_SEL_COUNT] = {
     [VGPU_SEL_JM_CTX_DESTROY] = sizeof(struct vgpu_jm_ctx),
     [VGPU_SEL_SYNCOBJ_TRANSFER] = sizeof(struct vgpu_syncobj_transfer),
     [VGPU_SEL_IMPORT_USERPTR] = sizeof(struct vgpu_import_userptr),
+    [VGPU_SEL_SUBMIT_BATCH] = sizeof(struct vgpu_submit_batch),
+    [VGPU_SEL_SURFACE_PROMISE] = sizeof(struct vgpu_surface_promise),
 };
 
 #define MAX_FDS 1024
@@ -111,7 +113,8 @@ static const char *const g_stat_names[VGPU_SEL_COUNT] = {
     [VGPU_SEL_SYNCOBJ_SIGNAL] = "SYNCOBJ_SIGNAL", [VGPU_SEL_IMPORT_IOSURFACE] = "IMPORT_IOSURFACE",
     [VGPU_SEL_SYNC_BO] = "SYNC_BO", [VGPU_SEL_QUERY_BO_INFO] = "QUERY_BO_INFO", [VGPU_SEL_JM_CTX_CREATE] = "JM_CTX_CREATE",
     [VGPU_SEL_JM_CTX_DESTROY] = "JM_CTX_DESTROY", [VGPU_SEL_SYNCOBJ_TRANSFER] = "SYNCOBJ_TRANSFER",
-    [VGPU_SEL_IMPORT_USERPTR] = "IMPORT_USERPTR",
+    [VGPU_SEL_IMPORT_USERPTR] = "IMPORT_USERPTR", [VGPU_SEL_SUBMIT_BATCH] = "SUBMIT_BATCH",
+    [VGPU_SEL_SURFACE_PROMISE] = "SURFACE_PROMISE",
 };
 static int g_stats = -1;
 

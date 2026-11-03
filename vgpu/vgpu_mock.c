@@ -33,6 +33,8 @@ typedef struct {
     MockBO *bos;          // index = handle
     uint8_t *syncobj;     // index = handle: 0 free, 1 unsignalled, 2 signalled
     uint32_t nextBO, nextSync;
+    struct vgpu_completion *completion;   // K0h page: jobs complete at submit here, so completed = submitted
+    uint64_t seq;
 } MockConn;
 
 // GPU VA allocator: first fit over the BOs sorted by address (linear scan; tests have few BOs).
@@ -60,6 +62,7 @@ static int mock_open(void **out)
     c->bos = calloc(MAX_HANDLES, sizeof(MockBO));
     c->syncobj = calloc(MAX_HANDLES, 1);
     c->nextBO = c->nextSync = 1;
+    c->completion = mmap(NULL, (size_t)getpagesize(), PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
     pthread_mutex_init(&c->lock, NULL);
     pthread_cond_init(&c->cond, NULL);
     *out = c;
@@ -149,6 +152,35 @@ static int wait_syncobjs(MockConn *c, struct vgpu_syncobj_wait *w)
     }
 }
 
+// One SUBMIT (lock held): checked, handed to the hook, done at once (out_sync signalled, completion page moved on).
+static int mock_submit(MockConn *c, struct vgpu_submit *a)
+{
+    if (!a->jc) return -EINVAL;
+    const uint32_t *bos = (const uint32_t *)(uintptr_t)a->bo_handles;
+    for (uint32_t i = 0; i < a->bo_handle_count; i++)
+        if (!bo(c, bos[i])) return -ENOENT;
+    if (a->out_sync && (a->out_sync >= MAX_HANDLES || !c->syncobj[a->out_sync])) return -ENOENT;
+    if (getenv("VGPU_MOCK_TRACE"))
+        fprintf(stderr, "vgpu mock: submit jc 0x%llx %s, %u BOs, %u in-syncs, out-sync %u\n",
+                (unsigned long long)a->jc, (a->requirements & VGPU_JD_REQ_FS) ? "fragment" : "vertex/compute",
+                a->bo_handle_count, a->in_sync_count, a->out_sync);
+    if (g_hook) {
+        pthread_mutex_unlock(&c->lock);
+        g_hook(a, g_hookCtx);
+        pthread_mutex_lock(&c->lock);
+    }
+    a->seq = (uint32_t)++c->seq;
+    if (c->completion) {
+        c->completion->completed64 = c->completion->submitted64 = c->seq;
+        c->completion->submitted = c->completion->completed = (uint32_t)c->seq;
+    }
+    if (a->out_sync) {
+        c->syncobj[a->out_sync] = 2;
+        pthread_cond_broadcast(&c->cond);
+    }
+    return 0;
+}
+
 static int mock_ioctl(void *conn, enum vgpu_selector sel, void *arg, size_t size)
 {
     MockConn *c = conn;
@@ -205,27 +237,20 @@ static int mock_ioctl(void *conn, enum vgpu_selector sel, void *arg, size_t size
         if (a->handle < c->nextBO) c->nextBO = a->handle;
         break;
     }
-    case VGPU_SEL_SUBMIT: {
-        struct vgpu_submit *a = arg;
-        if (!a->jc) { ret = -EINVAL; break; }
-        const uint32_t *bos = (const uint32_t *)(uintptr_t)a->bo_handles;
-        for (uint32_t i = 0; i < a->bo_handle_count; i++)
-            if (!bo(c, bos[i])) { ret = -ENOENT; break; }
-        if (ret) break;
-        if (getenv("VGPU_MOCK_TRACE"))
-            fprintf(stderr, "vgpu mock: submit jc 0x%llx %s, %u BOs, %u in-syncs, out-sync %u\n",
-                    (unsigned long long)a->jc, (a->requirements & VGPU_JD_REQ_FS) ? "fragment" : "vertex/compute",
-                    a->bo_handle_count, a->in_sync_count, a->out_sync);
-        if (g_hook) {
-            pthread_mutex_unlock(&c->lock);
-            g_hook(a, g_hookCtx);
-            pthread_mutex_lock(&c->lock);
-        }
-        if (a->out_sync) {
-            if (a->out_sync >= MAX_HANDLES || !c->syncobj[a->out_sync]) { ret = -ENOENT; break; }
-            c->syncobj[a->out_sync] = 2;
-            pthread_cond_broadcast(&c->cond);
-        }
+    case VGPU_SEL_SUBMIT: ret = mock_submit(c, arg); break;
+    case VGPU_SEL_SUBMIT_BATCH: {
+        struct vgpu_submit_batch *a = arg;
+        a->done = 0;
+        if (a->count > 64 || (a->count && (a->stride != sizeof(struct vgpu_submit) || !a->submits))) { ret = -EINVAL; break; }
+        struct vgpu_submit *subs = (struct vgpu_submit *)(uintptr_t)a->submits;
+        for (uint32_t i = 0; i < a->count && !ret; i++) if (!(ret = mock_submit(c, &subs[i]))) a->done++;
+        break;
+    }
+    case VGPU_SEL_SURFACE_PROMISE: {
+        // Nothing runs concurrently here: the promise only has to behave as an unsignalled fence until resolved.
+        struct vgpu_surface_promise *a = arg;
+        if (!a->count || a->count > 16 || !a->syncobj || a->syncobj >= MAX_HANDLES || !c->syncobj[a->syncobj]) { ret = -EINVAL; break; }
+        c->syncobj[a->syncobj] = 1;
         break;
     }
     case VGPU_SEL_WAIT_BO: {
@@ -344,6 +369,10 @@ static int mock_ioctl(void *conn, enum vgpu_selector sel, void *arg, size_t size
 static void *mock_mmap(void *conn, uint64_t token, size_t size)
 {
     MockConn *c = conn;
+    if (token == VGPU_MAP_COMPLETION) {
+        if (!c->completion || size > (size_t)getpagesize()) { errno = EINVAL; return NULL; }
+        return c->completion;   // in-process: the page itself (never unmapped, like the connection)
+    }
     pthread_mutex_lock(&c->lock);
     MockBO *b = bo(c, (uint32_t)token);
     void *src = b ? b->addr : NULL;
@@ -360,7 +389,7 @@ static void *mock_mmap(void *conn, uint64_t token, size_t size)
 
 static int mock_munmap(void *conn, void *addr, size_t size)
 {
-    (void)conn;
+    if (addr == ((MockConn *)conn)->completion) return 0;
     return munmap(addr, size) ? -errno : 0;
 }
 

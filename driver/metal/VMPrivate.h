@@ -241,9 +241,12 @@ NSData *VMBitcodeOfFunction(id<MTLFunction> function);
 // Keeps an object alive until the command buffer completes (unretained-reference command buffers too).
 - (void)keepAlive:(id)object;
 - (void)useSurface:(IOSurfaceRef)surface;
-// The GPU writes it (render target, blit destination): commit submits to the kernel before returning.
-- (void)writeSurface:(IOSurfaceRef)surface;
+// The GPU writes it (render target, blit destination, shader write): its IOSurface, if any, is written by this command
+// buffer, and commit either promises it to the kernel (K0i) or submits before returning.
+- (void)writeTexture:(id<MTLTexture>)texture;
 @property (readonly) BOOL writesSurface;
+// Commit: a kernel promise on the written IOSurfaces, or 0 (see VMCommands.m).
+- (uint32_t)promiseWrittenSurfaces:(VMDevice *)device;
 @end
 
 id<MTLRenderCommandEncoder> VMNewRenderEncoder(VMCommandBuffer *cb, MTLRenderPassDescriptor *desc);

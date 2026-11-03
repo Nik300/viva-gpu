@@ -54,6 +54,185 @@ static void bo_forget(int fd, uint32_t handle)
 
 static void map_cache_drop(int fd, uint32_t handle);
 
+// ---- Batched submits and the completion page (kernel uapi minor >= 2, K0h) ------------------------------------------
+
+// Per connection: SUBMITs are queued (with copies of their arrays: Panfrost frees them on return) and sent together
+// with SUBMIT_BATCH, in order, before any other kernel call that could depend on them and whenever the queue holds
+// VGPU_BATCH_MAX of them (default 16: the GPU starts on a frame's first passes while the CPU replays the rest).
+// The kernel's job number of every submit is kept per BO: a BO whose last job is at or below the completion page's
+// watermark is idle, so WAIT_BO is answered without a kernel call (not for imported IOSurfaces: other processes' jobs
+// count there, nor for write-back cached BOs: their CPU caches are invalidated by the kernel's wait).
+// VGPU_NO_SUBMIT_BATCH=1, VGPU_NO_LOCAL_WAIT=1: one call per SUBMIT / every WAIT_BO to the kernel, as before.
+enum { BO_SHARED = 1, BO_WB = 2 };
+typedef struct {
+    struct vgpu_submit s;
+    uint32_t *arrays;            // bo_handles then in_syncs
+} QueuedSubmit;
+typedef struct {
+    pthread_mutex_t lock;
+    uint32_t minor;
+    const struct vgpu_completion *page;
+    size_t page_size;
+    bool batch, local_wait;
+    unsigned batch_max;
+    QueuedSubmit q[64];
+    unsigned qn;
+    uint32_t *bo_seq; uint8_t *bo_flags; uint32_t bo_cap;   // index = BO handle
+} FdState;
+static FdState *g_fd_state[1024];
+static pthread_mutex_t g_fd_state_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static FdState *fd_state(int fd)
+{
+    if (fd < 0 || fd >= 1024) return NULL;
+    pthread_mutex_lock(&g_fd_state_lock);
+    FdState *st = g_fd_state[fd];
+    if (!st) {
+        st = calloc(1, sizeof *st);
+        pthread_mutex_init(&st->lock, NULL);
+        struct vgpu_version v = {0};
+        if (!vgpu_ioctl(fd, VGPU_SEL_GET_VERSION, &v)) st->minor = v.minor;
+        if (st->minor >= 2) {
+            st->page_size = v.page_size ? v.page_size : 16384;
+            st->page = vgpu_mmap(fd, VGPU_MAP_COMPLETION, st->page_size);
+            st->batch = !getenv("VGPU_NO_SUBMIT_BATCH");
+            st->local_wait = st->page && !getenv("VGPU_NO_LOCAL_WAIT");
+            const char *m = getenv("VGPU_BATCH_MAX");
+            st->batch_max = m ? (unsigned)atoi(m) : 16;
+            if (st->batch_max < 1) st->batch_max = 1;
+            if (st->batch_max > 64) st->batch_max = 64;
+        }
+        g_fd_state[fd] = st;
+    }
+    pthread_mutex_unlock(&g_fd_state_lock);
+    return st;
+}
+
+// Lock held: per-BO table.
+static void bo_track(FdState *st, uint32_t handle, uint32_t seq, uint8_t set_flags, bool reset)
+{
+    if (handle >= st->bo_cap) {
+        uint32_t cap = st->bo_cap ? st->bo_cap : 1024;
+        while (cap <= handle) cap *= 2;
+        st->bo_seq = realloc(st->bo_seq, cap * sizeof *st->bo_seq);
+        st->bo_flags = realloc(st->bo_flags, cap);
+        memset(st->bo_seq + st->bo_cap, 0, (cap - st->bo_cap) * sizeof *st->bo_seq);
+        memset(st->bo_flags + st->bo_cap, 0, cap - st->bo_cap);
+        st->bo_cap = cap;
+    }
+    if (reset) { st->bo_seq[handle] = 0; st->bo_flags[handle] = 0; }
+    if (seq) st->bo_seq[handle] = seq;
+    st->bo_flags[handle] |= set_flags;
+}
+
+static void record_submit(FdState *st, const struct vgpu_submit *s)
+{
+    const uint32_t *h = (const uint32_t *)(uintptr_t)s->bo_handles;
+    for (uint32_t i = 0; i < s->bo_handle_count; i++) bo_track(st, h[i], s->seq, 0, false);
+}
+
+// Lock held: sends the queue. A failing submit is reported and skipped; the ones after it still go, as separate
+// SUBMIT calls would have.
+static void flush_locked(int fd, FdState *st)
+{
+    if (!st->qn) return;
+    struct vgpu_submit subs[64];
+    for (unsigned i = 0; i < st->qn; i++) subs[i] = st->q[i].s;
+    unsigned start = 0;
+    while (start < st->qn) {
+        struct vgpu_submit_batch b = { (uintptr_t)&subs[start], st->qn - start, sizeof(struct vgpu_submit), 0, 0 };
+        int r = vgpu_ioctl(fd, VGPU_SEL_SUBMIT_BATCH, &b);
+        for (unsigned i = 0; i < b.done; i++) record_submit(st, &subs[start + i]);
+        start += b.done;
+        if (r) {
+            fprintf(stderr, "vgpu: batched submit failed (%d): job dropped\n", r);
+            start++;
+        }
+    }
+    for (unsigned i = 0; i < st->qn; i++) free(st->q[i].arrays);
+    st->qn = 0;
+}
+
+static void flush_fd(int fd)
+{
+    FdState *st = fd_state(fd);
+    if (!st || !st->batch) return;
+    pthread_mutex_lock(&st->lock);
+    flush_locked(fd, st);
+    pthread_mutex_unlock(&st->lock);
+}
+
+// SUBMIT: queued (0) or sent now (the kernel's result).
+static int submit(int fd, struct vgpu_submit *a)
+{
+    FdState *st = fd_state(fd);
+    if (!st || !st->batch) {
+        int r = vgpu_ioctl(fd, VGPU_SEL_SUBMIT, a);
+        if (!r && st && st->minor >= 2) {
+            pthread_mutex_lock(&st->lock);
+            record_submit(st, a);
+            pthread_mutex_unlock(&st->lock);
+        }
+        return r;
+    }
+    if (a->bo_handle_count > 4096 || a->in_sync_count > 256) return -EINVAL;
+    uint32_t *arrays = malloc(((size_t)a->bo_handle_count + a->in_sync_count + 1) * sizeof(uint32_t));
+    if (!arrays) return -ENOMEM;
+    memcpy(arrays, (const void *)(uintptr_t)a->bo_handles, a->bo_handle_count * sizeof(uint32_t));
+    memcpy(arrays + a->bo_handle_count, (const void *)(uintptr_t)a->in_syncs, a->in_sync_count * sizeof(uint32_t));
+    pthread_mutex_lock(&st->lock);
+    QueuedSubmit *q = &st->q[st->qn++];
+    q->s = *a;
+    q->s.bo_handles = (uintptr_t)arrays;
+    q->s.in_syncs = (uintptr_t)(arrays + a->bo_handle_count);
+    q->s.seq = 0;
+    q->arrays = arrays;
+    if (st->qn >= st->batch_max) flush_locked(fd, st);
+    pthread_mutex_unlock(&st->lock);
+    return 0;
+}
+
+// WAIT_BO: 0 / -EBUSY answered here when the completion page settles it, else 1 (ask the kernel). A BO used by a
+// queued submit sends the queue first.
+static int wait_bo_local(int fd, struct vgpu_wait_bo *w)
+{
+    FdState *st = fd_state(fd);
+    if (!st || st->minor < 2) return 1;
+    pthread_mutex_lock(&st->lock);
+    for (unsigned i = 0; i < st->qn; i++) {
+        const uint32_t *h = (const uint32_t *)(uintptr_t)st->q[i].s.bo_handles;
+        for (uint32_t k = 0; k < st->q[i].s.bo_handle_count; k++) {
+            if (h[k] != w->handle) continue;
+            // Its job is not even submitted: a poll is busy (Panfrost's BO cache polls the BO it just released),
+            // a real wait sends the queue first.
+            if (w->timeout_ns == 0) { pthread_mutex_unlock(&st->lock); return -EBUSY; }
+            flush_locked(fd, st);
+            goto flushed;
+        }
+    }
+flushed:;
+    int answer = 1;
+    if (st->local_wait && w->handle < st->bo_cap && !(st->bo_flags[w->handle] & (BO_SHARED | BO_WB))) {
+        uint32_t seq = st->bo_seq[w->handle];
+        uint32_t done = __atomic_load_n(&st->page->completed, __ATOMIC_ACQUIRE);
+        if (!seq || (int32_t)(done - seq) >= 0) answer = 0;
+        else if (w->timeout_ns == 0) answer = -EBUSY;   // a poll: the job is ours and not finished
+    } else if (st->local_wait && w->handle >= st->bo_cap) {
+        answer = 0;   // never submitted, never imported (imports are tracked)
+    }
+    pthread_mutex_unlock(&st->lock);
+    return answer;
+}
+
+static void bo_flags_set(int fd, uint32_t handle, uint8_t flags, bool reset)
+{
+    FdState *st = fd_state(fd);
+    if (!st || st->minor < 2) return;
+    pthread_mutex_lock(&st->lock);
+    bo_track(st, handle, 0, flags, reset);
+    pthread_mutex_unlock(&st->lock);
+}
+
 int drmIoctl(int fd, unsigned long request, void *arg)
 {
     enum vgpu_selector sel;
@@ -93,7 +272,16 @@ int drmIoctl(int fd, unsigned long request, void *arg)
     int r;
     if (sel == VGPU_SEL_MMAP_BO) r = (((struct vgpu_mmap_bo *)arg)->offset = ((struct vgpu_mmap_bo *)arg)->handle, 0);
     else if (sel == VGPU_SEL_MADVISE && !madv_kernel) r = (((struct vgpu_madvise *)arg)->retained = 1, 0);
-    else r = vgpu_ioctl(fd, sel, arg);
+    else if (sel == VGPU_SEL_SUBMIT) r = submit(fd, arg);
+    else if (sel == VGPU_SEL_WAIT_BO && (r = wait_bo_local(fd, arg)) <= 0) {}
+    else {
+        if (sel != VGPU_SEL_WAIT_BO) flush_fd(fd);   // anything else may depend on the queued submits
+        r = vgpu_ioctl(fd, sel, arg);
+    }
+    if (!r && sel == VGPU_SEL_CREATE_BO)
+        bo_flags_set(fd, ((struct vgpu_create_bo *)arg)->handle,
+                     (((struct vgpu_create_bo *)arg)->flags & VGPU_BO_WB_MMAP) ? BO_WB : 0, true);
+    if (!r && sel == VGPU_SEL_GEM_CLOSE) bo_flags_set(fd, ((struct vgpu_gem_close *)arg)->handle, 0, true);
     if (sel == VGPU_SEL_GEM_CLOSE && !r) map_cache_drop(fd, ((struct vgpu_gem_close *)arg)->handle);
     if (trace_bo && !r && sel == VGPU_SEL_CREATE_BO) {
         struct vgpu_create_bo *c = arg;
@@ -139,8 +327,9 @@ void drmFreeVersion(drmVersionPtr v)
 int drmCloseBufferHandle(int fd, uint32_t handle)
 {
     struct vgpu_gem_close c = { .handle = handle };
+    flush_fd(fd);
     int r = vgpu_ioctl(fd, VGPU_SEL_GEM_CLOSE, &c);
-    if (!r) { map_cache_drop(fd, handle); bo_forget(fd, handle); }
+    if (!r) { map_cache_drop(fd, handle); bo_forget(fd, handle); bo_flags_set(fd, handle, 0, true); }
     return ret_errno(r);
 }
 
@@ -284,8 +473,10 @@ int drmPrimeFDToHandle(int fd, int prime_fd, uint32_t *handle)
         }
     pthread_mutex_unlock(&g_bo_lock);
     struct vgpu_import_iosurface im = { .surface_id = sf.surface, .plane = sf.plane };
+    flush_fd(fd);
     int r = vgpu_ioctl(fd, VGPU_SEL_IMPORT_IOSURFACE, &im);
     if (r) { errno = -r; return r; }
+    bo_flags_set(fd, im.handle, BO_SHARED, true);   // other processes' jobs on the surface: WAIT_BO asks the kernel
     struct vgpu_version v = {0};
     uint32_t pg = vgpu_ioctl(fd, VGPU_SEL_GET_VERSION, &v) == 0 && v.page_size ? v.page_size : 16384;
     pthread_mutex_lock(&g_bo_lock);
@@ -313,6 +504,7 @@ int drmPrimeHandleToFD(int fd, uint32_t handle, uint32_t flags, int *prime_fd)
 
 int drmSyncobjCreate(int fd, uint32_t flags, uint32_t *handle)
 {
+    flush_fd(fd);
     struct vgpu_syncobj_create c = { .flags = flags };
     int r = vgpu_ioctl(fd, VGPU_SEL_SYNCOBJ_CREATE, &c);
     if (r) { errno = -r; return r; }
@@ -322,6 +514,7 @@ int drmSyncobjCreate(int fd, uint32_t flags, uint32_t *handle)
 
 int drmSyncobjDestroy(int fd, uint32_t handle)
 {
+    flush_fd(fd);
     struct vgpu_syncobj_destroy d = { .handle = handle };
     int r = vgpu_ioctl(fd, VGPU_SEL_SYNCOBJ_DESTROY, &d);
     if (r) errno = -r;
@@ -331,6 +524,7 @@ int drmSyncobjDestroy(int fd, uint32_t handle)
 int drmSyncobjWait(int fd, uint32_t *handles, unsigned num_handles, int64_t timeout_nsec, unsigned flags,
                    uint32_t *first_signaled)
 {
+    flush_fd(fd);
     struct vgpu_syncobj_wait w = { .handles = (uintptr_t)handles, .timeout_nsec = timeout_nsec, .count_handles = num_handles,
                                    .flags = flags };
     int r = vgpu_ioctl(fd, VGPU_SEL_SYNCOBJ_WAIT, &w);
@@ -341,6 +535,7 @@ int drmSyncobjWait(int fd, uint32_t *handles, unsigned num_handles, int64_t time
 
 int drmSyncobjReset(int fd, const uint32_t *handles, uint32_t handle_count)
 {
+    flush_fd(fd);
     struct vgpu_syncobj_array a = { .handles = (uintptr_t)handles, .count_handles = handle_count };
     int r = vgpu_ioctl(fd, VGPU_SEL_SYNCOBJ_RESET, &a);
     if (r) errno = -r;
@@ -357,6 +552,7 @@ static pthread_mutex_t g_sync_pool_lock = PTHREAD_MUTEX_INITIALIZER;
 
 int drmSyncobjSnapshotXNU(int fd, uint32_t src, uint32_t *handle)
 {
+    flush_fd(fd);
     uint32_t h = 0;
     pthread_mutex_lock(&g_sync_pool_lock);
     for (unsigned i = g_sync_pool_count; i-- > 0;)
@@ -391,6 +587,41 @@ int drmSyncobjReleaseXNU(int fd, uint32_t handle)
     return drmSyncobjDestroy(fd, handle);
 }
 
+int drmSurfacePromiseXNU(int fd, const uint32_t *surface_ids, uint32_t count, uint32_t timeout_ms, uint32_t *handle)
+{
+    FdState *st = fd_state(fd);
+    if (!st || st->minor < 2) { errno = ENOTSUP; return -ENOTSUP; }
+    if (!count || count > 16) { errno = EINVAL; return -EINVAL; }
+    uint32_t h = 0;
+    pthread_mutex_lock(&g_sync_pool_lock);
+    for (unsigned i = g_sync_pool_count; i-- > 0;)
+        if (g_sync_pool[i].fd == fd) { h = g_sync_pool[i].handle; g_sync_pool[i] = g_sync_pool[--g_sync_pool_count]; break; }
+    pthread_mutex_unlock(&g_sync_pool_lock);
+    int r = 0;
+    if (!h) {
+        struct vgpu_syncobj_create c = {0};
+        if ((r = vgpu_ioctl(fd, VGPU_SEL_SYNCOBJ_CREATE, &c))) { errno = -r; return r; }
+        h = c.handle;
+    }
+    struct vgpu_surface_promise p = { (uintptr_t)surface_ids, count, h, timeout_ms, 0 };
+    if ((r = vgpu_ioctl(fd, VGPU_SEL_SURFACE_PROMISE, &p))) {
+        drmSyncobjDestroy(fd, h);
+        errno = -r;
+        return r;
+    }
+    *handle = h;
+    return 0;
+}
+
+int drmSyncobjCopyXNU(int fd, uint32_t dst, uint32_t src)
+{
+    flush_fd(fd);   // src's fence must be the one of the submits made so far
+    struct vgpu_syncobj_transfer t = { .src = src, .dst = dst };
+    int r = vgpu_ioctl(fd, VGPU_SEL_SYNCOBJ_TRANSFER, &t);
+    if (r) errno = -r;
+    return r;
+}
+
 // Sync files (Linux fences as fds) do not exist on XNU. Panfrost uses them only to snapshot a syncobj's current fence
 // (pan_fence.c: export from the context syncobj, import into a fresh one). An exported "sync file" is a /dev/null fd
 // registered with a temporary syncobj holding the snapshot; importing transfers it and destroys the temporary.
@@ -400,6 +631,7 @@ static pthread_mutex_t g_sync_lock = PTHREAD_MUTEX_INITIALIZER;
 
 int drmSyncobjExportSyncFile(int fd, uint32_t handle, int *sync_file_fd)
 {
+    flush_fd(fd);
     struct vgpu_syncobj_create c = {0};
     int r = vgpu_ioctl(fd, VGPU_SEL_SYNCOBJ_CREATE, &c);
     if (r) { errno = -r; return r; }
@@ -429,6 +661,7 @@ int drmSyncobjExportSyncFile(int fd, uint32_t handle, int *sync_file_fd)
 
 int drmSyncobjImportSyncFile(int fd, uint32_t handle, int sync_file_fd)
 {
+    flush_fd(fd);
     SyncFile f = {0};
     pthread_mutex_lock(&g_sync_lock);
     for (unsigned i = 0; i < 64; i++)

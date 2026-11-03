@@ -147,5 +147,10 @@ void vmg_drm_surface_fd_close(int fd);
 // An fd standing for one of this process's BOs (GEM handle): Panfrost's import of it finds the BO it already has.
 // Closed with vmg_drm_surface_fd_close.
 int vmg_drm_bo_fd(int device_fd, uint32_t handle);
+// libdrm-xnu (xf86drm.h, not included here).
+int drmSurfacePromiseXNU(int fd, const uint32_t *surface_ids, uint32_t count, uint32_t timeout_ms, uint32_t *handle);
+int drmSyncobjCopyXNU(int fd, uint32_t dst, uint32_t src);
+int drmSyncobjReleaseXNU(int fd, uint32_t handle);
+int drmSyncobjDestroy(int fd, uint32_t handle);
 
 char *vmg_strdup_printf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));

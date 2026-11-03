@@ -6,7 +6,11 @@ serve a me per verificarla.
 
 ## Bloccanti per G7
 
-### K0h. Submit a lotti e contatore di completamento condiviso (2026-11-04, analisi userspace)
+### K0h. Submit a lotti e contatore di completamento condiviso (2026-11-04, analisi userspace) — adottato con 0119
+Userspace (libdrm-xnu, minor >= 2): SUBMIT_BATCH ogni 16 submit e prima di ogni altra chiamata, WAIT_BO risposte dalla
+pagina di completamento (non per le IOSurface importate né per i BO WB). K0i: promessa al commit per i command buffer
+che scrivono IOSurface non copiate. Da verificare sul telefono: `gpu calls` (submit_batch, surf_promise) e `VGPU_STATS`.
+
 Dopo le ottimizzazioni userspace (vedi FINDINGS, 2026-11-04 sera) per frame restano ~100 SUBMIT e ~50 WAIT_BO. Le
 WAIT_BO rimaste sono quasi tutte sul BO del pool di un batch dello stesso frame: userspace non può sapere che il suo
 ultimo job è finito senza chiederlo. Le SUBMIT sono 2 per pass (job vertex/tiler + job fragment, slot diversi su JM).

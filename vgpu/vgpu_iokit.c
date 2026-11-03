@@ -66,7 +66,7 @@ static void iokit_close(void *conn)
 static int iokit_ioctl(void *conn, enum vgpu_selector sel, void *arg, size_t size)
 {
     IOKitConn *c = conn;
-    if (c->trap) return errno_for(IOConnectTrap2(c->conn, VGPU_TRAP_CALL, (uintptr_t)sel, (uintptr_t)arg));
+    if (c->trap) return errno_for(vgpu_IOConnectTrap2(c->conn, VGPU_TRAP_CALL, (uintptr_t)sel, (uintptr_t)arg));
     size_t out = size;
     return errno_for(IOConnectCallStructMethod(c->conn, sel, arg, size, arg, &out));
 }

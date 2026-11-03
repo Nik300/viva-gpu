@@ -953,6 +953,11 @@ extern int drmSyncobjExportSyncFile(int fd, uint32_t handle, int *sync_file_fd);
  * putting one back. For Panfrost's fences (pan_fence.c), which otherwise go through emulated sync files. */
 extern int drmSyncobjSnapshotXNU(int fd, uint32_t src, uint32_t *handle);
 extern int drmSyncobjReleaseXNU(int fd, uint32_t handle);
+/* libdrm-xnu, kernel uapi minor >= 2 (K0i): *handle = a pooled syncobj holding a promise on the IOSurfaces (their
+ * readers wait for it until a fence is copied into the syncobj, or timeout_ms); -ENOTSUP on older kernels.
+ * drmSyncobjCopyXNU: dst takes src's current fence (resolves a promise in dst). */
+extern int drmSurfacePromiseXNU(int fd, const uint32_t *surface_ids, uint32_t count, uint32_t timeout_ms, uint32_t *handle);
+extern int drmSyncobjCopyXNU(int fd, uint32_t dst, uint32_t src);
 #endif
 extern int drmSyncobjWait(int fd, uint32_t *handles, unsigned num_handles,
 			  int64_t timeout_nsec, unsigned flags,
