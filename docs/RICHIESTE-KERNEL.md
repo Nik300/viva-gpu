@@ -6,6 +6,26 @@ serve a me per verificarla.
 
 ## Bloccanti per G7
 
+### K0c. AppleCLCD presenta frame non ancora finiti dalla GPU (2026-11-03, visto a schermo)
+Durante le animazioni (es. apertura di un'app) a schermo compaiono frame a metà: tile neri, metà frame vecchio e metà
+nuovo. Catturati dalla superficie di scanout con `vctl burst /tmp/b 24 40 open com.apple.Preferences` (confermato
+dall'utente sul telefono). Causa: backboardd fa commit del command buffer e passa subito la IOSurface alla swap di
+IOMobileFramebuffer, senza aspettare né "completed" né "scheduled". Su Apple è il kernel del display ad attendere le
+scritture GPU in sospeso sulla superficie; `AppleCLCD::present()` (copia, 0056) e `AppleCLCD::scanout()` (0109)
+invece leggono la superficie appena il timer vsync lo decide, anche con i job fragment ancora in esecuzione.
+- Serve:
+  1. in `VivaGPUAccelerator`: `bool surfaceIdle(uint32_t surfaceID)`, sotto il gate: per ogni BO importato
+     (`kVivaBOSurface`) di quella IOSurface, in qualsiasi connessione, vero solo se `busy == NULL || busy->signalled`;
+  2. in `AppleCLCD::present()` e in `scanout()`: per ogni layer abilitato, se la superficie non è idle **non copiarla e
+     non puntarci lo scanout**: lasciare `fDirty = true` e riprovare al tick vsync dopo (niente attese nel timer);
+  3. dopo la copia ricontrollare `surfaceIdle`: se nel frattempo è partito un job che scrive la stessa superficie
+     (CA la riusa per il frame dopo), la copia può essere mista: rifarla al tick successivo.
+- `busy` è il fence dell'ultimo job sul BO: è affidabile perché le submit di una connessione sono serializzate
+  (libdrm-xnu oggi, K0 domani); con K0 in kernel vale anche tra processi.
+- Per verificare: `vctl burst` come sopra, 3-4 volte: nessun frame con tile neri o metà vecchio/nuovo.
+- Nota: con `sweetfb_hz` di default (10) lo schermo si aggiorna a 10 Hz anche quando la GPU fa di più; per la
+  fluidità percepita conta quanto K0b.
+
 ### K0b. Latenza per job: è il collo di bottiglia del rendering (2026-11-03, misurato)
 Scena "Impostazioni" del test `ca` (`VMG_CA_TIME=1 VMG_CA_SETTINGS=1 ca 61`, frame 360x640): **42 ms per frame
 sia a 300 sia a 950 MHz**, ~100 job GPU per frame (CoreAnimation fa ~50 pass, quasi tutti offscreen 64x64 per
