@@ -1,5 +1,6 @@
 // Viva Metal - Gallium back-end: command execution on the GPU queue (render passes, draws, dispatches, blits,
 // fences). See vmg.h.
+#include <time.h>
 #include "vmg_internal.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -42,6 +43,18 @@ void vmg_texture_sync(vmg_device *dev, vmg_texture *t, bool to_texture)
     }
     uint32_t w = t->res->width0, h = t->res->height0;
     if (s) IOSurfaceLock(s, to_texture ? kIOSurfaceLockReadOnly : 0, NULL);
+    // VMG_TRACE_SURF=1: every copy of a surface-backed texture (surface id, seed, how much of it is still zero).
+    static int trace_surf = -1;
+    if (trace_surf < 0) trace_surf = getenv("VMG_TRACE_SURF") != NULL;
+    if (trace_surf && s) {
+        unsigned zero = 0, n = 0;
+        for (uint32_t y = 0; y < h; y += h / 16 + 1)
+            for (uint32_t x = 0; x < w; x += w / 16 + 1, n++) zero += *(const uint32_t *)(base + y * bpr + x * 4) == 0;
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        fprintf(stderr, "vmg: surf %u %ux%u %s seed %u, %u/%u samples zero, t %ld.%03ld\n", t->surface_id, w, h,
+                to_texture ? "in" : "out", IOSurfaceGetSeed(s), zero, n, (long)ts.tv_sec, ts.tv_nsec / 1000000);
+    }
     if (to_texture) {
         struct pipe_box box;
         u_box_2d(0, 0, (int)w, (int)h, &box);
