@@ -43,18 +43,36 @@ mesa() {
   nm "$OUT/lib/libmesa_viva.a" 2>/dev/null | grep -c " T _nir_builder_init_simple_shader" || echo "nir_builder_init_simple_shader MISSING"
 }
 
+# Rebuild OUT only when it is missing or older than any of the following files (incremental CI runs).
+stale() {
+  local out=$1; shift
+  [ -f "$out" ] || return 0
+  local f
+  for f in "$@"; do [ "$f" -nt "$out" ] && return 0; done
+  return 1
+}
+
 driver() {
   local CF
   CF="$(sed -e 's/-std=[a-z0-9]*//' "$GPU/mesa/out/macos/cflags.txt" | tr '\n' ' ' | sed "s|$GPU/mesa/out/macos/include/build|$GPU/mesa/build-ios|g; s|-DHAVE_LLVMPIPE||; s|-DDRAW_LLVM_AVAILABLE=1||; s|-DLLVM_IS_SHARED=1||")"
   local OBJ="$OUT/obj"; mkdir -p "$OBJ"
+  local vh=("$GPU/vgpu/vgpu.h" "$GPU/vgpu/iokit_compat.h" "$GPU/uapi/viva_gpu_uapi.h")
+  local dh=("$GPU/driver/vmg.h" "$GPU/driver/vmg_internal.h" "$GPU/driver/vmg_llvm.h")
   for f in "$GPU/libdrm-xnu/src/xf86drm_xnu.c" "$GPU/vgpu/vgpu.c" "$GPU/vgpu/vgpu_mock.c" "$GPU/vgpu/vgpu_iokit.c"; do
-    $CC $TARGET -O2 -g -Wall -Wno-four-char-constants -I"$GPU/libdrm-xnu/include" -I"$GPU/libdrm-xnu/include/libdrm" \
-        -c "$f" -o "$OBJ/$(basename "${f%.c}").o"
+    local o="$OBJ/$(basename "${f%.c}").o"
+    stale "$o" "$f" "${vh[@]}" || continue
+    echo "cc $(basename "$f")"
+    $CC $TARGET -O2 -g -Wall -Wno-four-char-constants -I"$GPU/libdrm-xnu/include" -I"$GPU/libdrm-xnu/include/libdrm" -c "$f" -o "$o"
   done
   for f in vmg_air vmg_screen vmg_exec; do
+    stale "$OBJ/$f.o" "$GPU/driver/$f.c" "${dh[@]}" "${vh[@]}" || continue
+    echo "cc $f.c"
     $CC $TARGET -std=gnu11 -O2 -g -DVMG_HAVE_LLVMPIPE=0 $CF -I"$GPU/driver" -c "$GPU/driver/$f.c" -o "$OBJ/$f.o"
   done
-  $CC $TARGET -fobjc-arc -O2 -g -DVMG_HAVE_LLVMPIPE=0 $CF -c "$GPU/driver/vmg_formats.m" -o "$OBJ/vmg_formats.o"
+  if stale "$OBJ/vmg_formats.o" "$GPU/driver/vmg_formats.m" "${dh[@]}"; then
+    echo "cc vmg_formats.m"
+    $CC $TARGET -fobjc-arc -O2 -g -DVMG_HAVE_LLVMPIPE=0 $CF -c "$GPU/driver/vmg_formats.m" -o "$OBJ/vmg_formats.o"
+  fi
   local B="$OUT/VivaMTLDriver.bundle"
   rm -rf "$B"; mkdir -p "$B"
   $CC $TARGET -fobjc-arc -O2 -g -bundle -Wno-deprecated-declarations -I"$GPU/driver/metal" -I"$GPU/driver" \

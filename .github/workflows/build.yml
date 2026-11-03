@@ -1,9 +1,18 @@
 name: build
 
-# Builds the Viva Metal driver: Mesa for macOS (host tools + tests on llvmpipe), then the iOS 16 arm64 bundle
-# (VivaMTLDriver.bundle) and the phone test binaries with the runner's Xcode / iOS SDK.
+# Builds the Viva Metal driver: Mesa for macOS (host tools + tests on llvmpipe), Mesa for iOS 16 arm64 (Panfrost
+# only), then VivaMTLDriver.bundle and the phone tests, with the runner's Xcode / iOS SDK.
+#
+# Incremental: every section's build directory is restored from the last run's cache (actions/cache/restore with a
+# prefix) and saved again even when the run fails (actions/cache/save, if: always(), key = section + run id), so
+# ninja/make only rebuild what changed since the previous run. Each section is also uploaded as its own artifact.
 on:
   workflow_dispatch:
+    inputs:
+      clean:
+        description: ignore the caches (full rebuild)
+        type: boolean
+        default: false
   push:
     branches: [main]
 
@@ -17,6 +26,7 @@ jobs:
     timeout-minutes: 120
     env:
       JOBS: 3
+      NOCACHE: ${{ inputs.clean && 'yes' || '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -27,13 +37,50 @@ jobs:
           xcrun --sdk iphoneos --show-sdk-path
           "$(brew --prefix llvm)/bin/llvm-config" --version
 
-      - name: Cache Mesa source
-        uses: actions/cache@v4
+      # ---- restore the sections of the previous run (newest cache whose key starts with the prefix)
+      - name: Restore venv + Mesa source
+        if: env.NOCACHE == ''
+        uses: actions/cache/restore@v4
         with:
-          path: mesa/src
-          key: mesa-src-${{ hashFiles('mesa/build.sh', 'mesa/patches/*.patch') }}
+          path: |
+            .venv
+            mesa/src
+          key: src-${{ hashFiles('mesa/build.sh', 'mesa/patches/*.patch') }}-${{ github.run_id }}
+          restore-keys: src-${{ hashFiles('mesa/build.sh', 'mesa/patches/*.patch') }}-
+      - name: Restore Mesa macOS build
+        if: env.NOCACHE == ''
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            mesa/build-macos
+            mesa/out/macos
+            libdrm-xnu/out
+          key: mesa-macos-${{ github.run_id }}
+          restore-keys: mesa-macos-
+      - name: Restore Mesa iOS build
+        if: env.NOCACHE == ''
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            mesa/build-ios
+            ios/out/lib
+            ios/out/ios-arm64.ini
+          key: mesa-ios-${{ github.run_id }}
+          restore-keys: mesa-ios-
+      - name: Restore driver objects
+        if: env.NOCACHE == ''
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            driver/out
+            vgpu/out
+            ios/out/obj
+          key: driver-${{ github.run_id }}
+          restore-keys: driver-
 
+      # ---- sections
       - name: Mesa (macOS, host tools + llvmpipe)
+        id: mesa_macos
         run: bash mesa/build.sh macos
 
       - name: Tests on the Mac (llvmpipe, Panfrost on the vgpu mock)
@@ -47,22 +94,88 @@ jobs:
           out/macos/airnir ../shim/tests/corpus/apps.metal | tail -1
           VMG_DRIVER=panfrost VGPU_BACKEND=mock out/macos/airnir ../shim/tests/corpus/apps.metal | tail -1
 
-      - name: iOS (Mesa Panfrost-only, VivaMTLDriver.bundle, phone tests)
-        run: bash ios/build.sh all
+      - name: Mesa (iOS, Panfrost only)
+        id: mesa_ios
+        run: bash ios/build.sh mesa
 
-      - name: Package
+      - name: Driver (iOS, VivaMTLDriver.bundle)
+        id: driver_ios
+        run: bash ios/build.sh driver
+
+      - name: Phone tests (iOS)
+        id: tests_ios
+        run: bash ios/build.sh tests
+
+      # ---- save every section, also when a later step failed
+      - name: Save venv + Mesa source
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .venv
+            mesa/src
+          key: src-${{ hashFiles('mesa/build.sh', 'mesa/patches/*.patch') }}-${{ github.run_id }}
+      - name: Save Mesa macOS build
+        if: always() && steps.mesa_macos.outcome != 'skipped'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            mesa/build-macos
+            mesa/out/macos
+            libdrm-xnu/out
+          key: mesa-macos-${{ github.run_id }}
+      - name: Save Mesa iOS build
+        if: always() && steps.mesa_ios.outcome != 'skipped'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            mesa/build-ios
+            ios/out/lib
+            ios/out/ios-arm64.ini
+          key: mesa-ios-${{ github.run_id }}
+      - name: Save driver objects
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            driver/out
+            vgpu/out
+            ios/out/obj
+          key: driver-${{ github.run_id }}
+
+      # ---- artifacts, one per section
+      - name: Package sections
         if: always()
         run: |
           mkdir -p dist
-          [ -d ios/out/VivaMTLDriver.bundle ] && cp -R ios/out/VivaMTLDriver.bundle dist/
-          [ -d ios/out/tests ] && cp -R ios/out/tests dist/
-          ls -laR dist | head -50
-
+          [ -d mesa/out/macos ] && tar czf dist/mesa-macos.tgz mesa/out/macos libdrm-xnu/out || true
+          [ -f ios/out/lib/libmesa_viva.a ] && tar czf dist/mesa-ios.tgz ios/out/lib || true
+          if [ -d ios/out/VivaMTLDriver.bundle ]; then
+            mkdir -p dist/driver-ios
+            cp -R ios/out/VivaMTLDriver.bundle dist/driver-ios/
+            [ -d ios/out/tests ] && cp -R ios/out/tests dist/driver-ios/
+          fi
+          ls -la dist
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mesa-macos
+          path: dist/mesa-macos.tgz
+          if-no-files-found: ignore
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mesa-ios
+          path: dist/mesa-ios.tgz
+          if-no-files-found: ignore
+          retention-days: 7
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: viva-gpu-ios
-          path: dist
+          path: dist/driver-ios
+          if-no-files-found: ignore
           retention-days: 14
       - uses: actions/upload-artifact@v4
         if: failure()
@@ -71,4 +184,5 @@ jobs:
           path: |
             mesa/build-ios/meson-logs
             mesa/build-macos/meson-logs
+          if-no-files-found: ignore
           retention-days: 7
