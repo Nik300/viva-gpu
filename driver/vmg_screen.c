@@ -6,6 +6,7 @@
 #include <string.h>
 #include <IOSurface/IOSurfaceRef.h>
 #include "nir.h"
+#include "nir_builder.h"
 #include "compiler/glsl_types.h"
 #include "util/hash_table.h"
 #include "util/u_dynarray.h"
@@ -107,6 +108,19 @@ vmg_device *vmg_device_create(const char *which, char *error, size_t error_size)
     ss.min_mip_filter = PIPE_TEX_MIPFILTER_NONE;
     ss.max_lod = 1000;
     dev->sampler_default = dev->pipe->create_sampler_state(dev->pipe, &ss);
+    dev->velems_empty = dev->pipe->create_vertex_elements_state(dev->pipe, 0, NULL);
+    struct pipe_blend_state bs = {0};
+    bs.rt[0].colormask = PIPE_MASK_RGBA;
+    dev->blend_default = dev->pipe->create_blend_state(dev->pipe, &bs);
+    struct pipe_depth_stencil_alpha_state dsa = {0};
+    dsa.depth_func = PIPE_FUNC_ALWAYS;
+    dev->dsa_default = dev->pipe->create_depth_stencil_alpha_state(dev->pipe, &dsa);
+    {
+        // Empty fragment shader for pipelines without a fragment function.
+        nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_FRAGMENT, dev->screen->nir_options[MESA_SHADER_FRAGMENT], "vmg_empty_fs");
+        struct pipe_shader_state fs = { .type = PIPE_SHADER_IR_NIR, .ir.nir = b.shader };
+        dev->fs_empty = dev->pipe->create_fs_state(dev->pipe, &fs);
+    }
     // Default raster state: Metal defaults (no cull, CCW? Metal's default front face is clockwise).
     struct pipe_rasterizer_state *r = &dev->raster;
     memset(r, 0, sizeof *r);
@@ -133,6 +147,10 @@ void vmg_device_destroy(vmg_device *dev)
     hash_table_foreach(dev->raster_cache, he) dev->pipe->delete_rasterizer_state(dev->pipe, he->data), free((void *)he->key);
     _mesa_hash_table_destroy(dev->raster_cache, NULL);
     if (dev->sampler_default) dev->pipe->delete_sampler_state(dev->pipe, dev->sampler_default);
+    if (dev->dsa_default) dev->pipe->delete_depth_stencil_alpha_state(dev->pipe, dev->dsa_default);
+    if (dev->fs_empty) dev->pipe->delete_fs_state(dev->pipe, dev->fs_empty);
+    if (dev->velems_empty) dev->pipe->delete_vertex_elements_state(dev->pipe, dev->velems_empty);
+    if (dev->blend_default) dev->pipe->delete_blend_state(dev->pipe, dev->blend_default);
     pipe_sampler_view_reference(&dev->null_view, NULL);
     dev->pipe->destroy(dev->pipe);
     dev->screen->destroy(dev->screen);
@@ -535,6 +553,22 @@ vmg_shader *vmg_shader_create(vmg_device *dev, const vmg_air_input *in, vmg_refl
     nir_shader *nir = vmg_air_translate(opts, in, &r, &pool, error);
     if (!nir) { util_dynarray_fini(&pool); return NULL; }
     if (dev->screen->nir_options[nir->info.stage]) nir->options = dev->screen->nir_options[nir->info.stage];
+    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
+        // Position / face / point coordinate as inputs where the driver does not take them as system values (llvmpipe).
+        const struct pipe_caps *c = &dev->screen->caps;
+        nir_lower_sysvals_to_varyings_options sv = { .frag_coord = !c->fs_position_is_sysval,
+                                                    .front_face = !c->fs_face_is_integer_sysval,
+                                                    .point_coord = !c->fs_point_is_sysval };
+        NIR_PASS(_, nir, nir_lower_sysvals_to_varyings, &sv);
+        nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
+        nir->info.fs.origin_upper_left = true;
+        for (unsigned i = 0; i < VMG_MAX_TEXTURES; i++) {
+            if (r.textures_used & (1u << i)) BITSET_SET(nir->info.textures_used, i);
+            if (r.textures_written & (1u << i)) BITSET_SET(nir->info.images_used, i);
+        }
+        nir->info.num_ssbos = VMG_MAX_BUFFERS;
+        nir->info.num_ubos = 2;
+    }
     if (dev->screen->finalize_nir) dev->screen->finalize_nir(dev->screen, nir, true);
     vmg_shader *sh = calloc(1, sizeof *sh);
     sh->stage = r.stage;
@@ -556,6 +590,15 @@ vmg_shader *vmg_shader_create(vmg_device *dev, const vmg_air_input *in, vmg_refl
     }
     for (unsigned i = 0; i < r.constexpr_samplers; i++) sh->constexpr_samplers[i] = vmg_sampler_create_constexpr(dev, r.constexpr_words[i]);
 
+    // Compact driver locations for varyings and fragment outputs (Gallium drivers index their I/O arrays with them);
+    // vertex inputs keep the attribute index, which the vertex elements follow.
+    if (nir->info.stage == MESA_SHADER_VERTEX)
+        nir_assign_io_var_locations(nir, nir_var_shader_out);
+    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
+        nir_assign_io_var_locations(nir, nir_var_shader_in);
+        nir_assign_io_var_locations(nir, nir_var_shader_out);
+    }
+    if (getenv("VMG_TRACE")) { fprintf(stderr, "vmg: creating %s shader %s\n", mesa_shader_stage_name(nir->info.stage), nir->info.name); if (getenv("VMG_TRACE_NIR")) nir_print_shader(nir, stderr); }
     struct pipe_shader_state state = {0};
     state.type = PIPE_SHADER_IR_NIR;
     state.ir.nir = nir;

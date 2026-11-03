@@ -81,6 +81,7 @@ struct vmg_device {
 
     // GPU queue state
     struct vmg_stage_bindings stage[VMG_STAGES];
+    uint32_t sysvals[VMG_STAGES][VMG_SYSVAL_HEADER / 4];   // constant buffer 0 (drivers read user buffers at draw time)
     vmg_render_pipeline *pipeline;
     struct pipe_framebuffer_state fb;
     vmg_pass_desc pass;
@@ -94,6 +95,10 @@ struct vmg_device {
     struct pipe_scissor_state scissor; bool scissor_set;
     struct pipe_query *occlusion; uint8_t visibility_mode; size_t visibility_offset;
     void *sampler_default;            // for unbound sampler slots
+    void *dsa_default;                // Metal's default: no depth/stencil test
+    void *fs_empty;                   // depth-only pipelines (no fragment function)
+    void *velems_empty, *blend_default;   // neutral state bound between passes, so released pipelines' objects
+                                          // are never left bound (u_blitter saves and restores bound state)
     struct pipe_sampler_view *null_view;
 };
 

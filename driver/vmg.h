@@ -203,6 +203,8 @@ void vmg_cmd_set_stencil_ref(vmg_device *dev, uint32_t front, uint32_t back);
 void vmg_cmd_set_blend_color(vmg_device *dev, const float rgba[4]);
 void vmg_cmd_set_visibility(vmg_device *dev, uint8_t mode, size_t offset);   // MTLVisibilityResultMode
 void vmg_cmd_set_buffer(vmg_device *dev, enum vmg_stage stage, unsigned slot, vmg_resource *buf, size_t offset, size_t stride);
+// setVertexBufferOffset & co: same buffer, new offset.
+void vmg_cmd_set_buffer_offset(vmg_device *dev, enum vmg_stage stage, unsigned slot, size_t offset);
 void vmg_cmd_set_texture(vmg_device *dev, enum vmg_stage stage, unsigned slot, vmg_texture *tex);
 void vmg_cmd_set_sampler(vmg_device *dev, enum vmg_stage stage, unsigned slot, vmg_sampler *s, float lod_min, float lod_max);
 

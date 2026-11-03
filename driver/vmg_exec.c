@@ -126,14 +126,14 @@ void vmg_cmd_begin_pass(vmg_device *dev, const vmg_pass_desc *pass)
 
     // Every encoder starts from Metal's default state.
     dev->raster.cull_face = PIPE_FACE_NONE;
-    dev->raster.front_ccw = 1;   // MTLWindingClockwise with our negative viewport y scale (see vmg_cmd_set_raster)
+    dev->raster.front_ccw = 0;   // MTLWindingClockwise (see vmg_cmd_set_raster)
     dev->raster.fill_front = dev->raster.fill_back = PIPE_POLYGON_MODE_FILL;
     dev->raster.depth_clip_near = dev->raster.depth_clip_far = 1;
     dev->raster.offset_tri = 0; dev->raster.offset_units = dev->raster.offset_scale = dev->raster.offset_clamp = 0;
     dev->raster_dirty = true;
     dev->pipeline = NULL;
     dev->dsa = NULL;
-    pipe->bind_depth_stencil_alpha_state(pipe, NULL);
+    pipe->bind_depth_stencil_alpha_state(pipe, dev->dsa_default);
     dev->visibility_mode = 0;
 }
 
@@ -177,6 +177,22 @@ void vmg_cmd_end_pass(vmg_device *dev)
         else surface_copy(dev, a->texture, false);
     }
     dev->in_pass = false;
+    // Neutral state: the pipeline objects of this pass may be released (on this queue) before the next one.
+    pipe->bind_vertex_elements_state(pipe, dev->velems_empty);
+    pipe->bind_blend_state(pipe, dev->blend_default);
+    pipe->bind_fs_state(pipe, dev->fs_empty);
+    pipe->bind_vs_state(pipe, NULL);
+    pipe->bind_depth_stencil_alpha_state(pipe, dev->dsa_default);
+    for (unsigned s = 0; s < 2; s++) {
+        mesa_shader_stage gs = gl_stage((enum vmg_stage)s);
+        pipe->set_sampler_views(pipe, gs, 0, 0, VMG_MAX_TEXTURES, NULL);
+        pipe->set_shader_buffers(pipe, gs, 0, VMG_MAX_BUFFERS, NULL, 0);
+        void *none[VMG_MAX_SAMPLERS + 16] = {0};
+        for (unsigned k = 0; k < VMG_MAX_SAMPLERS + 16; k++) none[k] = dev->sampler_default;
+        pipe->bind_sampler_states(pipe, gs, 0, VMG_MAX_SAMPLERS + 16, none);
+    }
+    dev->pipeline = NULL;
+    dev->dsa = NULL;
 }
 
 // ---- State ----------------------------------------------------------------------------------------------------------
@@ -186,7 +202,7 @@ void vmg_cmd_set_render_pipeline(vmg_device *dev, vmg_render_pipeline *p)
     struct pipe_context *pipe = dev->pipe;
     dev->pipeline = p;
     pipe->bind_vs_state(pipe, p->desc.vertex ? p->desc.vertex->cso : NULL);
-    pipe->bind_fs_state(pipe, p->desc.fragment ? p->desc.fragment->cso : NULL);
+    pipe->bind_fs_state(pipe, p->desc.fragment ? p->desc.fragment->cso : dev->fs_empty);
     pipe->bind_blend_state(pipe, p->blend);
     pipe->bind_vertex_elements_state(pipe, p->velems);
     pipe->set_sample_mask(pipe, 0xffffffff);
@@ -228,7 +244,7 @@ void vmg_cmd_set_raster(vmg_device *dev, uint8_t cull, uint8_t winding, uint8_t 
     // MTLCullMode None 0, Front 1, Back 2. MTLWinding Clockwise 0, CounterClockwise 1: Metal evaluates the winding
     // in its y-up NDC; our viewport flips y, which reverses the orientation Gallium sees.
     r->cull_face = cull == 1 ? PIPE_FACE_FRONT : cull == 2 ? PIPE_FACE_BACK : PIPE_FACE_NONE;
-    r->front_ccw = winding == 0;
+    r->front_ccw = winding == 1;
     r->fill_front = r->fill_back = fill == 1 ? PIPE_POLYGON_MODE_LINE : PIPE_POLYGON_MODE_FILL;
     r->depth_clip_near = r->depth_clip_far = depth_clip == 0;   // MTLDepthClipModeClip 0, Clamp 1
     r->depth_clamp = depth_clip == 1;
@@ -249,7 +265,7 @@ void vmg_cmd_set_depth_bias(vmg_device *dev, float bias, float slope, float clam
 void vmg_cmd_set_dsa(vmg_device *dev, vmg_dsa *dsa)
 {
     dev->dsa = dsa;
-    dev->pipe->bind_depth_stencil_alpha_state(dev->pipe, dsa ? dsa->cso : NULL);
+    dev->pipe->bind_depth_stencil_alpha_state(dev->pipe, dsa ? dsa->cso : dev->dsa_default);
 }
 
 void vmg_cmd_set_stencil_ref(vmg_device *dev, uint32_t front, uint32_t back)
@@ -275,6 +291,17 @@ void vmg_cmd_set_buffer(vmg_device *dev, enum vmg_stage stage, unsigned slot, vm
     sb->buffer_offset = (unsigned)offset;
     sb->buffer_size = buf ? (unsigned)(buf->res->width0 - offset) : 0;
     b->strides[slot] = (uint32_t)stride;
+    b->dirty_buffers |= 1u << slot;
+}
+
+void vmg_cmd_set_buffer_offset(vmg_device *dev, enum vmg_stage stage, unsigned slot, size_t offset)
+{
+    if (slot >= VMG_MAX_BUFFERS) return;
+    struct vmg_stage_bindings *b = &dev->stage[stage];
+    struct pipe_shader_buffer *sb = &b->buffers[slot];
+    if (!sb->buffer) return;
+    sb->buffer_offset = (unsigned)offset;
+    sb->buffer_size = (unsigned)(sb->buffer->width0 - offset);
     b->dirty_buffers |= 1u << slot;
 }
 
@@ -328,11 +355,14 @@ static void bind_stage(vmg_device *dev, enum vmg_stage stage, vmg_shader *sh, co
     struct vmg_stage_bindings *b = &dev->stage[stage];
     const vmg_reflection *r = &sh->refl;
     // Constant buffer 0: system values (buffer bases, grid, threadgroup offsets, sample count).
-    uint32_t header[VMG_SYSVAL_HEADER / 4] = {0};
+    uint32_t *header = dev->sysvals[stage];
+    memset(header, 0, VMG_SYSVAL_HEADER);
     if (extra_header) memcpy(header, extra_header, extra_words * 4);
     header[12] = dev->pass.samples ? dev->pass.samples : 1;
     struct pipe_shader_buffer ssbo[VMG_MAX_BUFFERS];
-    unsigned align_req = MAX2(dev->screen->caps.shader_buffer_offset_alignment, 4);
+    static int base_on = -1;
+    if (base_on < 0) base_on = getenv("VMG_SSBO_BASE") != NULL;
+    unsigned align_req = base_on ? MAX2(dev->screen->caps.shader_buffer_offset_alignment, 4) : 4;
     uint32_t used = r->buffers_used;
     unsigned count = used ? 32 - __builtin_clz(used) : 0;
     for (unsigned i = 0; i < count; i++) {
@@ -344,6 +374,12 @@ static void bind_stage(vmg_device *dev, enum vmg_stage stage, vmg_shader *sh, co
         ssbo[i].buffer_size = ssbo[i].buffer->width0 - aligned;
     }
     pipe->set_shader_buffers(pipe, gs, 0, count, count ? ssbo : NULL, r->buffers_written);
+    static int trace = -1;
+    if (trace < 0) trace = getenv("VMG_TRACE") != NULL;
+    if (trace)
+        for (unsigned i = 0; i < count; i++)
+            fprintf(stderr, "vmg: stage %d ssbo %u res %p off %u size %u base %u\n", stage, i, (void *)ssbo[i].buffer,
+                    ssbo[i].buffer_offset, ssbo[i].buffer_size, header[16 + i]);
     struct pipe_constant_buffer cb = { .buffer = NULL, .buffer_offset = 0, .buffer_size = VMG_SYSVAL_HEADER, .user_buffer = header };
     pipe->set_constant_buffer(pipe, gs, 0, &cb);
     if (sh->pool_buffer) {
@@ -507,6 +543,11 @@ void vmg_cmd_dispatch(vmg_device *dev, const vmg_dispatch_info *d)
     g.variable_shared_mem = dyn;
     if (d->indirect) { g.indirect = d->indirect->res; g.indirect_offset = (unsigned)d->indirect_offset; }
     pipe->launch_grid(pipe, &g);
+    // As after render passes: nothing of the kernel stays bound once it may be released.
+    pipe->bind_compute_state(pipe, NULL);
+    pipe->set_sampler_views(pipe, MESA_SHADER_COMPUTE, 0, 0, VMG_MAX_TEXTURES, NULL);
+    pipe->set_shader_buffers(pipe, MESA_SHADER_COMPUTE, 0, VMG_MAX_BUFFERS, NULL, 0);
+    pipe->set_shader_images(pipe, MESA_SHADER_COMPUTE, 0, 0, VMG_MAX_TEXTURES, NULL);
 }
 
 // ---- Blits ----------------------------------------------------------------------------------------------------------

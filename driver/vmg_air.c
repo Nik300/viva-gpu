@@ -25,8 +25,8 @@
 //   0   uint32 threadgroup_offset[8]   byte offset of each [[threadgroup(n)]] argument in shared memory
 //   32  uint32 threads_per_grid[3], pad
 //   48  uint32 render target sample count (air.get_num_samples), reserved[3]
-//   64  uint32 buffer_base[32]         byte offset of each [[buffer(n)]] binding inside its SSBO: Gallium binds
-//                                      SSBOs at the driver's alignment, Metal at any multiple of 4
+//   64  uint32 buffer_base[32]         byte offset of each [[buffer(n)]] binding inside its SSBO, only with
+//                                      VMG_SSBO_BASE=1 (drivers that realign SSBO bindings; Panfrost does not)
 // Constant buffer 1 = the shader's constant pool (module constant tables), bound from the shader object.
 //
 // constexpr sampler word (MSL), as decoded by metal-shim: address s/t/r 3 bits each (bits 0-8), mag 9-10, min
@@ -330,10 +330,15 @@ static nir_def *sysval_word(T *t, unsigned byte_off, unsigned comps);
 static nir_def *ssbo_offset(T *t, val *p)
 {
     nir_builder *b = &t->b;
+    // Panfrost aligns SSBO bindings to 4 bytes, as Metal does: bindings are exact and no base is needed. The base table
+    // (VMG_SSBO_BASE=1) is for drivers that would realign bindings.
+    static int base_on = -1;
+    if (base_on < 0) base_on = getenv("VMG_SSBO_BASE") != NULL;
+    if (!base_on) return p->off;
     nir_def *base;
     if (nir_src_is_const(nir_src_for_ssa(p->slot))) base = sysval_word(t, 64 + 4 * (unsigned)nir_src_as_uint(nir_src_for_ssa(p->slot)), 1);
     else base = nir_load_ubo(b, 1, 32, nir_imm_int(b, 0), nir_iadd_imm(b, nir_imul_imm(b, p->slot, 4), 64), .align_mul = 4,
-                             .align_offset = 0, .range_base = 0, .range = ~0);
+                             .align_offset = 0, .range_base = 0, .range = VMG_SYSVAL_HEADER);
     return nir_iadd(b, p->off, base);
 }
 
@@ -348,7 +353,7 @@ static nir_def *mem_load(T *t, val *p, unsigned comps, unsigned bits, unsigned a
         break;
     case SP_POOL:
         d = nir_load_ubo(b, comps, lbits, nir_imm_int(b, 1), p->off, .align_mul = align, .align_offset = 0,
-                         .range_base = 0, .range = ~0);
+                         .range_base = 0, .range = 65536);
         break;
     case SP_SHARED: d = nir_load_shared(b, comps, lbits, p->off, .align_mul = align, .align_offset = 0); break;
     default: d = nir_load_scratch(b, comps, lbits, p->off, .align_mul = align, .align_offset = 0); break;
@@ -647,7 +652,7 @@ static nir_variable *make_var(T *t, nir_variable_mode mode, const struct glsl_ty
 static nir_def *sysval_word(T *t, unsigned byte_off, unsigned comps)
 {
     return nir_load_ubo(&t->b, comps, 32, nir_imm_int(&t->b, 0), nir_imm_int(&t->b, (int)byte_off), .align_mul = 4,
-                        .align_offset = 0, .range_base = 0, .range = ~0);
+                        .align_offset = 0, .range_base = 0, .range = VMG_SYSVAL_HEADER);
 }
 
 static nir_def *fit_lanes(T *t, nir_def *d, LLVMTypeRef ty)

@@ -15,18 +15,18 @@ all: $(OUT)/libvmg.a $(OUT)/test_vmg $(OUT)/airnir
 
 $(OUT)/%.o: %.c $(HDR)
 	@mkdir -p $(OUT)
-	$(CC) -std=gnu11 $(CFLAGS) -c $< -o $@
+	@$(CC) -std=gnu11 $(CFLAGS) -c $< -o $@
 
 $(OUT)/%.o: %.m $(HDR)
 	@mkdir -p $(OUT)
-	$(CC) -fobjc-arc $(CFLAGS) -c $< -o $@
+	@$(CC) -fobjc-arc $(CFLAGS) -c $< -o $@
 
 $(OUT)/libvmg.a: $(OBJ)
 	rm -f $@
-	libtool -static -o $@ $(OBJ) 2>/dev/null
+	@libtool -static -o $@ $(OBJ) 2>/dev/null
 
 $(OUT)/test_vmg: tests/test_vmg.c $(OUT)/libvmg.a
-	$(CC) -std=gnu11 $(CFLAGS) $< $(OUT)/libvmg.a $(MESA_LD) -framework Foundation -framework Metal -o $@
+	@$(CC) -std=gnu11 $(CFLAGS) $< $(OUT)/libvmg.a $(MESA_LD) -framework Foundation -framework Metal -o $@
 
 test: $(OUT)/test_vmg
 	$(OUT)/test_vmg llvmpipe
@@ -37,4 +37,25 @@ clean:
 .PHONY: all test clean
 
 $(OUT)/airnir: tools/airnir.m $(OUT)/libvmg.a
-	$(CC) -fobjc-arc $(CFLAGS) $< $(OUT)/libvmg.a $(MESA_LD) -framework Foundation -framework Metal -o $@
+	@$(CC) -fobjc-arc $(CFLAGS) $< $(OUT)/libvmg.a $(MESA_LD) -framework Foundation -framework Metal -o $@
+
+# The Metal driver (Objective-C on vmg) as a dylib for tests, exporting TSMtlCreateDevice so metal-shim's tests
+# run unchanged.
+SHIM      = ../shim
+M_DRV     = $(wildcard metal/*.m)
+M_HDR     = metal/VMPrivate.h metal/TSLog.h vmg.h
+OBJC      = -fobjc-arc -O1 -g -Wall -Wno-unused-function -Wno-deprecated-declarations -Imetal -DTS_SOURCE_DIR=\"$(abspath $(SHIM))\"
+FRAMEWORKS = -framework Foundation -framework Metal -framework IOSurface -framework IOKit -framework QuartzCore -framework CoreGraphics
+
+$(OUT)/libVivaMetal.dylib: $(M_DRV) $(M_HDR) $(OUT)/libvmg.a
+	@$(CC) $(OBJC) -dynamiclib -install_name @rpath/libVivaMetal.dylib $(M_DRV) $(OUT)/libvmg.a $(MESA_LD) $(FRAMEWORKS) -o $@
+
+SHIM_TESTS = phase1 phase3 translate uploads
+$(OUT)/phase3: $(SHIM)/tests/phase2.m $(OUT)/libVivaMetal.dylib
+	@$(CC) $(OBJC) -DTS_TRANSLATED -I$(SHIM)/src $< -L$(OUT) -lVivaMetal -Wl,-rpath,@executable_path $(FRAMEWORKS) -framework Cocoa -o $@
+$(OUT)/phase1 $(OUT)/translate $(OUT)/uploads: $(OUT)/%: $(SHIM)/tests/%.m $(OUT)/libVivaMetal.dylib
+	@$(CC) $(OBJC) -I$(SHIM)/src $< -L$(OUT) -lVivaMetal -Wl,-rpath,@executable_path $(FRAMEWORKS) -framework Cocoa -o $@
+
+metal: $(OUT)/libVivaMetal.dylib $(addprefix $(OUT)/,$(SHIM_TESTS))
+test-metal: metal
+	@for t in $(SHIM_TESTS); do echo "== $$t (llvmpipe)"; $(OUT)/$$t | tail -2 || exit 1; done
