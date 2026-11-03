@@ -118,7 +118,10 @@ void TSMtlRegisterGLSL(id a, id b) {}' > "$OUT/obj/tsdevice.m"
   $CC $TARGET -fobjc-arc -O1 -g "$GPU/driver/tests/ca.m" "$OUT/obj/tsdevice.m" -framework Foundation -framework Metal \
       -framework QuartzCore -framework CoreGraphics -framework ImageIO -framework CoreText -framework UniformTypeIdentifiers \
       -framework IOSurface -o "$T/ca"
-  for f in "$T"/*; do codesign -s - -f "$f"; done
+  # vctl: drives the UI (touches, home, launching apps) for tests on real screens; entitlements for HID dispatch.
+  $CC $TARGET -fobjc-arc -O1 -g "$HERE/vctl.m" -framework Foundation -framework IOKit -o "$T/vctl"
+  for f in "$T"/*; do [ "$f" = "$T/vctl" ] || codesign -s - -f "$f"; done
+  codesign -s - -f --entitlements "$HERE/vctl.entitlements" "$T/vctl"
 }
 
 case "${1:-all}" in
