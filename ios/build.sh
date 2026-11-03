@@ -73,6 +73,8 @@ void TSMtlRegisterGLSL(id a, id b) {}' > "$OUT/obj/tsdevice.m"
     $CC $TARGET -fobjc-arc -O1 -g -I"$GPU/shim/src" -DTS_SOURCE_DIR=\"/var/root/viva-tests\" "$GPU/shim/tests/$t.m" \
         "$OUT/obj/tsdevice.m" -framework Foundation -framework Metal -framework UIKit -o "$T/$t" || echo "($t needs porting: AppKit)"
   done
+  $CC $TARGET -fobjc-arc -O1 -g "$HERE/vmprobe.m" -framework Foundation -framework Metal -o "$T/vmprobe"
+  $CC $TARGET -fobjc-arc -O1 -g "$GPU/driver/tests/compute.m" "$OUT/obj/tsdevice.m" -framework Foundation -framework Metal -o "$T/compute"
   for f in "$T"/*; do codesign -s - -f "$f"; done
 }
 
