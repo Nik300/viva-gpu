@@ -6,6 +6,24 @@ serve a me per verificarla.
 
 ## Bloccanti per G7
 
+### K0g. Costo delle ioctl SUBMIT e WAIT_BO (2026-11-03, dopo 0117)
+Con 0117 la GPU non è più il limite: scena Settings di `ca` a 950 MHz, job sull'hardware **24 us** in media, GPU
+occupata l'1%, latenza di avvio 13-47 us (K0e ok). Il frame (oggi **18 ms**, era 28,5) è limitato dalla coda GPU del
+driver, occupata ~77% del tempo; dopo aver tolto da userspace mmap/munmap (cache delle mappature in libdrm-xnu),
+MMAP_BO e MADVISE (risposti senza kernel), il profilo della coda è: **SUBMIT 34%**, **WAIT_BO 23%**, il resto CPU.
+~100 submit per frame (Panfrost: job vertex/tiler + fragment per pass, CA ~50 pass) -> ~60 us per SUBMIT.
+WAIT_BO: Panfrost la chiama con timeout 0 a ogni riuso di un BO dalla sua cache, solo per sapere se è libero.
+- Serve:
+  1. `WAIT_BO` con `timeout_ns` già scaduto (o 0): percorso veloce senza gate né invalidazione lazy, solo la lettura
+     di `busy->signalled` (la risposta è "occupato/libero"; l'invalidazione serve solo prima di una lettura CPU, che
+     per i BO WC non c'è);
+  2. `SUBMIT`: misurare dove vanno i ~60 us (copyin degli handle, per-BO: dipendenze implicite, `busy`, lazy
+     invalidation; gate) e togliere il lavoro per BO che non serve (es. BO WC: niente manutenzione; dipendenza solo se
+     `busy` non segnalato); un contatore in `gpu status` del tempo medio per selettore aiuterebbe;
+  3. se possibile, un percorso IOConnect più leggero per questi due selettori (scalar method invece di struct,
+     niente copia della struttura in uscita quando non serve).
+- Per verificare: `VMG_CA_TIME=1 VMG_CA_SETTINGS=1 ca 61` (oggi ~18 ms), e il profilo `VMG_CA_PROFILE`.
+
 ### K0d. Tearing della copia nello scanout (2026-11-03, dopo 0114-0116)
 K0c funziona: niente più frame a metà disegno. Restano però split orizzontali netti tra due frame completi durante le
 animazioni (`vctl burst /tmp/b 24 30 open com.apple.Preferences`, 1-2 frame su ~8). `disp status`: scanout off,
