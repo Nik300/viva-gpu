@@ -163,7 +163,7 @@ int main(void) { @autoreleasepool {
     fd.storageMode = MTLStorageModeShared;
     id<MTLTexture> c0 = [dev newTextureWithDescriptor:fd];
     fd.storageMode = MTLStorageModeMemoryless;
-    id<MTLTexture> c1 = [dev newTextureWithDescriptor:fd];
+    __block id<MTLTexture> c1 = [dev newTextureWithDescriptor:fd];
     if (!c1) { fd.storageMode = MTLStorageModePrivate; c1 = [dev newTextureWithDescriptor:fd]; }
     id<MTLRenderPipelineState> (^rpipe)(NSString *, unsigned) = ^id<MTLRenderPipelineState>(NSString *fs, unsigned n) {
         MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
