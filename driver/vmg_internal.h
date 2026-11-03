@@ -36,7 +36,13 @@ struct vmg_texture {
     // writes, on the GPU queue.
     uint32_t surface_id; unsigned plane;
     bool surface_copy;
+    // Linear textures over a buffer the driver cannot alias (Panfrost: no user memory): same, from/to the buffer.
+    vmg_resource *buffer; size_t buffer_offset, buffer_bpr;
+    uint64_t copy_epoch;              // dev->copy_epoch at the last copy (see vmg_texture_sync)
 };
+
+// Copied textures (surface_copy): IOSurface/buffer -> texture (to_texture) or back.
+void vmg_texture_sync(vmg_device *dev, vmg_texture *t, bool to_texture);
 
 struct vmg_sampler { void *cso; struct pipe_sampler_state state; };
 struct vmg_dsa { void *cso; };
@@ -86,6 +92,7 @@ struct vmg_device {
     struct pipe_framebuffer_state fb;
     vmg_pass_desc pass;
     bool in_pass;
+    uint64_t copy_epoch;               // bumped by every vmg_flush and every copy-out of a copied texture
     struct pipe_rasterizer_state raster;
     void *raster_cso; bool raster_dirty;
     struct hash_table *raster_cache;  // pipe_rasterizer_state -> cso

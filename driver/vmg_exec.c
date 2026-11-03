@@ -17,18 +17,31 @@ static mesa_shader_stage gl_stage(enum vmg_stage s)
     return s == VMG_VERTEX ? MESA_SHADER_VERTEX : s == VMG_FRAGMENT ? MESA_SHADER_FRAGMENT : MESA_SHADER_COMPUTE;
 }
 
-// ---- IOSurface copies (llvmpipe when the surface cannot be aliased) -------------------------------------------------
+// ---- IOSurface/buffer copies (when the driver cannot alias the memory) -------------------------------------------------
 
-static void surface_copy(vmg_device *dev, vmg_texture *t, bool to_texture)
+void vmg_texture_sync(vmg_device *dev, vmg_texture *t, bool to_texture)
 {
-    if (!t || !t->surface_copy || !t->surface_id) return;
-    IOSurfaceRef s = IOSurfaceLookup(t->surface_id);
-    if (!s) return;
-    bool planar = IOSurfaceGetPlaneCount(s) > 0;
-    uint8_t *base = planar ? IOSurfaceGetBaseAddressOfPlane(s, t->plane) : IOSurfaceGetBaseAddress(s);
-    size_t bpr = planar ? IOSurfaceGetBytesPerRowOfPlane(s, t->plane) : IOSurfaceGetBytesPerRow(s);
+    if (!t || !t->surface_copy || (!t->surface_id && !t->buffer)) return;
+    // dev->copy_epoch changes at every command buffer and every copy-out (some surface/buffer changed): a texture
+    // copies in once per change, not at every draw that samples it; after its own copy-out it is up to date.
+    if (to_texture && t->copy_epoch == dev->copy_epoch) return;
+    if (!to_texture) dev->copy_epoch++;
+    t->copy_epoch = dev->copy_epoch;
+    IOSurfaceRef s = NULL;
+    uint8_t *base;
+    size_t bpr;
+    if (t->buffer) {
+        base = (uint8_t *)t->buffer->map + t->buffer_offset;
+        bpr = t->buffer_bpr;
+    } else {
+        s = IOSurfaceLookup(t->surface_id);
+        if (!s) return;
+        bool planar = IOSurfaceGetPlaneCount(s) > 0;
+        base = planar ? IOSurfaceGetBaseAddressOfPlane(s, t->plane) : IOSurfaceGetBaseAddress(s);
+        bpr = planar ? IOSurfaceGetBytesPerRowOfPlane(s, t->plane) : IOSurfaceGetBytesPerRow(s);
+    }
     uint32_t w = t->res->width0, h = t->res->height0;
-    IOSurfaceLock(s, to_texture ? kIOSurfaceLockReadOnly : 0, NULL);
+    if (s) IOSurfaceLock(s, to_texture ? kIOSurfaceLockReadOnly : 0, NULL);
     if (to_texture) {
         struct pipe_box box;
         u_box_2d(0, 0, (int)w, (int)h, &box);
@@ -44,8 +57,10 @@ static void surface_copy(vmg_device *dev, vmg_texture *t, bool to_texture)
             dev->pipe->texture_unmap(dev->pipe, x);
         }
     }
-    IOSurfaceUnlock(s, to_texture ? kIOSurfaceLockReadOnly : 0, NULL);
-    CFRelease(s);
+    if (s) {
+        IOSurfaceUnlock(s, to_texture ? kIOSurfaceLockReadOnly : 0, NULL);
+        CFRelease(s);
+    }
 }
 
 // ---- Render passes --------------------------------------------------------------------------------------------------
@@ -72,7 +87,7 @@ void vmg_cmd_begin_pass(vmg_device *dev, const vmg_pass_desc *pass)
     for (unsigned i = 0; i < VMG_MAX_COLOR; i++) {
         const vmg_attachment *a = &pass->color[i];
         if (!a->texture) continue;
-        surface_copy(dev, a->texture, true);
+        vmg_texture_sync(dev, a->texture, true);
         set_surface(&fb->cbufs[i], a->texture, a->level, a->slice, a->depth_plane);
         ncb = i + 1;
         uint32_t lw = u_minify(a->texture->res->width0, a->texture->first_level + a->level);
@@ -167,7 +182,7 @@ void vmg_cmd_end_pass(vmg_device *dev)
         b.mask = util_format_is_depth_or_stencil(b.src.format) ? PIPE_MASK_Z : PIPE_MASK_RGBA;
         b.filter = PIPE_TEX_FILTER_NEAREST;
         pipe->blit(pipe, &b);
-        surface_copy(dev, a->resolve, false);
+        vmg_texture_sync(dev, a->resolve, false);
     }
     // Store actions: discard what Metal does not keep (memoryless, dontCare on whole textures).
     for (unsigned i = 0; i < n; i++) {
@@ -175,7 +190,7 @@ void vmg_cmd_end_pass(vmg_device *dev)
         if (!a->texture) continue;
         if ((a->store == VMG_STORE_DONTCARE || a->store == VMG_STORE_RESOLVE) && a->texture->desc.memoryless && pipe->invalidate_resource)
             pipe->invalidate_resource(pipe, a->texture->res);
-        else surface_copy(dev, a->texture, false);
+        else vmg_texture_sync(dev, a->texture, false);
     }
     dev->in_pass = false;
     // Neutral state: the pipeline objects of this pass may be released (on this queue) before the next one.
@@ -408,7 +423,7 @@ static void bind_stage(vmg_device *dev, enum vmg_stage stage, vmg_shader *sh, co
             }
             t->view = pipe->create_sampler_view(pipe, t->res, &tmpl);
         }
-        if (t->surface_copy && !dev->in_pass) surface_copy(dev, t, true);
+        if (t->surface_copy) vmg_texture_sync(dev, t, true);   // also inside a pass: CoreAnimation samples them in draws
         views[i] = t->view;
     }
     pipe->set_sampler_views(pipe, gs, 0, tcount, 0, views);
@@ -573,7 +588,7 @@ void vmg_cmd_fill_buffer(vmg_device *dev, vmg_resource *dst, size_t off, size_t 
 void vmg_cmd_copy_texture(vmg_device *dev, vmg_texture *src, unsigned ss, unsigned sl, uint32_t sx, uint32_t sy, uint32_t sz,
                           uint32_t w, uint32_t h, uint32_t d, vmg_texture *dst, unsigned ds, unsigned dl, uint32_t dx, uint32_t dy, uint32_t dz)
 {
-    surface_copy(dev, src, true);
+    vmg_texture_sync(dev, src, true);
     struct pipe_box box;
     unsigned slayer = src->res->target == PIPE_TEXTURE_3D ? sz : src->first_layer + ss;
     unsigned dlayer = dst->res->target == PIPE_TEXTURE_3D ? dz : dst->first_layer + ds;
@@ -590,7 +605,7 @@ void vmg_cmd_copy_texture(vmg_device *dev, vmg_texture *src, unsigned ss, unsign
         b.filter = PIPE_TEX_FILTER_NEAREST;
         dev->pipe->blit(dev->pipe, &b);
     }
-    surface_copy(dev, dst, false);
+    vmg_texture_sync(dev, dst, false);
 }
 
 void vmg_cmd_copy_buffer_to_texture(vmg_device *dev, vmg_resource *src, size_t off, size_t row_pitch, size_t image_pitch,
@@ -606,14 +621,14 @@ void vmg_cmd_copy_buffer_to_texture(vmg_device *dev, vmg_resource *src, size_t o
     if (!data) return;
     vmg_texture_write(dev, dst, level, slice, x, y, z, w, h, d, data, row_pitch, image_pitch ? image_pitch : row_pitch * h);
     dev->pipe->buffer_unmap(dev->pipe, x0);
-    surface_copy(dev, dst, false);
+    vmg_texture_sync(dev, dst, false);
 }
 
 void vmg_cmd_copy_texture_to_buffer(vmg_device *dev, vmg_texture *src, unsigned slice, unsigned level, uint32_t x, uint32_t y,
                                     uint32_t z, uint32_t w, uint32_t h, uint32_t d, vmg_resource *dst, size_t off,
                                     size_t row_pitch, size_t image_pitch)
 {
-    surface_copy(dev, src, true);
+    vmg_texture_sync(dev, src, true);
     struct pipe_box dbox;
     size_t total = image_pitch ? image_pitch * MAX2(d, 1) : row_pitch * h;
     u_box_1d((int)off, (int)MIN2(total, dst->res->width0 - off), &dbox);
@@ -642,6 +657,7 @@ struct vmg_fence_ext { struct vmg_fence base; vis_entry *vis; unsigned vis_count
 
 void vmg_flush(vmg_device *dev, vmg_fence **out)
 {
+    dev->copy_epoch++;
     struct pipe_fence_handle *f = NULL;
     dev->pipe->flush(dev->pipe, out || g_vis_count ? &f : NULL, 0);
     struct vmg_fence_ext *fe = NULL;

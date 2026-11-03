@@ -329,7 +329,7 @@ vmg_texture *vmg_texture_create_iosurface(vmg_device *dev, const vmg_texture_des
         void *base = IOSurfaceGetPlaneCount(s) ? IOSurfaceGetBaseAddressOfPlane(s, plane) : IOSurfaceGetBaseAddress(s);
         size_t bpr = IOSurfaceGetPlaneCount(s) ? IOSurfaceGetBytesPerRowOfPlane(s, plane) : IOSurfaceGetBytesPerRow(s);
         templ.bind &= ~(unsigned)PIPE_BIND_SHARED;
-        if (dev->screen->resource_from_user_memory) res = dev->screen->resource_from_user_memory(dev->screen, &templ, base);
+        if (dev->screen->resource_from_user_memory && !getenv("VMG_NO_ALIAS")) res = dev->screen->resource_from_user_memory(dev->screen, &templ, base);
         if (res) {
             struct winsys_handle wh = {0};
             unsigned stride = 0;
@@ -364,7 +364,7 @@ vmg_texture *vmg_texture_create_buffer(vmg_device *dev, const vmg_texture_desc *
     if (templ.format == PIPE_FORMAT_NONE) return NULL;
     templ.bind |= PIPE_BIND_LINEAR;
     struct pipe_resource *res = NULL;
-    if (buffer->map && dev->screen->resource_from_user_memory) {
+    if (buffer->map && dev->screen->resource_from_user_memory && !getenv("VMG_NO_ALIAS")) {   // VMG_NO_ALIAS: Panfrost's copy path on llvmpipe
         res = dev->screen->resource_from_user_memory(dev->screen, &templ, (uint8_t *)buffer->map + offset);
         uint64_t stride = 0;
         if (res && dev->screen->resource_get_param &&
@@ -372,8 +372,12 @@ vmg_texture *vmg_texture_create_buffer(vmg_device *dev, const vmg_texture_desc *
             stride != bpr)
             pipe_resource_reference(&res, NULL);
     }
-    if (!res) res = dev->screen->resource_create(dev->screen, &templ);
-    return res ? texture_wrap(res, d) : NULL;
+    if (res) return texture_wrap(res, d);
+    res = dev->screen->resource_create(dev->screen, &templ);
+    if (!res) return NULL;
+    vmg_texture *t = texture_wrap(res, d);
+    if (buffer->map) { t->buffer = buffer; t->buffer_offset = offset; t->buffer_bpr = bpr; t->surface_copy = true; }
+    return t;
 }
 
 static enum pipe_texture_target view_target(enum vmg_texture_type t) { return target_of(t); }
@@ -400,6 +404,7 @@ vmg_texture *vmg_texture_create_view(vmg_device *dev, vmg_texture *parent, unsig
     static const uint8_t map[6] = { PIPE_SWIZZLE_0, PIPE_SWIZZLE_1, PIPE_SWIZZLE_X, PIPE_SWIZZLE_Y, PIPE_SWIZZLE_Z, PIPE_SWIZZLE_W };
     for (unsigned i = 0; i < 4; i++) t->swizzle[i] = swizzle ? map[MIN2(swizzle[i], 5)] : parent->swizzle[i];
     t->surface_id = parent->surface_id; t->plane = parent->plane; t->surface_copy = parent->surface_copy;
+    t->buffer = parent->buffer; t->buffer_offset = parent->buffer_offset; t->buffer_bpr = parent->buffer_bpr;
     return t;
 }
 
@@ -423,6 +428,7 @@ void vmg_texture_write(vmg_device *dev, vmg_texture *t, unsigned level, unsigned
     u_box_3d((int)x, (int)y, (int)layer_of(t, slice, z), (int)w, (int)h, (int)MAX2(d, 1), &box);
     dev->pipe->texture_subdata(dev->pipe, t->res, t->first_level + level, PIPE_MAP_WRITE, &box, data,
                                (unsigned)row_pitch, (uintptr_t)image_pitch);
+    if (t->surface_copy) vmg_texture_sync(dev, t, false);   // the surface/buffer stays the reference copy
 }
 
 void vmg_texture_read(vmg_device *dev, vmg_texture *t, unsigned level, unsigned slice, uint32_t x, uint32_t y, uint32_t z,
