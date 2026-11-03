@@ -39,7 +39,7 @@ mesa() {
 
 driver() {
   local CF
-  CF="$(grep -v '^-std' "$GPU/mesa/out/macos/cflags.txt" | sed "s|$GPU/mesa/out/macos/include/build|$GPU/mesa/build-ios|g; s|-DHAVE_LLVMPIPE||; s|-DDRAW_LLVM_AVAILABLE=1||; s|-DLLVM_IS_SHARED=1||")"
+  CF="$(sed -e 's/-std=[a-z0-9]*//' "$GPU/mesa/out/macos/cflags.txt" | tr '\n' ' ' | sed "s|$GPU/mesa/out/macos/include/build|$GPU/mesa/build-ios|g; s|-DHAVE_LLVMPIPE||; s|-DDRAW_LLVM_AVAILABLE=1||; s|-DLLVM_IS_SHARED=1||")"
   local OBJ="$OUT/obj"; mkdir -p "$OBJ"
   for f in "$GPU/libdrm-xnu/src/xf86drm_xnu.c" "$GPU/vgpu/vgpu.c" "$GPU/vgpu/vgpu_mock.c" "$GPU/vgpu/vgpu_iokit.c"; do
     $CC $TARGET -O2 -g -Wall -Wno-four-char-constants -I"$GPU/libdrm-xnu/include" -I"$GPU/libdrm-xnu/include/libdrm" \
