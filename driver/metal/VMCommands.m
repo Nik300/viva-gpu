@@ -461,10 +461,13 @@ static void VMWaitCompletion(VMDevice *device, VMCommandQueue *queue, VMCommandB
     if (poll < 0) poll = getenv("VMG_POLL_COMPLETION") != NULL;
     if (poll) { VMPollCompletion(device, queue, cb, fence, start); return; }
     dispatch_async(device.completionQueue, ^{
+        // No finite timeout: the kernel compares absolute deadlines with mach_continuous_time, Mesa computes them
+        // from the userspace monotonic clock, and on the phone a deadline 1 s ahead came back expired at once (the
+        // loop then slept 1 ms per try: +10 ms per frame). UINT64_MAX is "forever" on both sides.
         for (;;) {
             uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-            if (vmg_fence_wait_gpu(device.vmg, fence, NSEC_PER_SEC)) break;
-            // An error answered at once (not a timeout): retry like the poll did, without spinning.
+            if (vmg_fence_wait_gpu(device.vmg, fence, UINT64_MAX)) break;
+            // An error answered at once: retry like the poll did, without spinning.
             if (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0 < NSEC_PER_MSEC) usleep(1000);
         }
         if (vmg_fence_has_results(fence)) [device gpuSync:^{ vmg_fence_wait(device.vmg, fence, 0); }];
