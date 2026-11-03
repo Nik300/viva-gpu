@@ -45,8 +45,8 @@ jobs:
           path: |
             .venv
             mesa/src
-          key: src-${{ hashFiles('mesa/build.sh', 'mesa/patches/*.patch') }}-${{ github.run_id }}
-          restore-keys: src-${{ hashFiles('mesa/build.sh', 'mesa/patches/*.patch') }}-
+          key: src-mesa-26.2.6-${{ github.run_id }}
+          restore-keys: src-mesa-26.2.6-
       - name: Restore Mesa macOS build
         if: env.NOCACHE == ''
         uses: actions/cache/restore@v4
@@ -114,7 +114,7 @@ jobs:
           path: |
             .venv
             mesa/src
-          key: src-${{ hashFiles('mesa/build.sh', 'mesa/patches/*.patch') }}-${{ github.run_id }}
+          key: src-mesa-26.2.6-${{ github.run_id }}
       - name: Save Mesa macOS build
         if: always() && steps.mesa_macos.outcome != 'skipped'
         uses: actions/cache/save@v4

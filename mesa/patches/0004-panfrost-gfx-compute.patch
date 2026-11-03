@@ -1,0 +1,13 @@
+Viva: Panfrost alone needs full NIR and the gallium compute helpers (Metal driver without GL/Vulkan frontends; iOS has no CLC).
+diff --git a/meson.build b/meson.build
+index 37f2fd4..71e3d3c 100644
+--- a/meson.build
++++ b/meson.build
+@@ -993,6 +993,7 @@ if with_gallium_rusticl or with_microsoft_clc
+ endif
+ 
+ with_gfx_compute = [
++  with_gallium_panfrost,  # Viva: Panfrost used directly (Metal driver), without any GL/Vulkan frontend
+   with_any_opengl,
+   with_any_vk,
+   with_clc,
