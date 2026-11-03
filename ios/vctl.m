@@ -185,7 +185,7 @@ static int shot(const char *path) {
 }
 
 // burst PATH N MS [ACTION ARGS...]: while ACTION runs (tap/swipe/open/home), N captures MS apart of the screen-sized
-// surfaces whose seed changed (downsampled 1:3, BGRA), written afterwards as PATH-NNN.png: animation frames.
+// surfaces whose content changed (downsampled 1:3, BGRA), written afterwards as PATH-NNN.png: animation frames.
 static int dispatch_action(int argc, char **argv);
 static int burst(const char *path, int n, int ms, int argc, char **argv) {
     IOSurfaceRef surf[4]; int ns = 0;
@@ -205,12 +205,15 @@ static int burst(const char *path, int n, int ms, int argc, char **argv) {
     int got = 0;
     for (int i = 0; i < n * 4 && got < n; i++) {
         for (int k = 0; k < ns && got < n; k++) {
-            uint32_t seed = IOSurfaceGetSeed(surf[k]);
-            if (seed == seen[k]) continue;
-            seen[k] = seed;
+            // The GPU's writes do not bump the seed: a hash of a sparse grid of pixels tells a new frame.
             IOSurfaceLock(surf[k], kIOSurfaceLockReadOnly, NULL);
             const uint8_t *src = IOSurfaceGetBaseAddress(surf[k]);
             size_t bpr = IOSurfaceGetBytesPerRow(surf[k]);
+            uint32_t seed = 2166136261u;
+            for (int y = 0; y < 2436; y += 29)
+                for (int x = 0; x < 1125; x += 17) seed = (seed ^ *(const uint32_t *)(src + y * bpr + x * 4)) * 16777619u;
+            if (seed == seen[k]) { IOSurfaceUnlock(surf[k], kIOSurfaceLockReadOnly, NULL); continue; }
+            seen[k] = seed;
             uint8_t *dst = frames[got] = malloc(DW * DH * 4);
             for (int y = 0; y < DH; y++)
                 for (int x = 0; x < DW; x++) memcpy(dst + (y * DW + x) * 4, src + (y * 3) * bpr + (x * 3) * 4, 4);
