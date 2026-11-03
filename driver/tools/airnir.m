@@ -40,6 +40,7 @@ int main(int argc, char **argv) { @autoreleasepool {
         [funcs addObject:f];
     }
     // Varying table: every key the library's vertex functions write (a pipeline would use its own vertex function).
+    // Vertex functions are translated with their own table; fragment functions with the union, capped at 32.
     NSMutableOrderedSet<NSString *> *keys = [NSMutableOrderedSet orderedSet];
     for (id<MTLFunction> f in funcs) {
         if (f.functionType != MTLFunctionTypeVertex) continue;
@@ -58,8 +59,17 @@ int main(int argc, char **argv) { @autoreleasepool {
         total++;
         NSData *bc = [(id)f respondsToSelector:@selector(bitcodeData)] ? [(id)f performSelector:@selector(bitcodeData)] : nil;
         if (!bc.length) { printf("  FAIL  %-32s no AIR bitcode from the system compiler\n", f.name.UTF8String); continue; }
-        vmg_air_input in = { .bitcode = bc.bytes, .bitcode_size = bc.length, .varyings = varyings,
-                             .varying_count = (unsigned)keys.count };
+        unsigned nkeys = (unsigned)MIN(keys.count, 32);
+        const char **own = NULL;
+        unsigned nown = 0;
+        if (f.functionType == MTLFunctionTypeVertex) {
+            char *e2 = NULL;
+            char **k = vmg_air_vertex_outputs(bc.bytes, bc.length, &nown, &e2);
+            own = (const char **)k;
+            free(e2);
+        }
+        vmg_air_input in = { .bitcode = bc.bytes, .bitcode_size = bc.length, .varyings = own ? own : varyings,
+                             .varying_count = own ? nown : nkeys };
         char *error = NULL;
         if (verbose) {
             char *text = vmg_air_to_nir_text(dev, &in, &error);

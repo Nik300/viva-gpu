@@ -707,6 +707,7 @@ static bool declare_inputs(T *t, LLVMValueRef node)
             const char *key = o.n > 2 ? md_string(o.ops[2], &klen) : NULL;
             int slot = key ? varying_slot(t, key, klen) : -1;
             if (!scalar) FAILB(t, "aggregate fragment input");
+            if (slot >= 32) FAILB(t, "more than 32 varyings");
             if (slot < 0 && getenv("VMG_TRACE")) {
                 fprintf(stderr, "vmg: fragment input %.*s not written by the vertex function; table:", key ? (int)klen : 1, key ? key : "?");
                 for (unsigned k = 0; k < t->in->varying_count; k++) fprintf(stderr, " [%s]", t->in->varyings[k]);
@@ -756,6 +757,13 @@ static bool declare_inputs(T *t, LLVMValueRef node)
             nir_def *d = nir_load_var(b, var);
             if (flt && bits == 16) d = nir_f2f16(b, d);
             v = vssa(t, nir_trim_vector(b, d, comps));
+        } else if (md_is(rolev, "air.buffer") && md_int_after(&o, "air.address_space", ts_LLVMGetPointerAddressSpace(pt)) == 3) {
+            // [[threadgroup(n)]]: dynamic threadgroup memory, placed by the encoder (offset in the system values).
+            long slot = md_int_after(&o, "air.location_index", 0);
+            if (slot < 0 || slot >= 8) FAILB(t, "threadgroup argument %ld", slot);
+            t->refl->dynamic_shared_slots |= 1u << slot;
+            t->s->info.cs.has_variable_shared_mem = true;
+            v = vptr(t, SP_SHARED, NULL, sysval_word(t, (unsigned)slot * 4, 1));
         } else if (md_is(rolev, "air.buffer")) {
             long slot = md_int_after(&o, "air.location_index", 0);
             if (slot < 0 || slot >= VMG_MAX_BUFFERS) FAILB(t, "buffer %ld", slot);
@@ -843,7 +851,8 @@ static bool declare_outputs(T *t, LLVMValueRef node)
             unsigned klen;
             const char *key = o.n > 1 ? md_string(o.ops[1], &klen) : NULL;
             int slot = key ? varying_slot(t, key, klen) : -1;
-            if (slot >= 0 && slot < 32) {
+            if (slot >= 32) FAILB(t, "more than 32 varyings");
+            if (slot >= 0) {
                 var = make_var(t, nir_var_shader_out, glsl_for(32, comps, flt), VARYING_SLOT_VAR0 + slot, "varying");
                 if (!flt) var->data.interpolation = INTERP_MODE_FLAT;
             }
@@ -1430,14 +1439,17 @@ static val *texture(T *t, LLVMValueRef inst, const char *name)
     }
 
     if (name_is(op, "write_")) {
-        // write_<shape>(tex, value, coord, [layer], [lod], ...)
-        nir_def *data = arg(t, inst, 1), *coord = arg(t, inst, 2);
-        if (!data || !coord) return NULL;
-        unsigned next = 3;
+        // write_<shape>(tex, coord, [layer/face], value, lod, access)
+        unsigned wi = 1;
+        nir_def *coord = arg(t, inst, wi++);
+        if (!coord) return NULL;
         nir_def *layer = NULL;
-        if (array || dim == GLSL_SAMPLER_DIM_CUBE) { if (!(layer = arg(t, inst, next++))) return NULL; }
-        nir_def *lod = next < nargs && !is_ptr(ts_LLVMTypeOf(ts_LLVMGetOperand(inst, next))) ? arg(t, inst, next) : NULL;
-        nir_alu_type type = is_float(ts_LLVMTypeOf(ts_LLVMGetOperand(inst, 1))) ? nir_type_float32 : nir_type_uint32;
+        if (array || dim == GLSL_SAMPLER_DIM_CUBE) { if (!(layer = arg(t, inst, wi++))) return NULL; }
+        unsigned vi = wi++;
+        nir_def *data = arg(t, inst, vi);
+        if (!data) return NULL;
+        nir_def *lod = wi < nargs && !is_ptr(ts_LLVMTypeOf(ts_LLVMGetOperand(inst, wi))) ? arg(t, inst, wi) : NULL;
+        nir_alu_type type = is_float(ts_LLVMTypeOf(ts_LLVMGetOperand(inst, vi))) ? nir_type_float32 : nir_type_uint32;
         if (data->bit_size != 32) data = type == nir_type_float32 ? nir_f2f32(b, data) : nir_u2u32(b, data);
         data = nir_pad_vector_imm_int(b, data, 0, 4);
         nir_def *c[4] = { nir_imm_int(b, 0), nir_imm_int(b, 0), nir_imm_int(b, 0), nir_imm_int(b, 0) };
@@ -2186,6 +2198,18 @@ static nir_shader *translate_module(const nir_shader_compiler_options *options, 
         nir_sort_unstructured_blocks(t.impl);
         nir_validate_shader(s, "after AIR translation");
         NIR_PASS(_, s, nir_lower_goto_ifs);
+        if (t.stage == MESA_SHADER_COMPUTE) {
+            // dispatchThreads: threads beyond threads_per_grid (system values) do not exist in Metal. The guard is
+            // a no-op for dispatchThreadgroups, whose grid is whole groups.
+            nir_builder gb = nir_builder_at(nir_before_impl(nir_shader_get_entrypoint(s)));
+            t.b = gb;
+            nir_def *gid = nir_load_global_invocation_id(&t.b, 32);
+            nir_def *grid = sysval_word(&t, 32, 3);
+            nir_push_if(&t.b, nir_bany(&t.b, nir_uge(&t.b, gid, grid)));
+            nir_jump(&t.b, nir_jump_return);
+            nir_pop_if(&t.b, NULL);
+            NIR_PASS(_, s, nir_lower_returns);
+        }
         NIR_PASS(_, s, nir_lower_vars_to_ssa);
         NIR_PASS(_, s, nir_lower_global_vars_to_local);
         NIR_PASS(_, s, nir_lower_vars_to_ssa);
