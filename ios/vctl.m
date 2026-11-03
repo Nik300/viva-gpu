@@ -26,6 +26,10 @@ IOHIDEventRef IOHIDEventCreateKeyboardEvent(CFAllocatorRef, uint64_t ts, uint32_
 void IOHIDEventAppendEvent(IOHIDEventRef parent, IOHIDEventRef child, uint32_t options);
 void IOHIDEventSetIntegerValue(IOHIDEventRef, uint32_t field, long value);
 void IOHIDEventSetSenderID(IOHIDEventRef, uint64_t);
+typedef struct __IOHIDServiceClient *IOHIDServiceClientRef;
+CFArrayRef IOHIDEventSystemClientCopyServices(IOHIDEventSystemClientRef);
+CFTypeRef IOHIDServiceClientCopyProperty(IOHIDServiceClientRef, CFStringRef);
+CFTypeRef IOHIDServiceClientGetRegistryID(IOHIDServiceClientRef);
 
 enum { kHand = 3, kRange = 1, kTouch = 2, kPosition = 4, kIdentity = 32 };
 #define kDigitizerIsDisplayIntegrated ((11u << 16) | 25)   // kIOHIDEventTypeDigitizer, field 25
@@ -42,8 +46,30 @@ static IOHIDEventSystemClientRef client(void) {
     return c;
 }
 
+// backboardd routes touches by sender: the phone's own touchscreen service (primary usage page 0x0D, digitizer),
+// else a digitizer-like id. VCTL_SENDER overrides.
+static uint64_t sender(void) {
+    static uint64_t id;
+    if (id) return id;
+    id = kSender;
+    if (getenv("VCTL_SENDER")) return id = strtoull(getenv("VCTL_SENDER"), NULL, 0);
+    CFArrayRef services = IOHIDEventSystemClientCopyServices(client());
+    for (CFIndex i = 0; services && i < CFArrayGetCount(services); i++) {
+        IOHIDServiceClientRef sv = (IOHIDServiceClientRef)CFArrayGetValueAtIndex(services, i);
+        NSNumber *page = CFBridgingRelease(IOHIDServiceClientCopyProperty(sv, CFSTR("PrimaryUsagePage")));
+        NSNumber *usage = CFBridgingRelease(IOHIDServiceClientCopyProperty(sv, CFSTR("PrimaryUsage")));
+        NSNumber *reg = (__bridge NSNumber *)IOHIDServiceClientGetRegistryID(sv);
+        if (getenv("VCTL_VERBOSE"))
+            fprintf(stderr, "vctl: service 0x%llx page 0x%x usage 0x%x\n", reg.unsignedLongLongValue, page.unsignedIntValue, usage.unsignedIntValue);
+        if (page.unsignedIntValue == 0x0d && reg) id = reg.unsignedLongLongValue;
+    }
+    if (services) CFRelease(services);
+    if (getenv("VCTL_VERBOSE")) fprintf(stderr, "vctl: sender 0x%llx\n", id);
+    return id;
+}
+
 static void send(IOHIDEventRef e) {
-    IOHIDEventSetSenderID(e, kSender);
+    IOHIDEventSetSenderID(e, sender());
     IOHIDEventSystemClientDispatchEvent(client(), e);
     CFRelease(e);
 }
