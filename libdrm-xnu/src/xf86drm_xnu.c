@@ -86,8 +86,14 @@ int drmIoctl(int fd, unsigned long request, void *arg)
     if (trace_bo && sel == VGPU_SEL_GEM_CLOSE) fprintf(stderr, "vgpu: close %u\n", ((struct vgpu_gem_close *)arg)->handle);
     // MMAP_BO: the uapi's mmap token is the BO handle (VGPU_SEL_MMAP_BO), so no kernel call is needed; Panfrost asks
     // for it at every mapping of a BO taken from its cache.
-    int r = sel == VGPU_SEL_MMAP_BO ? (((struct vgpu_mmap_bo *)arg)->offset = ((struct vgpu_mmap_bo *)arg)->handle, 0)
-                                    : vgpu_ioctl(fd, sel, arg);
+    // MADVISE: the kernel stores the flag and never purges (retained = 1, VivaGPUUserClient), so it is answered here:
+    // Panfrost calls it twice per BO it recycles through its cache. VGPU_MADVISE_KERNEL=1 sends it to the kernel.
+    static int madv_kernel = -1;
+    if (madv_kernel < 0) madv_kernel = getenv("VGPU_MADVISE_KERNEL") != NULL;
+    int r;
+    if (sel == VGPU_SEL_MMAP_BO) r = (((struct vgpu_mmap_bo *)arg)->offset = ((struct vgpu_mmap_bo *)arg)->handle, 0);
+    else if (sel == VGPU_SEL_MADVISE && !madv_kernel) r = (((struct vgpu_madvise *)arg)->retained = 1, 0);
+    else r = vgpu_ioctl(fd, sel, arg);
     if (sel == VGPU_SEL_GEM_CLOSE && !r) map_cache_drop(fd, ((struct vgpu_gem_close *)arg)->handle);
     if (trace_bo && !r && sel == VGPU_SEL_CREATE_BO) {
         struct vgpu_create_bo *c = arg;
