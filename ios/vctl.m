@@ -5,6 +5,7 @@
 //   vctl swipe X1 Y1 X2 Y2 [MS]      drag (default 300 ms)
 //   vctl home                        the home button
 //   vctl shot PATH                   the render server's framebuffers as PATH-N.png
+//   vctl ls DIR                      directory listing, newest first (iOS has no ls)
 //   vctl unlock                      unlock (no passcode) through FrontBoard
 // Touches are digitizer events dispatched into backboardd's HID event system (private IOKit HID API, entitlement
 // com.apple.private.hid.client.event-dispatch, see vctl.entitlements); apps open through SpringBoardServices.
@@ -182,9 +183,31 @@ static int shot(const char *path) {
     return found ? 0 : 1;
 }
 
+// iOS has no /bin/ls: newest first, size and date.
+static int ls(const char *dir) {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSError *e = nil;
+    NSArray<NSURL *> *items = [fm contentsOfDirectoryAtURL:[NSURL fileURLWithPath:@(dir)]
+                                includingPropertiesForKeys:@[ NSURLContentModificationDateKey, NSURLFileSizeKey ] options:0 error:&e];
+    if (!items) { fprintf(stderr, "vctl: %s\n", e.description.UTF8String); return 1; }
+    NSArray *sorted = [items sortedArrayUsingComparator:^NSComparisonResult(NSURL *a, NSURL *b) {
+        NSDate *da, *db;
+        [a getResourceValue:&da forKey:NSURLContentModificationDateKey error:nil];
+        [b getResourceValue:&db forKey:NSURLContentModificationDateKey error:nil];
+        return [db compare:da];
+    }];
+    for (NSURL *u in sorted) {
+        NSDate *d; NSNumber *n;
+        [u getResourceValue:&d forKey:NSURLContentModificationDateKey error:nil];
+        [u getResourceValue:&n forKey:NSURLFileSizeKey error:nil];
+        printf("%10llu  %s  %s\n", n.unsignedLongLongValue, d.description.UTF8String, u.lastPathComponent.UTF8String);
+    }
+    return 0;
+}
+
 int main(int argc, char **argv) { @autoreleasepool {
     if (argc < 2) {
-        fprintf(stderr, "usage: vctl open BUNDLE | tap X Y | swipe X1 Y1 X2 Y2 [MS] | home   (X Y in 0..1)\n");
+        fprintf(stderr, "usage: vctl open BUNDLE | tap X Y | swipe X1 Y1 X2 Y2 [MS] | home | unlock | shot PATH | ls DIR   (X Y in 0..1)\n");
         return 2;
     }
     const char *cmd = argv[1];
@@ -195,6 +218,7 @@ int main(int argc, char **argv) { @autoreleasepool {
         usleep(100000);
         return 0;
     }
+    if (!strcmp(cmd, "ls") && argc == 3) return ls(argv[2]);
     if (!strcmp(cmd, "shot") && argc == 3) return shot(argv[2]);
     if (!strcmp(cmd, "unlock")) return open_frontboard(@"com.apple.springboard") == 0 ? 0 : open_app(@"com.apple.Preferences");
     if (!strcmp(cmd, "home")) { key(0x0c, 0x40); return 0; }   // consumer page, Menu (the home button)
