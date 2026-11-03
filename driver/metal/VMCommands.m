@@ -240,6 +240,9 @@ enum { VMInlineChunk = 64 << 10, VMInlineAlign = 16 };
 }
 VM_CATCH_ALL(VMCommandBuffer)
 
+- (uint64_t)protectionOptions { return 0; }               // SPI (CoreAnimation): no content protection
+- (void)setProtectionOptions:(uint64_t)options {}
+
 - (instancetype)initWithQueue:(id)queue retainedReferences:(BOOL)retained {
     if ((self = [super initWithQueue:queue retainedReferences:retained])) {
         _commands = [NSMutableArray array];

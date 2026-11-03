@@ -180,10 +180,17 @@ static void TSCatchAllForward(id self, SEL _cmd, NSInvocation *inv) {
 
 static BOOL TSCatchAllResponds(id self, SEL _cmd, SEL sel) {
     if (class_respondsToSelector(object_getClass(self), sel)) return YES;
-    // Required protocol methods are always "implemented" (by the catch-all);
-    // optional ones are reported missing so apps take their fallback paths.
-    struct objc_method_description d;
-    return TSFindSelector(self, sel, YES, &d);
+    // Required methods of public protocols are always "implemented" (by the catch-all); optional ones are reported
+    // missing so apps take their fallback paths. Viva: so are the methods of private protocols (MTLDeviceSPI, ...)
+    // we do not implement: system frameworks (QuartzCore) probe them and would otherwise get nil from a path they
+    // believe works (newTextureLayoutWithDescriptor:..., newResourceGroupFromResources:...).
+    for (Protocol *p in TSProtocolsOf(self)) {
+        const char *name = protocol_getName(p);
+        if (strstr(name, "SPI") || strstr(name, "Internal") || strstr(name, "Private")) continue;
+        struct objc_method_description d;
+        if (TSFindInProtocol(p, sel, YES, &d)) return YES;
+    }
+    return NO;
 }
 
 void TSMtlInstallCatchAll(Class cls) {

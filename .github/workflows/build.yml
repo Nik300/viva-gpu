@@ -105,7 +105,7 @@ jobs:
           make -C driver all metal
           make -C driver test
           cd driver
-          for t in phase1 phase3 translate uploads compute; do echo "== $t"; out/macos/$t | tail -3 || true; done
+          for t in phase1 phase3 translate uploads compute ca; do echo "== $t"; out/macos/$t | tail -3 || true; done
           out/macos/airnir ../shim/tests/corpus/apps.metal | tail -1
           VMG_DRIVER=panfrost VGPU_BACKEND=mock out/macos/airnir ../shim/tests/corpus/apps.metal | tail -1
 

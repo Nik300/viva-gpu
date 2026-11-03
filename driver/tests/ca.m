@@ -1,0 +1,143 @@
+// CoreAnimation's own Metal renderer (CARenderer, the engine of iOS's render server in backboardd) on the Viva
+// driver: a layer tree typical of iOS UI is composed on our device (llvmpipe or Panfrost-on-mock) and on the Mac's
+// real GPU, and the two frames are compared. PNGs go to /tmp/vmg-ca-{viva,ref}.png.
+// Usage: ca [frames]
+#import <Foundation/Foundation.h>
+#import <Metal/Metal.h>
+#import <QuartzCore/QuartzCore.h>
+#import <CoreGraphics/CoreGraphics.h>
+#import <ImageIO/ImageIO.h>
+#import <CoreText/CoreText.h>
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+
+id<MTLDevice> TSMtlCreateDevice(void);
+enum { W = 360, H = 640 };
+
+static CGImageRef checkerImage(void) {
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    CGContextRef c = CGBitmapContextCreate(NULL, 64, 64, 8, 0, cs, kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little);
+    for (int y = 0; y < 8; y++)
+        for (int x = 0; x < 8; x++) {
+            CGContextSetRGBFillColor(c, (x + y) & 1 ? 1 : 0.1, 0.4, (x + y) & 1 ? 0.2 : 0.9, 1);
+            CGContextFillRect(c, CGRectMake(x * 8, y * 8, 8, 8));
+        }
+    CGImageRef img = CGBitmapContextCreateImage(c);
+    CGContextRelease(c);
+    CGColorSpaceRelease(cs);
+    return img;
+}
+
+static CALayer *scene(void) {
+    CALayer *root = [CALayer layer];
+    root.frame = CGRectMake(0, 0, W, H);
+    root.backgroundColor = CGColorCreateGenericRGB(0.95, 0.95, 0.97, 1);
+
+    CALayer *card = [CALayer layer];                 // rounded, bordered, shadowed card
+    card.frame = CGRectMake(20, 30, 320, 180);
+    card.backgroundColor = CGColorCreateGenericRGB(1, 1, 1, 1);
+    card.cornerRadius = 18;
+    card.borderWidth = 1;
+    card.borderColor = CGColorCreateGenericRGB(0.8, 0.8, 0.85, 1);
+    card.shadowOpacity = 0.35;
+    card.shadowRadius = 10;
+    card.shadowOffset = CGSizeMake(0, 4);
+    [root addSublayer:card];
+
+    CALayer *image = [CALayer layer];                // image contents, clipped by a rounded mask
+    image.frame = CGRectMake(16, 16, 120, 120);
+    image.contents = (__bridge id)checkerImage();
+    image.cornerRadius = 24;
+    image.masksToBounds = YES;
+    image.magnificationFilter = kCAFilterLinear;
+    [card addSublayer:image];
+
+    CATextLayer *text = [CATextLayer layer];         // text (glyph atlas)
+    text.frame = CGRectMake(150, 30, 160, 80);
+    text.string = @"Viva Metal\nMali-G57";
+    text.fontSize = 22;
+    text.foregroundColor = CGColorCreateGenericRGB(0.1, 0.1, 0.15, 1);
+    text.contentsScale = 2;
+    [card addSublayer:text];
+
+    CAGradientLayer *grad = [CAGradientLayer layer]; // gradient
+    grad.frame = CGRectMake(20, 240, 320, 90);
+    grad.colors = @[(__bridge id)CGColorCreateGenericRGB(0.2, 0.5, 1, 1), (__bridge id)CGColorCreateGenericRGB(1, 0.3, 0.5, 1)];
+    grad.startPoint = CGPointMake(0, 0.5);
+    grad.endPoint = CGPointMake(1, 0.5);
+    grad.cornerRadius = 12;
+    [root addSublayer:grad];
+
+    CALayer *tilted = [CALayer layer];               // 3D transform + opacity
+    tilted.frame = CGRectMake(60, 360, 240, 120);
+    tilted.backgroundColor = CGColorCreateGenericRGB(0.2, 0.8, 0.4, 1);
+    tilted.opacity = 0.8;
+    CATransform3D t = CATransform3DIdentity;
+    t.m34 = -1.0 / 500;
+    tilted.transform = CATransform3DRotate(t, M_PI / 6, 1, 0.3, 0);
+    [root addSublayer:tilted];
+
+    CALayer *blurred = [CALayer layer];              // Gaussian blur filter (CAFilter)
+    blurred.frame = CGRectMake(40, 510, 280, 100);
+    blurred.contents = (__bridge id)checkerImage();
+    Class filter = NSClassFromString(@"CAFilter");
+    if (filter) {
+        id f = [filter performSelector:@selector(filterWithType:) withObject:@"gaussianBlur"];
+        [f setValue:@6 forKey:@"inputRadius"];
+        blurred.filters = @[f];
+    }
+    [root addSublayer:blurred];
+    return root;
+}
+
+static NSData *render(id<MTLDevice> dev, int frames, NSString *png) {
+    MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:W height:H mipmapped:NO];
+    td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    td.storageMode = MTLStorageModeShared;
+    id<MTLTexture> tex = [dev newTextureWithDescriptor:td];
+    id<MTLCommandQueue> q = [dev newCommandQueue];
+    CARenderer *rr = [CARenderer rendererWithMTLTexture:tex options:@{ kCARendererMetalCommandQueue: q }];
+    rr.layer = scene();
+    rr.bounds = CGRectMake(0, 0, W, H);
+    [CATransaction flush];
+    for (int f = 0; f < frames; f++) {
+        [rr beginFrameAtTime:CACurrentMediaTime() timeStamp:NULL];
+        [rr addUpdateRect:rr.bounds];
+        [rr render];
+        [rr endFrame];
+    }
+    id<MTLCommandBuffer> cb = [q commandBuffer];   // wait for CARenderer's command buffers
+    [cb commit];
+    [cb waitUntilCompleted];
+    NSMutableData *px = [NSMutableData dataWithLength:W * H * 4];
+    [tex getBytes:px.mutableBytes bytesPerRow:W * 4 fromRegion:MTLRegionMake2D(0, 0, W, H) mipmapLevel:0];
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    CGContextRef c = CGBitmapContextCreate(px.mutableBytes, W, H, 8, W * 4, cs, kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little);
+    CGImageRef img = CGBitmapContextCreateImage(c);
+    CGImageDestinationRef d = CGImageDestinationCreateWithURL((__bridge CFURLRef)[NSURL fileURLWithPath:png],
+                                                              (__bridge CFStringRef)UTTypePNG.identifier, 1, NULL);
+    CGImageDestinationAddImage(d, img, NULL);
+    CGImageDestinationFinalize(d);
+    CFRelease(d); CGImageRelease(img); CGContextRelease(c); CGColorSpaceRelease(cs);
+    return px;
+}
+
+int main(int argc, char **argv) { @autoreleasepool {
+    int frames = argc > 1 ? atoi(argv[1]) : 2;
+    id<MTLDevice> viva = TSMtlCreateDevice(), ref = MTLCreateSystemDefaultDevice();
+    printf("viva: %s / reference: %s\n", viva.name.UTF8String, ref.name.UTF8String);
+    NSData *a = render(viva, frames, @"/tmp/vmg-ca-viva.png");
+    NSData *b = ref ? render(ref, frames, @"/tmp/vmg-ca-ref.png") : nil;
+    if (!b) { printf("no reference device\n"); return 0; }
+    const uint8_t *pa = a.bytes, *pb = b.bytes;
+    size_t off = 0, big = 0, blank = 0;
+    for (size_t i = 0; i < (size_t)W * H; i++) {
+        int d = 0;
+        for (int k = 0; k < 4; k++) d = MAX(d, abs(pa[i * 4 + k] - pb[i * 4 + k]));
+        if (d > 8) off++;
+        if (d > 64) big++;
+        if (!pa[i * 4 + 3]) blank++;
+    }
+    printf("pixels differing by >8: %.2f%%, by >64: %.2f%%, transparent in viva: %.2f%%\n",
+           100.0 * off / (W * H), 100.0 * big / (W * H), 100.0 * blank / (W * H));
+    return 0;
+} }

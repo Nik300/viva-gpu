@@ -33,7 +33,7 @@ VivaMTLDriver.bundle ─ driver/metal/*.m   frontend Metal (device, risorse, pip
 bash mesa/build.sh macos          # Mesa + libdrm-xnu + smoke test (~1 min)
 make -C vgpu test                  # contratto sul mock: 28/28
 make -C driver test metal          # back-end: llvmpipe 6/6, Panfrost sul mock 4/4
-cd driver && for t in phase1 phase3 translate uploads compute; do out/macos/$t | tail -1; done
+cd driver && for t in phase1 phase3 translate uploads compute ca; do out/macos/$t | tail -1; done
 out/macos/airnir FILE.metal|FILE.metallib [-v] [funzione]      # AIR → NIR → driver (VMG_DRIVER=panfrost VGPU_BACKEND=mock)
 ```
 
@@ -41,11 +41,12 @@ Risultati (Apple Silicon, macOS 27), sui test di metal-shim e sui test nuovi:
 
 | Test | llvmpipe | Panfrost sul mock |
 |---|---|---|
-| phase1 (device, risorse) | 43/44 (l'unico fallimento è voluto: il Mali ha memoria unificata) | nessun crash; i controlli che richiedono l'esecuzione GPU falliscono |
+| phase1 (device, risorse) | **44/44** | nessun crash; i controlli che richiedono l'esecuzione GPU falliscono |
 | phase3 (render: pipeline, varying, depth, texture, blend, MSAA) | **33/33** (= metal-shim GL) | nessun crash; job chain decodificate pulite con `pandecode` (`PAN_MESA_DEBUG=trace`) |
 | translate (traduttore su shader veri) | **24/24** | come sopra |
 | uploads (coerenza CPU/GPU) | **20/20** | come sopra |
 | compute (threadgroup, atomiche, image write, griglie non uniformi) | **7/7** | come sopra |
+| ca (`CARenderer` di QuartzCore compone un albero di layer: angoli arrotondati, ombra, testo, gradiente, 3D, blur) | **identico** all'M1 (0,00% di pixel diversi) | 24 shader di CoreAnimation compilati dal Valhall, nessun errore |
 
 Copertura del traduttore sulle librerie di sistema (identica con llvmpipe e con il compilatore Valhall per il G57):
 
@@ -56,7 +57,8 @@ Copertura del traduttore sulle librerie di sistema (identica con llvmpipe e con 
 | VectorKit | 331/340 | argument buffer / ICB (`air.indirect_buffer`), imageblock |
 
 Variabili utili: `VMG_DRIVER=llvmpipe|panfrost`, `VGPU_BACKEND=mock|iokit`, `VMG_TRACE=1` (binding, shader,
-sampler), `VMG_TRACE_NIR=1`, `TSMTL_LOG=1` (log del driver su stderr), `VMG_FEATURE_PROFILE`.
+sampler), `VMG_TRACE_NIR=1`, `TSMTL_LOG=1` (log del driver su stderr), `VMG_FEATURE_PROFILE`, `VMG_HALF32=0|1` (`half` come float a 32 bit:
+automatico se il driver non ha fp16).
 
 ## Cosa manca per collegarlo al kernel
 1. **Driver di kernel** (fasi G1-G2 del piano): servizio `VivaGPUAccelerator : IOAcceleratorES` e user client

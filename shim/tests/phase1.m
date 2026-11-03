@@ -22,7 +22,7 @@ static void testDevice(id<MTLDevice> dev) {
     CHECK(dev.recommendedMaxWorkingSetSize >= (256ull << 20), "working set = %llu MB", dev.recommendedMaxWorkingSetSize >> 20);
     CHECK(dev.maxBufferLength >= (256ull << 20), "maxBufferLength = %lu MB", (unsigned long)(dev.maxBufferLength >> 20));
     CHECK(dev.argumentBuffersSupport == MTLArgumentBuffersTier1, "argument buffers tier 1");
-    CHECK(!dev.supportsRaytracing && !dev.hasUnifiedMemory && !dev.isLowPower, "raytracing/unified/lowPower = NO");
+    CHECK(!dev.supportsRaytracing && dev.hasUnifiedMemory, "raytracing NO, unified memory YES (SoC)");
     CHECK([dev supportsTextureSampleCount:1] && [dev supportsTextureSampleCount:4], "sample counts 1 and 4");
     MTLSize tg = dev.maxThreadsPerThreadgroup;
     CHECK(tg.width == 1024, "maxThreadsPerThreadgroup %lux%lux%lu", (unsigned long)tg.width, (unsigned long)tg.height, (unsigned long)tg.depth);

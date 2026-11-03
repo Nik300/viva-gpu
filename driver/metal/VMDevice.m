@@ -14,9 +14,12 @@
 - (id<MTLLibrary>)newLibraryWithURL:(NSURL *)url error:(NSError **)error;
 @end
 
-// MTLDeviceFeatureProfile. macOS: 10001 = Mac2 + Common1..3 (probed by metal-shim). iOS 16: the profile of an A11
-// (Apple4) is chosen at runtime as the one whose feature sets include iOS GPU family 4 but not family 5
-// (+[_MTLDevice featureProfile:supportsFeatureSet:], present in iOS 16's Metal); VMG_FEATURE_PROFILE overrides.
+// MTLDeviceFeatureProfile. macOS: 10001 = Mac2 + Common1..3 (probed by metal-shim). iOS 16: an A10's profile
+// (Apple3: iOS GPU family 3 but not 4), chosen at runtime with +[_MTLDevice featureProfile:supportsFeatureSet:].
+// Apple3 rather than the A11's Apple4 on purpose: Apple4 adds tile shading and imageblocks, which Valhall lacks, and
+// CoreAnimation then downsamples its blurs with tile shaders (tile_downsample_*); as an A10 it takes the paths that
+// every shader of its iOS 16 library translates for (137/141, the 4 missing are those tile kernels).
+// VMG_FEATURE_PROFILE overrides; VMG_APPLE4=1 picks the Apple4 profile.
 @interface _MTLDevice (VMProfiles)
 + (BOOL)featureProfile:(unsigned long long)profile supportsFeatureSet:(MTLFeatureSet)set;
 @end
@@ -30,11 +33,18 @@ static unsigned long long VMFeatureProfileValue(void) {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
         if ([_MTLDevice respondsToSelector:@selector(featureProfile:supportsFeatureSet:)])
-            for (unsigned long long p = 0; p < 64; p++)
-                if ([_MTLDevice featureProfile:p supportsFeatureSet:MTLFeatureSet_iOS_GPUFamily4_v2] &&
-                    ![_MTLDevice featureProfile:p supportsFeatureSet:MTLFeatureSet_iOS_GPUFamily5_v1]) { profile = p; break; }
+            for (unsigned long long p = 0; p < 64; p++) {
+                BOOL apple4 = getenv("VMG_APPLE4") != NULL;
+                MTLFeatureSet want = apple4 ? MTLFeatureSet_iOS_GPUFamily4_v2 : MTLFeatureSet_iOS_GPUFamily3_v4;
+                MTLFeatureSet above = apple4 ? MTLFeatureSet_iOS_GPUFamily5_v1 : MTLFeatureSet_iOS_GPUFamily4_v1;
+                if ([_MTLDevice featureProfile:p supportsFeatureSet:want] && ![_MTLDevice featureProfile:p supportsFeatureSet:above]) {
+                    profile = p;
+                    break;
+                }
+            }
 #pragma clang diagnostic pop
-        if (!profile) TSMtlWarn(@"no Apple4 feature profile found; set VMG_FEATURE_PROFILE");
+        if (!profile) TSMtlWarn(@"no Apple3/Apple4 feature profile found; set VMG_FEATURE_PROFILE");
+        else TSMtlLog(@"feature profile %llu", profile);
 #else
         profile = 10001;
 #endif

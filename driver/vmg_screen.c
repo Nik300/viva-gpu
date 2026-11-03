@@ -542,6 +542,15 @@ void vmg_dsa_release(vmg_device *dev, vmg_dsa *d)
     free(d);
 }
 
+// Half as 32-bit float when the driver has no fp16 (or VMG_HALF32=1; VMG_HALF32=0 forces native half).
+static bool vmg_half32(vmg_device *dev)
+{
+    const char *e = getenv("VMG_HALF32");
+    if (e && *e) return *e != '0';
+    return !dev->screen->shader_caps[MESA_SHADER_FRAGMENT].fp16;
+}
+
+
 // ---- Shaders --------------------------------------------------------------------------------------------------------
 
 static mesa_shader_stage nir_stage_of(const void *bitcode, size_t size) { (void)bitcode; (void)size; return MESA_SHADER_NONE; }
@@ -555,7 +564,9 @@ vmg_shader *vmg_shader_create(vmg_device *dev, const vmg_air_input *in, vmg_refl
     // The options of the stage are needed before the stage is known: all graphics drivers here share them between
     // stages closely enough for the builder; the driver re-lowers in create_*_state.
     const struct nir_shader_compiler_options *opts = dev->screen->nir_options[MESA_SHADER_FRAGMENT];
-    nir_shader *nir = vmg_air_translate(opts, in, &r, &pool, error);
+    vmg_air_input in2 = *in;
+    in2.half32 = vmg_half32(dev);
+    nir_shader *nir = vmg_air_translate(opts, &in2, &r, &pool, error);
     if (!nir) { util_dynarray_fini(&pool); return NULL; }
     if (dev->screen->nir_options[nir->info.stage]) nir->options = dev->screen->nir_options[nir->info.stage];
     if (nir->info.stage == MESA_SHADER_FRAGMENT) {
@@ -652,7 +663,9 @@ char *vmg_air_to_nir_text(vmg_device *dev, const vmg_air_input *in, char **error
     struct util_dynarray pool;
     util_dynarray_init(&pool, NULL);
     vmg_reflection r;
-    nir_shader *nir = vmg_air_translate(dev->screen->nir_options[MESA_SHADER_FRAGMENT], in, &r, &pool, error);
+    vmg_air_input in2 = *in;
+    in2.half32 = vmg_half32(dev);
+    nir_shader *nir = vmg_air_translate(dev->screen->nir_options[MESA_SHADER_FRAGMENT], &in2, &r, &pool, error);
     util_dynarray_fini(&pool);
     if (!nir) return NULL;
     char *buf = NULL;

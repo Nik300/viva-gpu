@@ -130,6 +130,7 @@ typedef struct {
     const void *const *linked; const size_t *linked_size; const char *const *linked_names; unsigned linked_count;
     const char *const *varyings; unsigned varying_count;   // keys in slot order: VARYING_SLOT_VAR0 + i
     const uint32_t *color_formats;                          // fragment: MTLPixelFormat per render target (int/uint outputs)
+    bool half32;                                            // set by vmg: the driver has no fp16 (half as 32-bit float)
 } vmg_air_input;
 
 // AIR -> NIR -> driver shader. NULL with *error set when the function cannot be translated.

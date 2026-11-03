@@ -154,11 +154,21 @@ static char *llvm_name(LLVMValueRef v)
 
 // ---- Types ----------------------------------------------------------------------------------------------------------
 
+// Drivers without fp16 (llvmpipe on most Macs): half values are 32-bit floats in registers and 16-bit in memory.
+// Panfrost has native fp16 and keeps them 16-bit. Set per translation (thread local: pipelines translate in parallel).
+static _Thread_local bool g_half32;
+
+static bool is_half_type(LLVMTypeRef t)
+{
+    if (ts_LLVMGetTypeKind(t) == LLVMVectorTypeKind) t = ts_LLVMGetElementType(t);
+    return ts_LLVMGetTypeKind(t) == LLVMHalfTypeKind;
+}
+
 static bool scalar_info(LLVMTypeRef t, unsigned *bits, bool *flt)
 {
     switch (ts_LLVMGetTypeKind(t)) {
     case LLVMIntegerTypeKind: *bits = ts_LLVMGetIntTypeWidth(t); *flt = false; return *bits <= 64;
-    case LLVMHalfTypeKind: *bits = 16; *flt = true; return true;
+    case LLVMHalfTypeKind: *bits = g_half32 ? 32 : 16; *flt = true; return true;
     case LLVMFloatTypeKind: *bits = 32; *flt = true; return true;
     case LLVMDoubleTypeKind: *bits = 64; *flt = true; return true;
     case LLVMBFloatTypeKind: return false;
@@ -307,6 +317,7 @@ static bool serialize_const(T *t, LLVMValueRef c, uint8_t *out, uint64_t size)
     }
     unsigned bits; bool flt;
     if (!scalar_info(ty, &bits, &flt)) return false;
+    if (ts_LLVMGetTypeKind(ty) == LLVMHalfTypeKind) bits = 16;   // memory form, even when widened in registers
     uint64_t u = 0;
     if (flt) {
         LLVMBool lost;
@@ -405,14 +416,17 @@ static val *load_typed(T *t, val *p, LLVMTypeRef ty, unsigned align)
     if (k == LLVMPointerTypeKind) FAIL(t, "pointer loaded from memory (argument buffers are not supported yet)");
     unsigned bits, comps; bool flt;
     if (!type_info(ty, &bits, &comps, &flt)) FAIL(t, "load of an unsupported type");
+    bool widen = g_half32 && is_half_type(ty);   // 16-bit in memory, 32-bit in registers
+    unsigned mbits = widen ? 16 : bits;
+    nir_def *d;
     if (comps == 3 || comps > 4) {
         // vec3 and wide vectors: per component (a 3-component SSBO load is fine, but keep alignment simple).
         nir_def *c[16];
-        unsigned es = (bits == 1 ? 8 : bits) / 8;
-        for (unsigned i = 0; i < comps; i++) c[i] = mem_load(t, ptr_add_imm(t, p, i * es), 1, bits, MIN2(align, es));
-        return vssa(t, nir_vec(&t->b, c, comps));
-    }
-    return vssa(t, mem_load(t, p, comps, bits, align));
+        unsigned es = (mbits == 1 ? 8 : mbits) / 8;
+        for (unsigned i = 0; i < comps; i++) c[i] = mem_load(t, ptr_add_imm(t, p, i * es), 1, mbits, MIN2(align, es));
+        d = nir_vec(&t->b, c, comps);
+    } else d = mem_load(t, p, comps, mbits, align);
+    return vssa(t, widen ? nir_f2f32(&t->b, d) : d);
 }
 
 static bool store_typed(T *t, val *p, val *v, LLVMTypeRef ty, unsigned align)
@@ -430,13 +444,15 @@ static bool store_typed(T *t, val *p, val *v, LLVMTypeRef ty, unsigned align)
     if (v->kind != V_SSA) FAILB(t, "store of a pointer or texture into memory");
     unsigned bits, comps; bool flt;
     if (!type_info(ty, &bits, &comps, &flt)) FAILB(t, "store of an unsupported type");
+    nir_def *d = v->def;
+    if (g_half32 && is_half_type(ty)) { d = nir_f2f16(&t->b, d); bits = 16; }
     if (comps == 3 || comps > 4) {
         unsigned es = (bits == 1 ? 8 : bits) / 8;
         for (unsigned i = 0; i < comps; i++)
-            if (!mem_store(t, ptr_add_imm(t, p, i * es), nir_channel(&t->b, v->def, i), MIN2(align, es))) return false;
+            if (!mem_store(t, ptr_add_imm(t, p, i * es), nir_channel(&t->b, d, i), MIN2(align, es))) return false;
         return true;
     }
-    return mem_store(t, p, v->def, align);
+    return mem_store(t, p, d, align);
 }
 
 // ---- Values of LLVM operands ----------------------------------------------------------------------------------------
@@ -1029,9 +1045,13 @@ static val *cast(T *t, LLVMValueRef inst, LLVMOpcode op)
         unsigned tb, tc; bool tf;
         if (!type_info(to, &tb, &tc, &tf)) FAIL(t, "bitcast to an aggregate");
         nir_def *d = v->def;
-        if (d->bit_size == tb && d->num_components == tc) return vssa(t, d);
+        bool from_half = g_half32 && is_half_type(ts_LLVMTypeOf(srcv)), to_half = g_half32 && is_half_type(to);
+        if (from_half) d = nir_f2f16(b, d);           // the bits of a half are its 16-bit form
+        if (to_half) tb = 16;
+        if (d->bit_size == tb && d->num_components == tc) return vssa(t, to_half ? nir_f2f32(b, d) : d);
         if (d->bit_size == 1 || tb == 1) FAIL(t, "bitcast of booleans");
-        return vssa(t, nir_extract_bits(b, &d, 1, 0, tc, tb));
+        nir_def *r = nir_extract_bits(b, &d, 1, 0, tc, tb);
+        return vssa(t, to_half ? nir_f2f32(b, r) : r);
     }
     if (op == LLVMPtrToInt || op == LLVMIntToPtr) FAIL(t, "pointer/integer conversion");
     nir_def *x = ssa(t, srcv);
@@ -1202,7 +1222,8 @@ static val *math(T *t, LLVMValueRef inst, const char *name)
     else if (IS("fmax3") || IS("max3")) r = flt ? nir_fmax(b, a[0], nir_fmax(b, a[1], a[2])) : u ? nir_umax(b, a[0], nir_umax(b, a[1], a[2])) : nir_imax(b, a[0], nir_imax(b, a[1], a[2]));
     else if (IS("median3") || IS("fmedian3")) r = nir_fmax(b, nir_fmin(b, a[0], a[1]), nir_fmin(b, nir_fmax(b, a[0], a[1]), a[2]));
     else if (IS("pow") || IS("powr")) r = nir_fpow(b, a[0], a[1]);
-    else if (IS("fma") || IS("fmuladd") || IS("mad")) r = nir_ffma(b, a[0], a[1], a[2]);
+    else if (IS("fma") || IS("fmuladd") || IS("mad"))    // exact fma only where the driver has it (llvmpipe: weak only)
+        r = IS("fma") && nir_has_ffma(b->shader, a[0]->bit_size) ? nir_ffma(b, a[0], a[1], a[2]) : nir_ffma_weak(b, a[0], a[1], a[2]);
     else if (IS("isnan")) r = nir_fneu(b, a[0], a[0]);
     else if (IS("isinf")) r = nir_feq(b, nir_fabs(b, a[0]), nir_imm_floatN_t(b, INFINITY, a[0]->bit_size));
     else if (IS("isfinite")) r = nir_flt(b, nir_fabs(b, a[0]), nir_imm_floatN_t(b, INFINITY, a[0]->bit_size));
@@ -1237,9 +1258,26 @@ static val *math(T *t, LLVMValueRef inst, const char *name)
         // Spelled out (portable: llvmpipe lacks some of NIR's packing opcodes after lowering).
         const char *fmt = dot ? dot + 1 : "";
         bool pack = IS("pack");
+        if (strstr(fmt, "rgb565")) {
+            // air.pack.unorm.rgb565 / unpack: 5:6:5 in the low 16 bits (red in the high bits, as MSL's packing).
+            nir_def *x = nir_fsat(b, nir_f2f32(b, a[0]));
+            if (pack) {
+                nir_def *r5 = nir_f2u32(b, nir_fround_even(b, nir_fmul_imm(b, nir_channel(b, x, 0), 31)));
+                nir_def *g6 = nir_f2u32(b, nir_fround_even(b, nir_fmul_imm(b, nir_channel(b, x, 1), 63)));
+                nir_def *b5 = nir_f2u32(b, nir_fround_even(b, nir_fmul_imm(b, nir_channel(b, x, 2), 31)));
+                r = nir_ior(b, nir_ishl_imm(b, r5, 11), nir_ior(b, nir_ishl_imm(b, g6, 5), b5));
+            } else {
+                nir_def *w = nir_u2u32(b, a[0]);
+                nir_def *c[3] = {
+                    nir_fmul_imm(b, nir_u2f32(b, nir_ubitfield_extract(b, w, nir_imm_int(b, 11), nir_imm_int(b, 5))), 1.0 / 31),
+                    nir_fmul_imm(b, nir_u2f32(b, nir_ubitfield_extract(b, w, nir_imm_int(b, 5), nir_imm_int(b, 6))), 1.0 / 63),
+                    nir_fmul_imm(b, nir_u2f32(b, nir_ubitfield_extract(b, w, nir_imm_int(b, 0), nir_imm_int(b, 5))), 1.0 / 31) };
+                r = nir_vec(b, c, 3);
+            }
+        }
         bool snorm = name_is(fmt, "snorm");
         unsigned lanes = name_is(fmt + 5, "4x8") ? 4 : name_is(fmt + 5, "2x16") ? 2 : 0;
-        if (lanes) {
+        if (lanes && !r) {
             unsigned bits = 32 / lanes;
             double scale = snorm ? (double)((1u << (bits - 1)) - 1) : (double)((1u << bits) - 1);
             nir_def *mask = nir_imm_int(b, (int)((1u << bits) - 1));
@@ -2259,6 +2297,7 @@ static nir_shader *translate_module(const nir_shader_compiler_options *options, 
 nir_shader *vmg_air_translate(const nir_shader_compiler_options *options, const vmg_air_input *in, vmg_reflection *refl,
                               struct util_dynarray *pool, char **error)
 {
+    g_half32 = in->half32;
     const char *loadError;
     *error = NULL;
     if (!vmg_llvm_load(&loadError)) { *error = strdup(loadError); return NULL; }

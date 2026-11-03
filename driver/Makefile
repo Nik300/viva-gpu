@@ -56,8 +56,10 @@ $(OUT)/phase3: $(SHIM)/tests/phase2.m $(OUT)/libVivaMetal.dylib
 $(OUT)/phase1 $(OUT)/translate $(OUT)/uploads: $(OUT)/%: $(SHIM)/tests/%.m $(OUT)/libVivaMetal.dylib
 	@$(CC) $(OBJC) -I$(SHIM)/src $< -L$(OUT) -lVivaMetal -Wl,-rpath,@executable_path $(FRAMEWORKS) -framework Cocoa -o $@
 
-metal: $(OUT)/libVivaMetal.dylib $(addprefix $(OUT)/,$(SHIM_TESTS)) $(OUT)/compute
+metal: $(OUT)/libVivaMetal.dylib $(addprefix $(OUT)/,$(SHIM_TESTS)) $(OUT)/compute $(OUT)/ca
 test-metal: metal
 	@for t in $(SHIM_TESTS); do echo "== $$t (llvmpipe)"; $(OUT)/$$t | tail -2 || exit 1; done
 $(OUT)/compute: tests/compute.m $(OUT)/libVivaMetal.dylib
 	@$(CC) $(OBJC) $< -L$(OUT) -lVivaMetal -Wl,-rpath,@executable_path $(FRAMEWORKS) -o $@
+$(OUT)/ca: tests/ca.m $(OUT)/libVivaMetal.dylib
+	@$(CC) $(OBJC) $< -L$(OUT) -lVivaMetal -Wl,-rpath,@executable_path $(FRAMEWORKS) -framework ImageIO -framework CoreText -framework UniformTypeIdentifiers -o $@

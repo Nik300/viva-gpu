@@ -64,6 +64,16 @@ VM_CATCH_ALL(VMBuffer)
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)desc offset:(NSUInteger)offset bytesPerRow:(NSUInteger)bpr {
     return [[VMTexture alloc] initWithDevice:_device descriptor:desc buffer:self offset:offset bytesPerRow:bpr];
 }
+// SPI: CoreAnimation wraps CPU-filled buffers (images, glyphs, gradients) as linear textures.
+- (id<MTLTexture>)newLinearTextureWithDescriptor:(MTLTextureDescriptor *)desc offset:(NSUInteger)offset
+                                     bytesPerRow:(NSUInteger)bpr bytesPerImage:(NSUInteger)bpi {
+    return [self newTextureWithDescriptor:desc offset:offset bytesPerRow:bpr];
+}
+// SPI used by CoreAnimation (backboardd): content protection is not supported (always 0, as on devices without
+// it); the responsible process only matters for memory accounting.
+- (uint64_t)protectionOptions { return 0; }
+- (void)setProtectionOptions:(uint64_t)options {}
+- (void)setResponsibleProcess:(int)pid {}
 @end
 
 #pragma mark - Texture
@@ -214,6 +224,11 @@ VM_CATCH_ALL(VMTexture)
 - (id<MTLHeap>)heap { return nil; }
 - (NSUInteger)heapOffset { return 0; }
 - (MTLResourceID)gpuResourceID { return (MTLResourceID){ (uint64_t)(uintptr_t)(__bridge void *)self }; }
+// SPI used by CoreAnimation (backboardd): content protection is not supported (always 0, as on devices without
+// it); the responsible process only matters for memory accounting.
+- (uint64_t)protectionOptions { return 0; }
+- (void)setProtectionOptions:(uint64_t)options {}
+- (void)setResponsibleProcess:(int)pid {}
 
 // Slice for 2D regions: array layer / cube face; 3D textures address z through the region.
 - (void)replaceRegion:(MTLRegion)region mipmapLevel:(NSUInteger)level slice:(NSUInteger)slice withBytes:(const void *)bytes
