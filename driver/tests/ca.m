@@ -252,12 +252,23 @@ static NSData *render(id<MTLDevice> dev, int frames, NSString *png) {
     rr.layer = getenv("VMG_CA_SETTINGS") ? settingsScene() : scene();
     rr.bounds = CGRectMake(0, 0, W, H);
     [CATransaction flush];
+    // VMG_CA_TIME=1: every frame waits for the GPU; the average frame time is printed (frames after the first).
+    bool timed = getenv("VMG_CA_TIME") != NULL;
+    double t0 = 0;
     for (int f = 0; f < frames; f++) {
+        if (f == 1) t0 = CACurrentMediaTime();
         [rr beginFrameAtTime:CACurrentMediaTime() timeStamp:NULL];
         [rr addUpdateRect:rr.bounds];
         [rr render];
         [rr endFrame];
+        if (timed) {
+            id<MTLCommandBuffer> w = [q commandBuffer];
+            [w commit];
+            [w waitUntilCompleted];
+        }
     }
+    if (timed && frames > 1)
+        printf("%s: %.2f ms per frame (%d frames)\n", dev.name.UTF8String, (CACurrentMediaTime() - t0) * 1000 / (frames - 1), frames - 1);
     id<MTLCommandBuffer> cb = [q commandBuffer];   // wait for CARenderer's command buffers
     [cb commit];
     [cb waitUntilCompleted];
