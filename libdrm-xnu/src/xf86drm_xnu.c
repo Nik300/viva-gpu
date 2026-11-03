@@ -78,7 +78,16 @@ int drmIoctl(int fd, unsigned long request, void *arg)
         errno = ENOSYS;
         return -1;
     }
+    // VGPU_TRACE_BO=1: GPU address ranges of BOs as they are created and closed (to place MMU fault addresses).
+    static int trace_bo = -1;
+    if (trace_bo < 0) trace_bo = getenv("VGPU_TRACE_BO") != NULL;
+    if (trace_bo && sel == VGPU_SEL_GEM_CLOSE) fprintf(stderr, "vgpu: close %u\n", ((struct vgpu_gem_close *)arg)->handle);
     int r = vgpu_ioctl(fd, sel, arg);
+    if (trace_bo && !r && sel == VGPU_SEL_CREATE_BO) {
+        struct vgpu_create_bo *c = arg;
+        fprintf(stderr, "vgpu: bo %u 0x%llx-0x%llx flags %x\n", c->handle, (unsigned long long)c->offset,
+                (unsigned long long)(c->offset + c->size), c->flags);
+    }
     if (!r && sel == VGPU_SEL_MMAP_BO) {
         struct vgpu_mmap_bo *m = arg;
         pthread_mutex_lock(&g_bo_lock);
@@ -227,6 +236,11 @@ int drmPrimeFDToHandle(int fd, int prime_fd, uint32_t *handle)
     BOInfo *b = bo_info(fd, im.handle, true);
     if (b) { b->in_page = (uint32_t)(im.offset & (pg - 1)); b->surface = sf.surface; b->plane = sf.plane; }
     pthread_mutex_unlock(&g_bo_lock);
+    static int trace_bo = -1;
+    if (trace_bo < 0) trace_bo = getenv("VGPU_TRACE_BO") != NULL;
+    if (trace_bo)
+        fprintf(stderr, "vgpu: surface %u plane %u -> bo %u 0x%llx-0x%llx (%ux%u bpr %u)\n", sf.surface, sf.plane, im.handle,
+                (unsigned long long)im.offset, (unsigned long long)(im.offset + im.size), im.width, im.height, im.bytes_per_row);
     *handle = im.handle;
     return 0;
 }
