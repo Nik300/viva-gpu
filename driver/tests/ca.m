@@ -133,7 +133,7 @@ static NSData *render(id<MTLDevice> dev, int frames, NSString *png) {
     td.storageMode = MTLStorageModeShared;
     id<MTLTexture> tex;
     if (getenv("VMG_CA_IOSURFACE")) {   // like backboardd: render straight into an IOSurface (the framebuffer)
-        NSDictionary *props = @{ (id)kIOSurfaceWidth: @W, (id)kIOSurfaceHeight: @H, (id)kIOSurfaceBytesPerElement: @4,
+        NSDictionary *props = @{ (id)kIOSurfaceWidth: @(W), (id)kIOSurfaceHeight: @(H), (id)kIOSurfaceBytesPerElement: @4,
                                  (id)kIOSurfacePixelFormat: @((uint32_t)'BGRA') };
         IOSurfaceRef surf = IOSurfaceCreate((__bridge CFDictionaryRef)props);
         tex = [dev newTextureWithDescriptor:td iosurface:surf plane:0];
