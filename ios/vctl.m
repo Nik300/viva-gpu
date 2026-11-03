@@ -6,6 +6,7 @@
 //   vctl home                        the home button
 //   vctl shot PATH                   the render server's framebuffers as PATH-N.png
 //   vctl burst PATH N MS [CMD ...]   N frames MS apart (changed framebuffers, 1:3) while CMD runs
+//   vctl surf ID PATH                one IOSurface's planes as PATH-pN.raw (+ layout, how much is non-zero)
 //   vctl ls DIR                      directory listing, newest first (iOS has no ls)
 //   vctl unlock                      unlock (no passcode) through FrontBoard
 // Touches are digitizer events dispatched into backboardd's HID event system (private IOKit HID API, entitlement
@@ -243,6 +244,33 @@ static int burst(const char *path, int n, int ms, int argc, char **argv) {
     return got ? 0 : 1;
 }
 
+// surf ID PATH: one IOSurface's planes as raw files PATH-pN.raw (and its layout on stdout), to look at its content.
+static int surf(IOSurfaceID sid, const char *path) {
+    IOSurfaceRef sf = IOSurfaceLookup(sid);
+    if (!sf) { fprintf(stderr, "vctl: no surface %u\n", sid); return 1; }
+    uint32_t fmt = IOSurfaceGetPixelFormat(sf);
+    size_t planes = IOSurfaceGetPlaneCount(sf);
+    printf("surface %u %zux%zu '%c%c%c%c' bpr %zu planes %zu seed %u\n", sid, IOSurfaceGetWidth(sf), IOSurfaceGetHeight(sf),
+           fmt >> 24, fmt >> 16, fmt >> 8, fmt, IOSurfaceGetBytesPerRow(sf), planes, IOSurfaceGetSeed(sf));
+    IOSurfaceLock(sf, kIOSurfaceLockReadOnly, NULL);
+    for (size_t p = 0; p < (planes ? planes : 1); p++) {
+        const uint8_t *b = planes ? IOSurfaceGetBaseAddressOfPlane(sf, p) : IOSurfaceGetBaseAddress(sf);
+        size_t bpr = planes ? IOSurfaceGetBytesPerRowOfPlane(sf, p) : IOSurfaceGetBytesPerRow(sf);
+        size_t h = planes ? IOSurfaceGetHeightOfPlane(sf, p) : IOSurfaceGetHeight(sf);
+        size_t w = planes ? IOSurfaceGetWidthOfPlane(sf, p) : IOSurfaceGetWidth(sf);
+        size_t nz = 0;
+        for (size_t i = 0; i < bpr * h; i += 97) nz += b[i] != 0;
+        printf("  plane %zu %zux%zu bpr %zu, %zu%% of samples non-zero\n", p, w, h, bpr, nz * 100 / (bpr * h / 97 + 1));
+        char out[512];
+        snprintf(out, sizeof out, "%s-p%zu.raw", path, p);
+        FILE *f = fopen(out, "wb");
+        if (f) { fwrite(b, 1, bpr * h, f); fclose(f); }
+    }
+    IOSurfaceUnlock(sf, kIOSurfaceLockReadOnly, NULL);
+    CFRelease(sf);
+    return 0;
+}
+
 // iOS has no /bin/ls: newest first, size and date.
 static int ls(const char *dir) {
     NSFileManager *fm = NSFileManager.defaultManager;
@@ -286,6 +314,7 @@ static int dispatch_action(int argc, char **argv) { @autoreleasepool {
         return 0;
     }
     if (!strcmp(cmd, "ls") && argc == 3) return ls(argv[2]);
+    if (!strcmp(cmd, "surf") && argc == 4) return surf((IOSurfaceID)atoi(argv[2]), argv[3]);
     if (!strcmp(cmd, "shot") && argc == 3) return shot(argv[2]);
     if (!strcmp(cmd, "unlock")) return open_frontboard(@"com.apple.springboard") == 0 ? 0 : open_app(@"com.apple.Preferences");
     if (!strcmp(cmd, "home")) { key(0x0c, 0x40); return 0; }   // consumer page, Menu (the home button)
