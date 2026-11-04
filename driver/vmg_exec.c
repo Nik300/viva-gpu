@@ -230,6 +230,7 @@ void vmg_cmd_begin_pass(vmg_device *dev, const vmg_pass_desc *pass)
                     a->texture->res->width0, a->texture->res->height0, util_format_short_name(a->texture->format), a->load,
                     a->store, a->clear[0], a->clear[1], a->clear[2], a->clear[3]);
             if (a->texture->surface_id) fprintf(stderr, " surf %u", a->texture->surface_id);
+            if (a->texture->desc.memoryless) fprintf(stderr, " memoryless");
         }
         if (pass->stencil.texture) fprintf(stderr, " stencil load %d clear %u", pass->stencil.load, pass->stencil.clear_stencil);
         if (pass->depth.texture) fprintf(stderr, " depth load %d", pass->depth.load);
@@ -339,11 +340,16 @@ void vmg_cmd_end_pass(vmg_device *dev)
         pipe->blit(pipe, &b);
         vmg_texture_written(dev, a->resolve);
     }
-    // Store actions: discard what Metal does not keep (memoryless, dontCare on whole textures).
+    // Store actions: discard what Metal does not keep. A dontCare store leaves the attachment undefined, memoryless or
+    // not: CoreAnimation's second color attachment (full screen, load and store dontCare) was written back at the end
+    // of every pass, ~11 MB each, 4+ passes per home screen frame. VMG_KEEP_DONTCARE=1: only memoryless ones, as before.
+    static int keep_dontcare = -1;
+    if (keep_dontcare < 0) keep_dontcare = getenv("VMG_KEEP_DONTCARE") != NULL;
     for (unsigned i = 0; i < n; i++) {
         const vmg_attachment *a = atts[i];
         if (!a->texture) continue;
-        if ((a->store == VMG_STORE_DONTCARE || a->store == VMG_STORE_RESOLVE) && a->texture->desc.memoryless && pipe->invalidate_resource)
+        if ((a->store == VMG_STORE_DONTCARE || a->store == VMG_STORE_RESOLVE) && pipe->invalidate_resource &&
+            (a->texture->desc.memoryless || (!keep_dontcare && !a->texture->surface_id && !a->texture->buffer)))
             pipe->invalidate_resource(pipe, a->texture->res);
         else vmg_texture_written(dev, a->texture);
     }
