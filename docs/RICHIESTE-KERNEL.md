@@ -340,3 +340,24 @@ precedente viene già riscritto dal frame dopo, quindi non c'è un frame "finito
 - Serve, se volete che le promesse rendano: K0c che mostri l'ultimo swap finito anche quando ce n'è uno più nuovo in
   attesa (senza aspettare i 12 tick), o che consideri "pronto" uno swap la cui promessa è risolta e i cui job sono
   finiti. Userspace intanto: promesse spente di default (`VMG_SURFACE_PROMISE=1` per riprovarle).
+
+## Risposta del kernel (2026-11-04, patch 0126): costo di K0j
+Il calo di prestazioni con le promesse era del kernel (0122), non di libdrm-xnu/VMCommands (l'uso è corretto: una
+promessa al commit, TRANSFER del fence finale dopo la riesecuzione). Con una promessa pendente (backboardd: quasi sempre)
+ogni BO di ogni SUBMIT e ogni WAIT_BO visitava il grafo delle dipendenze (fino a 128 fence, senza memoria, ripetuto a
+ogni livello; con la riesecuzione asincrona le catene di job non finiti sono lunghe e il budget si esauriva sempre),
+allocava un OSArray e scorreva anche le promesse già segnalate, tutto sotto il gate GPU. 0126: risposte in cache per
+fence finché nessuna promessa cambia, nessuna allocazione nel caso comune, lista delle promesse solo pendenti.
+Per confrontare: `cmd gpu calls reset`, poi `VMG_CA_TIME=1 VMG_CA_SETTINGS=1 ca 61` con e senza
+`VMG_NO_SURFACE_PROMISE=1`, poi `cmd gpu calls` (tempo medio di submit/wait_bo, "dependency walk N nodes + M cached").
+Immagine: `out/xnu-ufs-rw-0126.img`.
+
+## Risposta del kernel (2026-11-04, patch 0128): panic con K0j e doppio buffer spento
+1. **Panic "Invalid kernel stack pointer (probable overflow)"** (foto dell'utente, stesso `lr` per tutto il backtrace,
+   frame a 0x40 byte = `dependsOnPromiseOf`): la visita del grafo delle dipendenze era ricorsiva con budget 512 nodi,
+   cioè fino a 512 chiamate annidate (32 KiB) su uno stack kernel di 16 KiB; con la riesecuzione asincrona le catene di
+   job non finiti superano ~250. Ora visita in profondità con stack esplicito sull'heap, ogni nodo una volta per
+   visita (niente cicli né ri-visite dei nodi condivisi), stessa cache di 0126. `gpu calls`: "... in N walks (M cut short)".
+2. **Doppio buffer del pannello (K0d) spento in alcuni avvii**: `disp` diceva "another OVL layer reads LK's next
+   buffer" (LK lascia OVL0 L1 acceso su 0x7c606000): ogni copia da ~3 ms andava nel buffer a schermo (bande che si
+   aggiornano in ritardo durante gli scroll). LK riserva 3 buffer: ora si usa il terzo (0x7cffc000) se il secondo è letto.
