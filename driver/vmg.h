@@ -142,6 +142,8 @@ void vmg_shader_release(vmg_device *dev, vmg_shader *sh);
 char **vmg_air_vertex_outputs(const void *bitcode, size_t size, unsigned *count, char **error);
 // Translation tag (cache keys) and a dump of the NIR of a function (tools).
 const char *vmg_air_tag(void);
+// Translation cache (VMG_NO_AIR_CACHE=1 off): lookups answered from disk / translated and stored, this process.
+void vmg_air_cache_stats(uint64_t *hits, uint64_t *misses);
 char *vmg_air_to_nir_text(vmg_device *dev, const vmg_air_input *in, char **error);
 
 typedef struct {

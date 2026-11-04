@@ -2386,8 +2386,8 @@ nir_shader *vmg_air_translate(const nir_shader_compiler_options *options, const 
     return s;
 }
 
-// Varying keys written by a vertex function, in metadata order.
-char **vmg_air_vertex_outputs(const void *bitcode, size_t size, unsigned *count, char **error)
+// Varying keys written by a vertex function, in metadata order (vmg_air_vertex_outputs, vmg_screen.c, caches it).
+char **vmg_air_vertex_outputs_uncached(const void *bitcode, size_t size, unsigned *count, char **error)
 {
     const char *loadError;
     *count = 0;

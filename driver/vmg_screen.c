@@ -17,6 +17,12 @@
 #include "util/format/u_format.h"
 #include "util/xmlconfig.h"
 #include "util/driconf.h"
+#include "util/blob.h"
+#include "util/build_id.h"
+#include "util/disk_cache.h"
+#include "compiler/nir/nir_serialize.h"
+#include <unistd.h>
+#include <sys/stat.h>
 #include "drm-uapi/drm_fourcc.h"
 #include "panfrost/pan_public.h"
 #if VMG_HAVE_LLVMPIPE
@@ -49,9 +55,183 @@ static void load_env_file(void)
     fclose(f);
 }
 
+// ---- Translation cache --------------------------------------------------------------------------------------------
+//
+// AIR -> NIR costs a bitcode parse plus LLVM passes (system libLLVM) for every function every process creates, at
+// every launch (backboardd, each app). The result (serialized NIR + reflection + constant pool) is kept on disk with
+// Mesa's disk_cache, keyed by everything the translation reads; Panfrost's own disk cache (same directory) keeps the
+// Valhall binaries compiled from it. VMG_NO_AIR_CACHE=1 = translate every time; VMG_TRACE_AIR bypasses it.
+static struct disk_cache *g_air_cache;
+static uint64_t g_air_hits, g_air_misses;
+
+#if TARGET_OS_IPHONE
+// One directory per uid that every process of that uid can reach (Mesa's default is $HOME/.cache, which neither
+// backboardd nor sandboxed apps can write); else the process' own cache directory (an app's container).
+static void cache_dir_default(void)
+{
+    if (getenv("MESA_SHADER_CACHE_DIR")) return;
+    char d[1024];
+    snprintf(d, sizeof d, "/private/var/tmp/vmg-cache-%u", (unsigned)getuid());
+    if (mkdir(d, 0700) != 0 && errno != EEXIST) d[0] = 0;
+    if (d[0] && access(d, W_OK) != 0) d[0] = 0;
+    if (!d[0]) {
+        size_t n = confstr(_CS_DARWIN_USER_CACHE_DIR, d, sizeof d);
+        if (n == 0 || n > sizeof d - 8) return;
+        strlcat(d, "vmg", sizeof d);
+    }
+    setenv("MESA_SHADER_CACHE_DIR", d, 0);
+    setenv("MESA_SHADER_CACHE_MAX_SIZE", "256M", 0);   // Mesa's default is 1G per directory
+}
+#endif
+
+static void air_cache_report(void)
+{
+    fprintf(stderr, "vmg: translation cache: %llu hits, %llu translated\n", (unsigned long long)g_air_hits,
+            (unsigned long long)g_air_misses);
+}
+
+static void air_cache_init(void)
+{
+    if (g_air_cache || getenv("VMG_NO_AIR_CACHE") || getenv("VMG_TRACE_AIR")) return;
+    // The driver binary's identity (LC_UUID): a new build never reads an older build's translations.
+    char id[2 * 20 + 1] = "unknown";
+    const struct build_id_note *note = build_id_find_nhdr_for_addr((const void *)air_cache_init);
+    if (note) {
+        const uint8_t *b = build_id_data(note);
+        unsigned n = MIN2(build_id_length(note), 20u);
+        for (unsigned i = 0; i < n; i++) snprintf(id + 2 * i, 3, "%02x", b[i]);
+    }
+    g_air_cache = disk_cache_create(vmg_air_tag(), id, 0);
+    if (getenv("VGPU_STATS")) atexit(air_cache_report);
+}
+
+// Key: translator tag, driver, options the translation reads from the environment, then the inputs.
+static void air_cache_key(vmg_device *dev, const char *kind, const vmg_air_input *in, cache_key key)
+{
+    struct blob b;
+    blob_init(&b);
+    blob_write_string(&b, kind);
+    blob_write_string(&b, dev->screen->get_name(dev->screen));
+    blob_write_uint8(&b, in->half32);
+    blob_write_uint8(&b, getenv("VMG_SSBO_BASE") != NULL);
+    blob_write_uint8(&b, getenv("VMG_LLVM_LEGACY_PM") != NULL);
+    blob_write_uint64(&b, in->bitcode_size);
+    blob_write_bytes(&b, in->bitcode, in->bitcode_size);
+    blob_write_uint32(&b, in->linked_count);
+    for (unsigned i = 0; i < in->linked_count; i++) {
+        blob_write_string(&b, in->linked_names[i] ? in->linked_names[i] : "");
+        blob_write_uint64(&b, in->linked_size[i]);
+        blob_write_bytes(&b, in->linked[i], in->linked_size[i]);
+    }
+    blob_write_uint32(&b, in->varying_count);
+    for (unsigned i = 0; i < in->varying_count; i++) blob_write_string(&b, in->varyings[i]);
+    blob_write_uint8(&b, in->color_formats != NULL);
+    if (in->color_formats) blob_write_bytes(&b, in->color_formats, VMG_MAX_COLOR * sizeof(uint32_t));
+    disk_cache_compute_key(g_air_cache, b.data, b.size, key);
+    blob_finish(&b);
+}
+
+#define VMG_AIR_CACHE_MAGIC 0x564d4741u   // "VMGA"
+
+// vmg_air_translate through the cache.
+static nir_shader *air_translate_cached(vmg_device *dev, const nir_shader_compiler_options *opts, const vmg_air_input *in,
+                                        vmg_reflection *r, struct util_dynarray *pool, char **error)
+{
+    cache_key key;
+    if (g_air_cache) {
+        air_cache_key(dev, "shader", in, key);
+        size_t size = 0;
+        void *data = disk_cache_get(g_air_cache, key, &size);
+        if (data) {
+            struct blob_reader rd;
+            blob_reader_init(&rd, data, size);
+            nir_shader *nir = NULL;
+            if (blob_read_uint32(&rd) == VMG_AIR_CACHE_MAGIC && blob_read_uint32(&rd) == sizeof *r) {
+                blob_copy_bytes(&rd, r, sizeof *r);
+                uint32_t n = blob_read_uint32(&rd);
+                const void *p = blob_read_bytes(&rd, n);
+                void *to = !rd.overrun && n ? util_dynarray_grow_bytes(pool, n, 1) : NULL;
+                if (to) memcpy(to, p, n);
+                if (!rd.overrun && (to || !n)) nir = nir_deserialize(NULL, opts, &rd);
+            }
+            free(data);
+            if (nir && !rd.overrun) {
+                g_air_hits++;
+                return nir;
+            }
+            ralloc_free(nir);
+            util_dynarray_clear(pool);
+        }
+    }
+    nir_shader *nir = vmg_air_translate(opts, in, r, pool, error);
+    if (nir && g_air_cache) {
+        g_air_misses++;
+        struct blob b;
+        blob_init(&b);
+        blob_write_uint32(&b, VMG_AIR_CACHE_MAGIC);
+        blob_write_uint32(&b, sizeof *r);
+        blob_write_bytes(&b, r, sizeof *r);
+        blob_write_uint32(&b, pool->size);
+        blob_write_bytes(&b, pool->data, pool->size);
+        nir_serialize(&b, nir, false);
+        if (!b.out_of_memory) disk_cache_put(g_air_cache, key, b.data, b.size, NULL);
+        blob_finish(&b);
+    }
+    return nir;
+}
+
+char **vmg_air_vertex_outputs(const void *bitcode, size_t size, unsigned *count, char **error)
+{
+    cache_key key;
+    if (g_air_cache) {
+        struct blob b;
+        blob_init(&b);
+        blob_write_string(&b, "vertex-outputs");
+        blob_write_uint64(&b, size);
+        blob_write_bytes(&b, bitcode, size);
+        disk_cache_compute_key(g_air_cache, b.data, b.size, key);
+        blob_finish(&b);
+        size_t n = 0;
+        char *data = disk_cache_get(g_air_cache, key, &n);
+        if (data) {
+            // the keys, each NUL-terminated
+            unsigned k = 0;
+            for (size_t i = 0; i < n; i++) k += data[i] == 0;
+            if (n == 0 || data[n - 1] == 0) {
+                char **keys = calloc(k + 1, sizeof(char *));
+                *count = 0;
+                for (size_t i = 0; i < n; i += strlen(data + i) + 1) keys[(*count)++] = strdup(data + i);
+                free(data);
+                g_air_hits++;
+                return keys;
+            }
+            free(data);
+        }
+    }
+    char **keys = vmg_air_vertex_outputs_uncached(bitcode, size, count, error);
+    if (keys && g_air_cache) {
+        struct blob b;
+        blob_init(&b);
+        for (unsigned i = 0; i < *count; i++) blob_write_bytes(&b, keys[i], strlen(keys[i]) + 1);
+        if (!b.out_of_memory) disk_cache_put(g_air_cache, key, b.data, b.size, NULL);
+        blob_finish(&b);
+    }
+    return keys;
+}
+
+void vmg_air_cache_stats(uint64_t *hits, uint64_t *misses)
+{
+    *hits = g_air_hits;
+    *misses = g_air_misses;
+}
+
 vmg_device *vmg_device_create(const char *which, char *error, size_t error_size)
 {
     load_env_file();
+#if TARGET_OS_IPHONE
+    cache_dir_default();    // before the screen: Panfrost opens its disk cache there too
+#endif
+    air_cache_init();
     if (!which) which = getenv("VMG_DRIVER");
 #if TARGET_OS_IPHONE
     if (!which) which = "panfrost";
@@ -665,7 +845,7 @@ vmg_shader *vmg_shader_create(vmg_device *dev, const vmg_air_input *in, vmg_refl
     const struct nir_shader_compiler_options *opts = dev->screen->nir_options[MESA_SHADER_FRAGMENT];
     vmg_air_input in2 = *in;
     in2.half32 = vmg_half32(dev);
-    nir_shader *nir = vmg_air_translate(opts, &in2, &r, &pool, error);
+    nir_shader *nir = air_translate_cached(dev, opts, &in2, &r, &pool, error);
     if (!nir) { util_dynarray_fini(&pool); return NULL; }
     if (dev->screen->nir_options[nir->info.stage]) nir->options = dev->screen->nir_options[nir->info.stage];
     if (nir->info.stage == MESA_SHADER_FRAGMENT) {

@@ -128,6 +128,7 @@ struct vmg_device {
 // vmg_air.c
 struct nir_shader *vmg_air_translate(const struct nir_shader_compiler_options *options, const vmg_air_input *in,
                                      vmg_reflection *refl, struct util_dynarray *pool, char **error);
+char **vmg_air_vertex_outputs_uncached(const void *bitcode, size_t size, unsigned *count, char **error);
 // vmg_formats.c
 enum pipe_format vmg_pipe_format(unsigned mtl_format);
 enum pipe_format vmg_vertex_format(unsigned mtl_vertex_format);
