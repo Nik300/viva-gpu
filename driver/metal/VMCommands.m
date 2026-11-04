@@ -493,13 +493,14 @@ static void VMWaitCompletion(VMDevice *device, VMCommandQueue *queue, VMCommandB
         // submitted later, the snapshot was read half drawn (black launch cards). Apple's driver registers the work at
         // commit too. VMG_ASYNC_SURFACE_COMMIT=1: asynchronous as before (comparisons).
         //
-        // VMG_SURFACE_PROMISE=1 (kernel uapi minor >= 2, K0i; off by default): the written surfaces are promised to
-        // the kernel instead and the replay stays asynchronous. It deadlocked backboardd on the phone (kernel 0120):
-        // a replay waiting (WAIT_BO, implicit dependency) for another process's job on a promised surface, which
-        // waits for the promise the replay would resolve; the promise timeout did not release it.
+        // Kernel uapi minor >= 2 (K0i): the written surfaces are promised to the kernel instead, and the replay stays
+        // asynchronous: readers wait for the promise, which the replay resolves with the fence of its jobs. CA's thread
+        // goes on with the next frame meanwhile. Needs kernel 0122 (K0j): before it, a replay waiting (WAIT_BO, implicit
+        // dependency) for another process's job that waited for our promise deadlocked backboardd; the uapi version
+        // does not tell, so on older kernels set VMG_NO_SURFACE_PROMISE=1 (synchronous as before).
         static int async_surface = -1, promises = -1;
         if (async_surface < 0) async_surface = getenv("VMG_ASYNC_SURFACE_COMMIT") != NULL;
-        if (promises < 0) promises = getenv("VMG_SURFACE_PROMISE") != NULL;
+        if (promises < 0) promises = getenv("VMG_NO_SURFACE_PROMISE") == NULL;
         uint32_t promise = cb.writesSurface && !async_surface && promises ? [cb promiseWrittenSurfaces:device] : 0;
         void (^submit)(dispatch_block_t) = cb.writesSurface && !async_surface && !promise
                                                ? ^(dispatch_block_t b) { [device gpuSync:b]; }

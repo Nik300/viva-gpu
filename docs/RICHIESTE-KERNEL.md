@@ -303,3 +303,30 @@ impostato e corretto da timed/NTP): i due divergono. Dalla 0120 il kernel usa la
 risoluzione µs), quindi `timeout_ns`/`timeout_nsec` sono davvero CLOCK_MONOTONIC dello userspace. `cmd gpu clocks`
 stampa i due orologi e la differenza. Il workaround (attese senza timeout finito, 7bfdc01) può restare o essere tolto
 dopo aver visto `gpu clocks` sulla 0120. Immagine: `out/xnu-ufs-rw-0120.img` (0118 + 0119 + 0120).
+
+## Risposta del kernel (2026-11-04, patch 0122): K0j
+1. **Stallo con le promesse.** Tre cause nel kernel, tutte corrette:
+   - (a) Ogni fence non ancora segnalato ora ricorda da cosa dipende (le dipendenze del suo job; una promessa risolta:
+     il fence che segue). Per una connessione con una promessa pendente, WAIT_BO e le dipendenze implicite di SUBMIT
+     non aspettano un fence che dipende (anche indirettamente, tramite job di altri processi o promesse risolte) da
+     quella promessa: aspettano ciò che quel fence aspettava. Un job di SpringBoard che dipende dalla nostra promessa
+     resta l'ultimo fence della superficie (verrà dopo il nostro lavoro promesso), il nostro job non lo aspetta.
+   - Le code per slot erano FIFO **globali**: un job di SpringBoard in testa alla coda fragment, in attesa della
+     promessa di backboardd, bloccava i job di backboardd che dovevano risolverla. Ora FIFO **per connessione** (come
+     le entity di drm_sched in Linux): parte il primo job la cui connessione non ha job precedenti ancora in attesa
+     nello stesso slot. Il fast kick (K0e) arma lo stesso candidato.
+   - (b) Il timeout di una promessa (e una promessa risolta con un fence già segnalato) ora fa `kick`: prima i job in
+     attesa restavano in coda finché non arrivava un'altra SUBMIT (`queued 1/1, running 0/0` per sempre).
+   Non coperto: IOSurfaceLock dal CPU (non sa di quale connessione è il chiamante) aspetta ancora tutto; se serve,
+   ditelo. `gpu calls`: "K0j: N waits past an own promise, N jobs started ahead of another connection's, N queued
+   jobs dropped at close". Le promesse si possono riprovare con `VMG_SURFACE_PROMISE=1`.
+2. **Fault dopo `vctl kill backboardd`.** Alla chiusura della connessione i suoi job ancora in coda vengono scartati
+   (fence segnalati con kIOReturnAborted, così i job di altri processi che li aspettano proseguono) e si attende fino
+   a 1 s quelli in esecuzione, prima di rilasciare BO e spazio di indirizzi. Log: `connection closed with N queued
+   jobs: dropped`.
+Immagine: `out/xnu-ufs-rw-0122.img` (0121 batteria + 0122).
+
+Userspace dopo 0122 (2026-11-04): promesse di nuovo attive di default (`VMG_NO_SURFACE_PROMISE=1` le spegne). Richiesta
+piccola: **alzare `VGPU_UAPI_MINOR` a 3** (o un `GET_PARAM`) per le attese consapevoli delle promesse, così il driver
+può accenderle solo sui kernel che le hanno: oggi su 0119-0121 (minor 2) userebbe le promesse e si bloccherebbe.
+IOSurfaceLock dal CPU: per ora non serve (il driver non promette superfici che copia dal CPU).
