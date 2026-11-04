@@ -20,6 +20,13 @@ struct vmg_resource {
     struct pipe_transfer *transfer;   // persistent map of a buffer (contents)
     void *map;
     size_t size;
+    // Buffer textures over this buffer (vmg_texture_sync) copy in again only after something may have changed it:
+    // the GPU (every command that may write it bumps gpu_writes) or the CPU. A newBufferWithBytesNoCopy buffer the
+    // driver could not alias (user_copy: the bytes were copied into the BO at creation) changes on the CPU only
+    // through -contents (cpu_access); every other buffer is hashed.
+    uint64_t gpu_writes;
+    bool user_copy;
+    volatile bool cpu_access;
 };
 
 struct vmg_texture {
@@ -42,6 +49,7 @@ struct vmg_texture {
     // Linear textures over a buffer the driver cannot alias (Panfrost: no user memory): same, from/to the buffer.
     vmg_resource *buffer; size_t buffer_offset, buffer_bpr;
     uint64_t buffer_hash;             // XXH3 of the buffer bytes at the last copy-in: unchanged = no copy-in
+    uint64_t buffer_gen;              // buffer->gpu_writes at the last copy-in (user_copy buffers: no hashing)
     bool buffer_hash_valid;
     uint64_t copy_epoch;              // dev->copy_epoch at the last copy (see vmg_texture_sync)
     bool copy_out_pending;            // the GPU wrote it this command buffer; copied out at the flush (vmg_flush)

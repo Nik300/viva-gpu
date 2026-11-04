@@ -53,6 +53,8 @@ bool vmg_format_supported(vmg_device *dev, unsigned mtl_format, bool render_targ
 // Buffers: always CPU-visible; *contents receives a persistent, coherent mapping (Metal's -contents). With
 // user_memory (newBufferWithBytesNoCopy) the buffer aliases that memory where the driver can (else NULL).
 vmg_resource *vmg_buffer_create(vmg_device *dev, size_t size, void *user_memory, void **contents);
+// The CPU got the buffer's contents pointer (it may write it from now on; any thread).
+void vmg_buffer_cpu_access(vmg_resource *r);
 void vmg_resource_release(vmg_device *dev, vmg_resource *res);
 
 enum vmg_texture_type { VMG_TEX_1D, VMG_TEX_1D_ARRAY, VMG_TEX_2D, VMG_TEX_2D_ARRAY, VMG_TEX_2D_MS,

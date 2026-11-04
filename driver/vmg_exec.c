@@ -63,7 +63,12 @@ void vmg_texture_sync(vmg_device *dev, vmg_texture *t, bool to_texture)
     // Valhall cannot sample in place (not 64-byte multiples), and their full copy-in at every command buffer was most
     // of a frame (two wallpaper images ~14 MB, plus an upload blit each). The bytes are hashed instead (XXH3, a
     // fraction of the copy) and copied only when they changed. VMG_SURFACE_RECOPY=1 copies them every time.
-    if (to_texture && t->buffer && !recopy) {
+    if (to_texture && t->buffer && !recopy && t->buffer->user_copy && !t->buffer->cpu_access) {
+        if (t->buffer_hash_valid && t->buffer_gen == t->buffer->gpu_writes) return;
+        t->buffer_gen = t->buffer->gpu_writes;
+        t->buffer_hash_valid = true;
+    } else if (to_texture && t->buffer && !recopy) {
+        t->buffer_gen = t->buffer->gpu_writes;
         size_t len = (size_t)bpr * (util_format_get_nblocksy(t->res->format, h) - 1) + util_format_get_stride(t->res->format, w);
         if (t->buffer_offset + len <= t->buffer->res->width0) {
             uint64_t hash = XXH3_64bits(base, len);
@@ -73,6 +78,7 @@ void vmg_texture_sync(vmg_device *dev, vmg_texture *t, bool to_texture)
         }
     } else if (t->buffer) {
         t->buffer_hash_valid = false;   // copied out (the buffer now holds the texture) or recopy: hash again
+        if (!to_texture) t->buffer->gpu_writes++;
     }
     uint32_t lock_seed = 0;
     if (s) IOSurfaceLock(s, to_texture ? kIOSurfaceLockReadOnly : 0, &lock_seed);
@@ -437,6 +443,7 @@ void vmg_cmd_set_buffer(vmg_device *dev, enum vmg_stage stage, unsigned slot, vm
     struct vmg_stage_bindings *b = &dev->stage[stage];
     struct pipe_shader_buffer *sb = &b->buffers[slot];
     sb->buffer = buf ? buf->res : NULL;
+    if (buf) buf->gpu_writes++;   // a shader may write it
     sb->buffer_offset = (unsigned)offset;
     sb->buffer_size = buf ? (unsigned)(buf->res->width0 - offset) : 0;
     b->strides[slot] = (uint32_t)stride;
@@ -745,12 +752,14 @@ void vmg_cmd_copy_buffer(vmg_device *dev, vmg_resource *src, size_t so, vmg_reso
 {
     struct pipe_box box;
     u_box_1d((int)so, (int)size, &box);
+    dst->gpu_writes++;
     dev->pipe->resource_copy_region(dev->pipe, dst->res, 0, (unsigned)doff, 0, 0, src->res, 0, &box);
 }
 
 void vmg_cmd_fill_buffer(vmg_device *dev, vmg_resource *dst, size_t off, size_t size, uint8_t value)
 {
     uint32_t v = value * 0x01010101u;
+    dst->gpu_writes++;
     if (!(off & 3) && !(size & 3)) dev->pipe->clear_buffer(dev->pipe, dst->res, (unsigned)off, (unsigned)size, &v, 4);
     else dev->pipe->clear_buffer(dev->pipe, dst->res, (unsigned)off, (unsigned)size, &value, 1);
 }
@@ -825,6 +834,7 @@ void vmg_cmd_copy_texture_to_buffer(vmg_device *dev, vmg_texture *src, unsigned 
     size_t total = image_pitch ? image_pitch * MAX2(d, 1) : row_pitch * h;
     u_box_1d((int)off, (int)MIN2(total, dst->res->width0 - off), &dbox);
     struct pipe_transfer *x0 = NULL;
+    dst->gpu_writes++;
     uint8_t *out = dev->pipe->buffer_map(dev->pipe, dst->res, 0, PIPE_MAP_WRITE, &dbox, &x0);
     if (!out) return;
     vmg_texture_read(dev, src, level, slice, x, y, z, w, h, d, out, row_pitch, image_pitch ? image_pitch : row_pitch * h);
@@ -892,6 +902,7 @@ static void resolve_visibility(vmg_device *dev, struct vmg_fence_ext *fe)
         vis_entry *e = &fe->vis[i];
         union pipe_query_result r = {0};
         if (dev->pipe->get_query_result(dev->pipe, e->q, true, &r) && e->buffer && e->buffer->map) {
+            e->buffer->gpu_writes++;
             uint64_t *slot = (uint64_t *)((uint8_t *)e->buffer->map + e->offset);
             if (e->boolean) *slot = *slot || r.b;
             else *slot += r.u64;

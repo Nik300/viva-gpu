@@ -458,9 +458,17 @@ vmg_resource *vmg_buffer_create(vmg_device *dev, size_t size, void *user_memory,
     r->map = dev->pipe->buffer_map(dev->pipe, r->res, 0,
                                    PIPE_MAP_READ | PIPE_MAP_WRITE | PIPE_MAP_PERSISTENT | PIPE_MAP_COHERENT | PIPE_MAP_UNSYNCHRONIZED,
                                    &box, &r->transfer);
-    if (user_memory && r->map != user_memory && r->map) memcpy(r->map, user_memory, size);   // copy fallback
+    if (user_memory && r->map != user_memory && r->map) {   // copy fallback
+        memcpy(r->map, user_memory, size);
+        r->user_copy = true;
+    }
     if (contents) *contents = r->map;
     return r;
+}
+
+void vmg_buffer_cpu_access(vmg_resource *r)
+{
+    if (r && !r->cpu_access) r->cpu_access = true;
 }
 
 void vmg_resource_release(vmg_device *dev, vmg_resource *r)

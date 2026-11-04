@@ -48,7 +48,10 @@ VM_CATCH_ALL(VMBuffer)
 
 - (id<MTLDevice>)device { return _device; }
 - (NSUInteger)length { return _length; }
-- (void *)contents { return _contents; }
+- (void *)contents {
+    vmg_buffer_cpu_access(_vmg);   // a NoCopy buffer may change from now on (buffer textures over it hash it)
+    return _contents;
+}
 - (MTLResourceOptions)resourceOptions { return _options; }
 - (MTLStorageMode)storageMode { return (MTLStorageMode)((_options & MTLResourceStorageModeMask) >> MTLResourceStorageModeShift); }
 - (MTLCPUCacheMode)cpuCacheMode { return (MTLCPUCacheMode)((_options & MTLResourceCPUCacheModeMask) >> MTLResourceCPUCacheModeShift); }
