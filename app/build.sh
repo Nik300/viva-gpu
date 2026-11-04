@@ -33,6 +33,7 @@ cp "$HERE/Info.plist" "$APP/Info.plist"
 plutil -convert binary1 "$APP/Info.plist"
 cp "$HERE"/Resources/*.json "$HERE"/Resources/icons/*.png "$APP/"
 printf 'APPL????' > "$APP/PkgInfo"
+rm -rf "$OUT"/*.dSYM; mv "$APP"/*.dSYM "$OUT"/ 2>/dev/null || true   # clang -g puts them next to the binaries
 codesign -s - -f "$APP/vmhelper"
 codesign -s - -f --entitlements "$HERE/VivaManager.entitlements" "$APP"
 (cd "$OUT" && rm -f VivaManager.tar && tar cf VivaManager.tar VivaManager.app)

@@ -290,7 +290,8 @@ enum { SecActions, SecAll, SecGroups };
 
 - (NSString *)tableView:(UITableView *)tv titleForFooterInSection:(NSInteger)s {
     if (s == SecActions) return @"Le chiavi interne servono a test e debug di Apple: alcune possono rendere SpringBoard instabile.";
-    if (s == SecAll) return [NSString stringWithFormat:@"%lu chiavi da 51 classi di SpringBoard (iOS 16.7).", (unsigned long)_catalog.count];
+    if (s == SecAll) return [NSString stringWithFormat:@"%lu chiavi da 51 classi di SpringBoard (iOS 16.7). Valori salvati: "
+                                                      @"tutto ciò che è scritto in com.apple.springboard.", (unsigned long)_catalog.count];
     return nil;
 }
 
@@ -320,7 +321,7 @@ enum { SecActions, SecAll, SecGroups };
     }
     c.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     if (ip.section == SecAll) {
-        NSArray *t = @[@"Tutte le impostazioni", @"Valori salvati in com.apple.springboard", @"Aggiungi o modifica una chiave…"];
+        NSArray *t = @[@"Tutte le impostazioni", @"Valori salvati", @"Aggiungi o modifica una chiave…"];
         c.textLabel.text = t[ip.row];
         if (ip.row == 0) c.detailTextLabel.text = [NSString stringWithFormat:@"%lu", (unsigned long)self.visible.count];
         if (ip.row == 1) c.detailTextLabel.text = [NSString stringWithFormat:@"%lu", (unsigned long)self.savedItems.count];

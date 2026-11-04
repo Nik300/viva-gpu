@@ -169,7 +169,7 @@ static UIColor *LoadColor(double f) {
         @{@"title": @"Utilizzo", @"rows": @[
             @{@"t": @"Totale", @"d": Pct(s.cpuTotal), @"bar": @(s.cpuTotal), @"color": LoadColor(s.cpuTotal)},
             Row(@"Utente", Pct(s.cpuUser)), Row(@"Sistema", Pct(s.cpuSystem)),
-            Row(@"Carico medio (1/5/15 min)", [NSString stringWithFormat:@"%.2f  %.2f  %.2f", s.load1, s.load5, s.load15]),
+            @{@"t": @"Carico medio", @"s": @"1 / 5 / 15 minuti", @"d": [NSString stringWithFormat:@"%.2f %.2f %.2f", s.load1, s.load5, s.load15]},
             Row(@"Core attivi", [NSString stringWithFormat:@"%lu", (unsigned long)n]),
             Row(@"Processi", s.processes.count ? [NSString stringWithFormat:@"%lu", (unsigned long)s.processes.count] : @"…"),
             Row(@"Acceso da", VMDuration(s.uptime))]},
