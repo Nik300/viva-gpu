@@ -1,6 +1,8 @@
 // Viva Metal - Gallium back-end: device, resources, state objects, shaders and pipelines (see vmg.h).
 #include "vmg_internal.h"
 #include <errno.h>
+#include <limits.h>
+#include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -55,10 +57,16 @@ static void load_env_file(void)
     }
     fclose(f);
     // VMG_STDERR=PATH: the driver's messages of processes whose stderr goes nowhere (backboardd), appended to PATH.
+    // VMG_STDERR=auto: <the process's own temporary directory>/vmgerr, which sandboxed daemons (chronod) may write.
     const char *err = getenv("VMG_STDERR");
     if (err && *err) {
-        char path[1024];
-        snprintf(path, sizeof path, "%s.%d", err, (int)getpid());
+        char path[1024], dir[PATH_MAX] = "";
+        if (!strcmp(err, "auto")) {
+            if (!confstr(_CS_DARWIN_USER_TEMP_DIR, dir, sizeof dir)) strcpy(dir, "/private/var/tmp/");
+            snprintf(path, sizeof path, "%svmgerr.%s.%d", dir, getprogname(), (int)getpid());
+        } else {
+            snprintf(path, sizeof path, "%s.%d", err, (int)getpid());
+        }
         if (freopen(path, "a", stderr)) setvbuf(stderr, NULL, _IOLBF, 0);
     }
 }
