@@ -330,11 +330,20 @@ static void VMCollectSurfaceID(const void *value, void *ctx) {
     if (copied || !n) return 0;
     return vmg_surface_promise(device.vmg, ids.bytes, n);
 }
+// IOSurface use counts held from commit to completion (from metal-shim). Since kernel 0133 they are visible to other
+// processes (IOSurfaceIsInUse = state page +0x18): an app's CABackingStore then sees its own buffer, or one backboardd
+// is compositing, "in use" until our GPU work completes. VMG_NO_SURFACE_USECOUNT=1 = do not hold them (A/B).
+static BOOL VMSurfaceUseCounts(void) {
+    static BOOL on;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ on = getenv("VMG_NO_SURFACE_USECOUNT") == NULL; });
+    return on;
+}
 static void VMSurfaceUse(const void *value, void *ctx) {
     if (ctx) IOSurfaceIncrementUseCount((IOSurfaceRef)value); else IOSurfaceDecrementUseCount((IOSurfaceRef)value);
 }
-- (void)beginSurfaceUse { if (_surfaces) CFSetApplyFunction(_surfaces, VMSurfaceUse, (void *)1); }
-- (void)endSurfaceUse { if (_surfaces) CFSetApplyFunction(_surfaces, VMSurfaceUse, NULL); }
+- (void)beginSurfaceUse { if (_surfaces && VMSurfaceUseCounts()) CFSetApplyFunction(_surfaces, VMSurfaceUse, (void *)1); }
+- (void)endSurfaceUse { if (_surfaces && VMSurfaceUseCounts()) CFSetApplyFunction(_surfaces, VMSurfaceUse, NULL); }
 
 - (void)execute {
     [_lock lock];
