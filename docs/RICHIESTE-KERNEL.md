@@ -402,3 +402,19 @@ magic). Proposta, nel driver UFS (che già legge la GPT della LUN 2, `pull part:
   `vivanobootargswrite=1` che disattiva la scrittura.
 L'app mostra `kern.bootargs` (avvio attuale) accanto a quella del prossimo avvio. Senza KA2 salva la riga voluta in
 `/private/var/root/viva-next-bootargs` (per `VIVA_CMDLINE` di `viva-mkboot.sh` sul Mac).
+
+### Stato KA1/KA2: patch 0146 (2026-11-04, non provata sul telefono)
+- `kern.viva_link` (bsd/dev/viva_sysctl.c), CTLTYPE_OPAQUE RW ANYBODY: newp = comando, oldp = risposta NUL-terminata
+  (max 8 KiB, "...\n" se tagliata). Per tutti: `stat`, `gpu` [`status|freq|dvfs|lat|calls|clocks|kv`], `disp` [`kv`],
+  `bat`, `cpu`, `wifi` [`status|sta`] (confronto esatto degli argomenti: `gpu freq 800` non è sola lettura). Root: anche gli
+  altri sottocomandi di gpu/disp/bat/cpu/wifi. Mai peek/poke/pmic/i2c/push/pull/run/panic/reboot. Non root su un comando
+  che cambia stato: errno EPERM (la risposta dice "needs root"); comando sconosciuto: ENOTSUP + usage.
+- `gpu kv`: tutte le chiavi elencate sopra (busy_ns = nuovo contatore cumulativo del tempo con un job in esecuzione;
+  vgpu_mv/vsram_mv = tensioni dell'OPP corrente; senza driver GPU: `powered=0`). `disp kv`: le chiavi elencate più
+  `logical_width`, `logical_height`, `scanout_live`, `copies`, `flip`, `swapwait_busy`.
+- `kern.viva_nextbootargs` (CTLTYPE_STRING): lettura per tutti, scrittura solo root (EPERM), dal payload di `boot_b`
+  (`boot_a` se `androidboot.slot_suffix=_a`). Controlli e scrittura come proposto (bsd/dev/sweet_ufs.c
+  `sweet_ufs_bootargs`): solo partizioni GPT chiamate esattamente boot_a/boot_b sulla LUN della root, header v2,
+  SWEETXNU v1, un solo blocco da 4 KiB riscritto, SYNCHRONIZE CACHE, rilettura e confronto. Spazi/a capo finali tolti.
+  `kern.viva_nextbootargs_orig` (sola lettura): la riga trovata al primo uso di una delle due sysctl. Boot-arg
+  `vivanobootargswrite=1` = scrittura rifiutata (EPERM).

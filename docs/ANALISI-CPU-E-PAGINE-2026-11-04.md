@@ -113,3 +113,24 @@ Misure (`disp lat`, intervalli oltre 8 frame esclusi):
   - ritirare prima la pagina vecchia: in scanout non si può, perché la OVL la legge fino allo switch;
   - accorciare ognuno dei tre tratti: CPU più veloce (sezione 1), GPU, e il tempo "scelto -> a schermo"
     (in media mezzo frame, normale per il double buffer).
+
+## 3. Aggiornamento: disassemblato di QuartzCore (dyld cache 20H392 estratto)
+
+Correzioni ad ANALISI-SCANOUT-RE §1.1-1.2:
+- `+0x358` è la prossima pagina da disegnare, `+0x35c` l'ultima inviata. Il ring ha **3 pagine fisse** (ctor
+  AppleDisplay @0x1883ad1e8: count 3, oppure 1 con CA_BENCHMARK). Nessuna impostazione lo cambia.
+- `can_update_` @0x1882be944 controlla al massimo 2 slot, si ferma alla prima pagina occupata e **basta una pagina
+  libera**. Quindi CA ammette 2 frame in volo: F(k+1) parte quando F(k-2) è ritirato, cioè quando F(k-1) è a schermo.
+  Con esattamente una pagina libera imposta la modalità "triple buffered" (presentazione prevista un frame dopo).
+- Se il controllo fallisce: polling di SwapWait fino a 1 ms (ogni 100 µs, `swap_wait_timeout`), poi la damage
+  resta in sospeso e si riprova **alla vsync successiva**. Ogni mancato riuso costa una vsync intera.
+- Nel kernel l'ordine è giusto: `vsyncFired` fa prima lo switch (`vblankTick`, che ritira la pagina vecchia) e solo
+  dopo invia la notifica vsync a CA.
+- Quindi la catena in serie di Impostazioni non viene dal ring di CA. Ipotesi principale: il **backing store
+  dell'app**. Preferences ridisegna le celle in IOSurface (CABackingStore) e può riusarle solo quando
+  `IOSurfaceIsInUse` torna 0, cioè dopo il frame GPU di backboardd che le legge; sulla home le icone non vengono
+  ridisegnate.
+- Verifiche:
+  - il contatore dei fallimenti di `can_update` (display +0x258) prima e dopo uno scroll;
+  - le use count (traps 0/1) per superficie, cioè per quanto tempo restano > 0 dopo il commit;
+  - uno spindump di Preferences durante lo scroll.
