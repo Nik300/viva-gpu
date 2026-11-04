@@ -10,6 +10,8 @@
 #include "util/u_math.h"
 #include "util/u_gen_mipmap.h"
 #include "util/format/u_format.h"
+#define XXH_INLINE_ALL
+#include "util/xxhash.h"
 #include "compiler/shader_enums.h"
 #include <IOSurface/IOSurfaceRef.h>
 #include "panfrost/pan_fence.h"   // vmg_surface_promise_resolve (Panfrost only)
@@ -57,6 +59,21 @@ void vmg_texture_sync(vmg_device *dev, vmg_texture *t, bool to_texture)
         bpr = planar ? IOSurfaceGetBytesPerRowOfPlane(s, t->plane) : IOSurfaceGetBytesPerRow(s);
     }
     uint32_t w = t->res->width0, h = t->res->height0;
+    // A buffer has no seed: CoreAnimation's layer images (wallpaper, icons, glyphs) are buffer textures with pitches
+    // Valhall cannot sample in place (not 64-byte multiples), and their full copy-in at every command buffer was most
+    // of a frame (two wallpaper images ~14 MB, plus an upload blit each). The bytes are hashed instead (XXH3, a
+    // fraction of the copy) and copied only when they changed. VMG_SURFACE_RECOPY=1 copies them every time.
+    if (to_texture && t->buffer && !recopy) {
+        size_t len = (size_t)bpr * (util_format_get_nblocksy(t->res->format, h) - 1) + util_format_get_stride(t->res->format, w);
+        if (t->buffer_offset + len <= t->buffer->res->width0) {
+            uint64_t hash = XXH3_64bits(base, len);
+            if (t->buffer_hash_valid && hash == t->buffer_hash) return;
+            t->buffer_hash = hash;
+            t->buffer_hash_valid = true;
+        }
+    } else if (t->buffer) {
+        t->buffer_hash_valid = false;   // copied out (the buffer now holds the texture) or recopy: hash again
+    }
     uint32_t lock_seed = 0;
     if (s) IOSurfaceLock(s, to_texture ? kIOSurfaceLockReadOnly : 0, &lock_seed);
     // VMG_TRACE_SURF=1: every copy of a surface-backed texture (surface id, seed, how much of it is still zero).

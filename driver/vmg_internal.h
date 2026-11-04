@@ -41,6 +41,8 @@ struct vmg_texture {
     bool surface_seed_valid;
     // Linear textures over a buffer the driver cannot alias (Panfrost: no user memory): same, from/to the buffer.
     vmg_resource *buffer; size_t buffer_offset, buffer_bpr;
+    uint64_t buffer_hash;             // XXH3 of the buffer bytes at the last copy-in: unchanged = no copy-in
+    bool buffer_hash_valid;
     uint64_t copy_epoch;              // dev->copy_epoch at the last copy (see vmg_texture_sync)
     bool copy_out_pending;            // the GPU wrote it this command buffer; copied out at the flush (vmg_flush)
 };
