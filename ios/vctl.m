@@ -8,6 +8,7 @@
 //   vctl burst PATH N MS [CMD ...]   N frames MS apart (changed framebuffers, 1:3) while CMD runs
 //   vctl surf ID PATH                one IOSurface's planes as PATH-pN.raw (+ layout, how much is non-zero)
 //   vctl ls DIR                      directory listing, newest first (iOS has no ls)
+//   vctl ext [TEXT]                  app extensions LaunchServices knows (bundle id, extension point, path), filtered
 //   vctl unlock                      unlock (no passcode) through FrontBoard
 //   vctl kill NAME [SIG]             signal every process with that name (default SIGKILL; iOS has no kill):
 //                                    `vctl kill backboardd` restarts the render server with a new driver (launchd
@@ -298,6 +299,30 @@ static int ls(const char *dir) {
     return 0;
 }
 
+// ext [TEXT]: every extension record in the LaunchServices database whose bundle id, extension point or path contains
+// TEXT (PosterBoard finds the wallpaper providers through the com.apple.posterkit.provider point).
+static int listExtensions(const char *filter) {
+    dlopen("/System/Library/Frameworks/CoreServices.framework/CoreServices", RTLD_NOW);
+    Class rec = NSClassFromString(@"LSApplicationExtensionRecord");
+    if (![rec respondsToSelector:@selector(enumeratorWithOptions:)]) { fprintf(stderr, "vctl: no LSApplicationExtensionRecord\n"); return 1; }
+    NSEnumerator *en = [rec performSelector:@selector(enumeratorWithOptions:) withObject:(id)0];
+    NSString *f = filter ? @(filter).lowercaseString : nil;
+    unsigned all = 0, shown = 0;
+    for (id r in en) {
+        all++;
+        NSString *bid = [r valueForKey:@"bundleIdentifier"] ?: @"?";
+        id point = nil;
+        @try { point = [[r valueForKey:@"extensionPointRecord"] valueForKey:@"identifier"]; } @catch (id e) {}
+        NSString *path = [[r valueForKey:@"URL"] path] ?: @"?";
+        NSString *line = [NSString stringWithFormat:@"%@  %@  %@", bid, point ?: @"?", path];
+        if (f && ![line.lowercaseString containsString:f]) continue;
+        printf("%s\n", line.UTF8String);
+        shown++;
+    }
+    printf("%u of %u extension records\n", shown, all);
+    return 0;
+}
+
 // kill NAME [SIG]: every process whose name (p_comm) is NAME.
 static int killName(const char *name, int sig) {
     int mib[3] = { CTL_KERN, KERN_PROC, KERN_PROC_ALL };
@@ -322,6 +347,7 @@ int main(int argc, char **argv) { @autoreleasepool {
         fprintf(stderr, "usage: vctl open BUNDLE | tap X Y | swipe X1 Y1 X2 Y2 [MS] | home | unlock | shot PATH | ls DIR   (X Y in 0..1)\n");
         return 2;
     }
+    if (!strcmp(argv[1], "ext")) return listExtensions(argc >= 3 ? argv[2] : NULL);
     if (!strcmp(argv[1], "kill") && argc >= 3) return killName(argv[2], argc >= 4 ? atoi(argv[3]) : SIGKILL);
     if (!strcmp(argv[1], "burst") && argc >= 5) return burst(argv[2], atoi(argv[3]), atoi(argv[4]), argc - 5, argv + 5);
     return dispatch_action(argc - 1, argv + 1);
