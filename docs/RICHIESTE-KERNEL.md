@@ -330,3 +330,13 @@ Userspace dopo 0122 (2026-11-04): promesse di nuovo attive di default (`VMG_NO_S
 piccola: **alzare `VGPU_UAPI_MINOR` a 3** (o un `GET_PARAM`) per le attese consapevoli delle promesse, così il driver
 può accenderle solo sui kernel che le hanno: oggi su 0119-0121 (minor 2) userebbe le promesse e si bloccherebbe.
 IOSurfaceLock dal CPU: per ora non serve (il driver non promette superfici che copia dal CPU).
+
+### K0k. Display e promesse (2026-11-04, 0123 sul telefono)
+Con le promesse (0122 ok: nessuno stallo, 0 scadute su ~3500) i frame mostrati durante gli scroll di Impostazioni
+scendono: ~25 fps (6 campioni) contro ~42 con il commit sincrono, mentre backboardd ne renderizza di più. `disp`:
+"frames shown anyway" +37 per giro (contro +1). Ipotesi: K0c guarda le superfici dello swap più recente, che col
+commit asincrono sono quasi sempre ancora sotto promessa (la riesecuzione non è ancora finita) e il buffer dello swap
+precedente viene già riscritto dal frame dopo, quindi non c'è un frame "finito" da mostrare fino al limite di 12 tick.
+- Serve, se volete che le promesse rendano: K0c che mostri l'ultimo swap finito anche quando ce n'è uno più nuovo in
+  attesa (senza aspettare i 12 tick), o che consideri "pronto" uno swap la cui promessa è risolta e i cui job sono
+  finiti. Userspace intanto: promesse spente di default (`VMG_SURFACE_PROMISE=1` per riprovarle).
