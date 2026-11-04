@@ -465,7 +465,7 @@ void vmg_cmd_set_buffer(vmg_device *dev, enum vmg_stage stage, unsigned slot, vm
     struct vmg_stage_bindings *b = &dev->stage[stage];
     struct pipe_shader_buffer *sb = &b->buffers[slot];
     sb->buffer = buf ? buf->res : NULL;
-    if (buf) buf->gpu_writes++;   // a shader may write it
+    b->res[slot] = buf;           // gpu_writes: counted at the draws whose shaders write it (bind_stage)
     sb->buffer_offset = (unsigned)offset;
     sb->buffer_size = buf ? (unsigned)(buf->res->width0 - offset) : 0;
     b->strides[slot] = (uint32_t)stride;
@@ -553,6 +553,33 @@ static void bind_stage(vmg_device *dev, enum vmg_stage stage, vmg_shader *sh, co
     // Constant buffer 0: system values (buffer bases, grid, threadgroup offsets, sample count).
     uint32_t *header = dev->sysvals[stage];
     memset(header, 0, VMG_SYSVAL_HEADER);
+    // Buffers this shader may write: buffer textures over them copy in again (vmg_texture_sync), pushes read them
+    // synchronized.
+    for (uint32_t w = r->buffers_written & r->buffers_used; w; w &= w - 1) {
+        vmg_resource *res = b->res[__builtin_ctz(w)];
+        if (res) res->gpu_writes++;
+    }
+    // Push window: the bytes of the small constant buffers, from the bound buffer (a setBytes chunk or a buffer).
+    for (uint32_t p = r->push_slots; p; p &= p - 1) {
+        unsigned slot = __builtin_ctz(p), size = r->push_size[slot];
+        uint8_t *dst = (uint8_t *)header + VMG_SYSVAL_HEADER + r->push_offset[slot];
+        vmg_resource *res = b->res[slot];
+        size_t off = b->buffers[slot].buffer_offset;
+        if (!res || !res->res || off >= res->res->width0) { memset(dst, 0, size); continue; }
+        unsigned n = (unsigned)MIN2((size_t)size, res->res->width0 - off);
+        if (res->gpu_writes) {
+            // The GPU may have written it (blit, compute): a mapped read waits for those writes.
+            struct pipe_box box;
+            u_box_1d((int)off, (int)n, &box);
+            struct pipe_transfer *x = NULL;
+            const uint8_t *m = pipe->buffer_map(pipe, res->res, 0, PIPE_MAP_READ, &box, &x);
+            if (m) { memcpy(dst, m, n); pipe->buffer_unmap(pipe, x); } else memset(dst, 0, n);
+        } else {
+            const uint8_t *src = res->user_ptr && !res->cpu_access ? (const uint8_t *)res->user_ptr : (const uint8_t *)res->map;
+            if (src) memcpy(dst, src + off, n); else memset(dst, 0, n);
+        }
+        if (n < size) memset(dst + n, 0, size - n);
+    }
     if (extra_header) memcpy(header, extra_header, extra_words * 4);
     header[12] = dev->pass.samples ? dev->pass.samples : 1;
     struct pipe_shader_buffer ssbo[VMG_MAX_BUFFERS];
@@ -576,7 +603,8 @@ static void bind_stage(vmg_device *dev, enum vmg_stage stage, vmg_shader *sh, co
         for (unsigned i = 0; i < count; i++)
             fprintf(stderr, "vmg: stage %d ssbo %u res %p off %u size %u base %u\n", stage, i, (void *)ssbo[i].buffer,
                     ssbo[i].buffer_offset, ssbo[i].buffer_size, header[16 + i]);
-    struct pipe_constant_buffer cb = { .buffer = NULL, .buffer_offset = 0, .buffer_size = VMG_SYSVAL_HEADER, .user_buffer = header };
+    struct pipe_constant_buffer cb = { .buffer = NULL, .buffer_offset = 0,
+                                       .buffer_size = VMG_SYSVAL_HEADER + (r->push_slots ? VMG_PUSH_WINDOW : 0), .user_buffer = header };
     pipe->set_constant_buffer(pipe, gs, 0, &cb);
     if (sh->pool_buffer) {
         struct pipe_constant_buffer pc = { .buffer = sh->pool_buffer, .buffer_offset = 0, .buffer_size = sh->pool_buffer->width0 };

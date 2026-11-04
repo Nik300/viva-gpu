@@ -10,6 +10,8 @@
 //       threadgroup memory                     -> shared memory     (load_shared / store_shared)
 //       private memory (allocas)               -> scratch           (load_scratch / store_scratch)
 //       constant tables (module globals)       -> constant buffer 1 (the shader's pool)
+//       small constant buffers                 -> constant buffer 0, push window (constant T &x [[buffer(n)]] up to
+//                                                 VMG_PUSH_WINDOW bytes in all; the encoder copies the bound bytes)
 //     so type punning, pointer arithmetic and casts need no special cases. LLVM's SROA already turned the allocas
 //     that matter into SSA values; what is left is dynamically indexed.
 //   - Control flow is emitted unstructured (one NIR block per LLVM block, goto / goto_if), then
@@ -27,7 +29,11 @@
 //   48  uint32 render target sample count (air.get_num_samples), reserved[3]
 //   64  uint32 buffer_base[32]         byte offset of each [[buffer(n)]] binding inside its SSBO, only with
 //                                      VMG_SSBO_BASE=1 (drivers that realign SSBO bindings; Panfrost does not)
+//   192 push window                    VMG_PUSH_WINDOW bytes: small constant buffers (reflection push_slots)
 // Constant buffer 1 = the shader's constant pool (module constant tables), bound from the shader object.
+// Pushing: Panfrost only puts constant buffer 0 (a CPU copy) into the shader's uniform registers (FAU); a constant
+// buffer read through an SSBO is a memory load in every fragment. On the phone (passbench) 10 full-screen blended
+// draws took 15.3 ms reading their colour from a buffer, 9.5 ms with a literal. VMG_NO_PUSH=1: every buffer an SSBO.
 //
 // constexpr sampler word (MSL), as decoded by metal-shim: address s/t/r 3 bits each (bits 0-8), mag 9-10, min
 // 11-12, mip 13-14, coord::pixel 15, compare 16-19, max anisotropy - 1 20-23, lod min/max as half 24-39/40-55,
@@ -99,7 +105,7 @@ const char *vmg_air_tag(void) { return "vmg-air-nir-1"; }
 // ---- Values ---------------------------------------------------------------------------------------------------------
 
 typedef enum { V_NONE, V_SSA, V_AGG, V_PTR, V_TEX, V_SMP } vkind;
-typedef enum { SP_SSBO, SP_SHARED, SP_SCRATCH, SP_POOL } vspace;
+typedef enum { SP_SSBO, SP_SHARED, SP_SCRATCH, SP_POOL, SP_PUSH } vspace;
 
 typedef struct val {
     vkind kind;
@@ -136,6 +142,8 @@ typedef struct {
     nir_variable *tex_vars[VMG_MAX_TEXTURES], *img_vars[VMG_MAX_TEXTURES], *smp_vars[32];
     unsigned scratch, shared;
     bool no_nans;                 // fast math (Metal's default): NaN constants are poison
+    bool push;                    // small constant buffers go to the push window
+    unsigned push_used;
     char *error;
 } T;
 
@@ -373,6 +381,10 @@ static nir_def *mem_load(T *t, val *p, unsigned comps, unsigned bits, unsigned a
     case SP_POOL:
         d = nir_load_ubo(b, comps, lbits, nir_imm_int(b, 1), p->off, .align_mul = align, .align_offset = 0,
                          .range_base = 0, .range = 65536);
+        break;
+    case SP_PUSH:   // p->off already includes VMG_SYSVAL_HEADER + the buffer's place in the window
+        d = nir_load_ubo(b, comps, lbits, nir_imm_int(b, 0), p->off, .align_mul = MIN2(align, 4), .align_offset = 0,
+                         .range_base = 0, .range = VMG_SYSVAL_HEADER + VMG_PUSH_WINDOW);
         break;
     case SP_SHARED: d = nir_load_shared(b, comps, lbits, p->off, .align_mul = align, .align_offset = 0); break;
     default: d = nir_load_scratch(b, comps, lbits, p->off, .align_mul = align, .align_offset = 0); break;
@@ -793,8 +805,20 @@ static bool declare_inputs(T *t, LLVMValueRef node)
         } else if (md_is(rolev, "air.buffer")) {
             long slot = md_int_after(&o, "air.location_index", 0);
             if (slot < 0 || slot >= VMG_MAX_BUFFERS) FAILB(t, "buffer %ld", slot);
-            t->refl->buffers_used |= 1u << slot;
-            v = vptr(t, SP_SSBO, nir_imm_int(b, (int)slot), nir_imm_int(b, 0));
+            long space = md_int_after(&o, "air.address_space", ts_LLVMGetPointerAddressSpace(pt));
+            long size = md_int_after(&o, "air.buffer_size", 0);   // only references (constant T &) have one
+            unsigned need = (unsigned)ALIGN_POT(MAX2(size, 0), 16);
+            if (t->push && space == 2 && size > 0 && need <= VMG_PUSH_WINDOW - t->push_used &&
+                !(t->refl->push_slots & (1u << slot))) {
+                t->refl->push_slots |= 1u << slot;
+                t->refl->push_offset[slot] = (uint16_t)t->push_used;
+                t->refl->push_size[slot] = (uint16_t)size;
+                v = vptr(t, SP_PUSH, NULL, nir_imm_int(b, (int)(VMG_SYSVAL_HEADER + t->push_used)));
+                t->push_used += need;
+            } else {
+                t->refl->buffers_used |= 1u << slot;
+                v = vptr(t, SP_SSBO, nir_imm_int(b, (int)slot), nir_imm_int(b, 0));
+            }
         } else if (md_is(rolev, "air.texture")) {
             long slot = md_int_after(&o, "air.location_index", 0);
             if (slot < 0 || slot >= VMG_MAX_TEXTURES) FAILB(t, "texture %ld", slot);
@@ -2229,7 +2253,7 @@ static char *link_visible(LLVMContextRef ctx, LLVMModuleRef mod, const vmg_air_i
 }
 
 static nir_shader *translate_module(const nir_shader_compiler_options *options, LLVMModuleRef mod, const vmg_air_input *in,
-                                    vmg_reflection *refl, struct util_dynarray *pool, char **error)
+                                    vmg_reflection *refl, struct util_dynarray *pool, bool push, char **error)
 {
     unsigned nv = ts_LLVMGetNamedMetadataNumOperands(mod, "air.vertex");
     unsigned nf = ts_LLVMGetNamedMetadataNumOperands(mod, "air.fragment");
@@ -2240,6 +2264,7 @@ static nir_shader *translate_module(const nir_shader_compiler_options *options, 
     t.td = ts_LLVMCreateTargetData(ts_LLVMGetDataLayoutStr(mod));
     t.stage = nv ? MESA_SHADER_VERTEX : nf ? MESA_SHADER_FRAGMENT : MESA_SHADER_COMPUTE;
     t.in = in; t.refl = refl; t.pool = pool;
+    t.push = push;
     memset(refl, 0, sizeof *refl);
     refl->stage = t.stage == MESA_SHADER_VERTEX ? VMG_VERTEX : t.stage == MESA_SHADER_FRAGMENT ? VMG_FRAGMENT : VMG_COMPUTE;
     LLVMValueRef node;
@@ -2378,7 +2403,20 @@ nir_shader *vmg_air_translate(const nir_shader_compiler_options *options, const 
         }
         if (!err) err = run_passes(mod, kCleanupPasses);
         if (err) *error = err;
-        else s = translate_module(options, mod, in, refl, pool, error);
+        else {
+            // A pushed buffer pointer mixed with another memory (select/phi between buffers) does not translate:
+            // that function is translated again with every buffer an SSBO.
+            static int no_push = -1;
+            if (no_push < 0) no_push = getenv("VMG_NO_PUSH") != NULL;
+            size_t pool_size = pool ? pool->size : 0;
+            s = translate_module(options, mod, in, refl, pool, !no_push, error);
+            if (!s && !no_push) {
+                free(*error);
+                *error = NULL;
+                if (pool) pool->size = pool_size;
+                s = translate_module(options, mod, in, refl, pool, false, error);
+            }
+        }
         ts_LLVMDisposeModule(mod);
     }
     ts_LLVMContextDispose(ctx);

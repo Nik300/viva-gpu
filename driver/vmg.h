@@ -125,6 +125,11 @@ typedef struct {
     uint32_t threadgroup[3];                      // compute: fixed size if known (0 = from the dispatch)
     uint32_t static_shared;                       // compute: threadgroup memory declared in the shader
     uint32_t dynamic_shared_slots;                // compute: bit n = [[threadgroup(n)]] sized by the encoder
+    // Small constant buffers (constant T &x [[buffer(n)]]): read from constant buffer 0's push window, which the
+    // encoder fills from the bound buffer at each draw (Panfrost pushes those words into the shader's uniforms).
+    uint32_t push_slots;                          // bit n = [[buffer(n)]] pushed
+    uint16_t push_offset[VMG_MAX_BUFFERS];        // bytes into the window (after VMG_SYSVAL_HEADER)
+    uint16_t push_size[VMG_MAX_BUFFERS];
 } vmg_reflection;
 
 // Translation input: AIR bitcode of one function (+ linked visible functions), varying slot assignment shared by

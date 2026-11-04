@@ -178,6 +178,7 @@ static void air_cache_key(vmg_device *dev, const char *kind, const vmg_air_input
     blob_write_uint8(&b, in->half32);
     blob_write_uint8(&b, getenv("VMG_SSBO_BASE") != NULL);
     blob_write_uint8(&b, getenv("VMG_LLVM_LEGACY_PM") != NULL);
+    blob_write_uint8(&b, getenv("VMG_NO_PUSH") != NULL);
     blob_write_uint64(&b, in->bitcode_size);
     blob_write_bytes(&b, in->bitcode, in->bitcode_size);
     blob_write_uint32(&b, in->linked_count);

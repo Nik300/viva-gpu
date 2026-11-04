@@ -14,6 +14,8 @@ struct util_dynarray;
 
 // Constant buffer 0 of every stage: per-draw system values (layout in vmg_air.c); constant buffer 1: the shader's pool.
 #define VMG_SYSVAL_HEADER 192
+// Then the push window: the bytes of small constant buffers (vmg_reflection.push_slots), copied in at each draw.
+#define VMG_PUSH_WINDOW 256
 
 struct vmg_resource {
     struct pipe_resource *res;
@@ -108,6 +110,7 @@ struct vmg_fence { struct pipe_fence_handle *fence; };
 // Encoder state on the GPU queue (vmg_exec.c).
 struct vmg_stage_bindings {
     struct pipe_shader_buffer buffers[VMG_MAX_BUFFERS];
+    vmg_resource *res[VMG_MAX_BUFFERS];   // the buffers bound there (push window copies, write tracking)
     uint32_t strides[VMG_MAX_BUFFERS];
     vmg_texture *textures[VMG_MAX_TEXTURES];
     vmg_sampler *samplers[VMG_MAX_SAMPLERS];
@@ -124,7 +127,7 @@ struct vmg_device {
 
     // GPU queue state
     struct vmg_stage_bindings stage[VMG_STAGES];
-    uint32_t sysvals[VMG_STAGES][VMG_SYSVAL_HEADER / 4];   // constant buffer 0 (drivers read user buffers at draw time)
+    uint32_t sysvals[VMG_STAGES][(VMG_SYSVAL_HEADER + VMG_PUSH_WINDOW) / 4];   // constant buffer 0 (drivers read user buffers at draw time)
     vmg_render_pipeline *pipeline;
     struct pipe_framebuffer_state fb;
     vmg_pass_desc pass;
