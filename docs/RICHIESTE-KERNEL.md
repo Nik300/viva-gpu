@@ -361,3 +361,44 @@ Immagine: `out/xnu-ufs-rw-0126.img`.
 2. **Doppio buffer del pannello (K0d) spento in alcuni avvii**: `disp` diceva "another OVL layer reads LK's next
    buffer" (LK lascia OVL0 L1 acceso su 0x7c606000): ogni copia da ~3 ms andava nel buffer a schermo (bande che si
    aggiornano in ritardo durante gli scroll). LK riserva 3 buffer: ora si usa il terzo (0x7cffc000) se il secondo è letto.
+
+## Richieste per Viva Manager (2026-11-04): KA1 statistiche, KA2 boot-arg del prossimo avvio
+L'app `app/` (Viva Manager) gira sul telefono come utente `mobile`, con un helper setuid root nel bundle. Oggi le
+statistiche di GPU e display e i boot-arg esistono solo nella console del link USB e nel payload di `boot_b`.
+L'app funziona anche senza queste due sysctl (mostra "richiede il kernel con KA1/KA2"), e le usa appena ci sono.
+
+### KA1. `kern.viva_link`: comandi del link da userspace
+- `sysctl` CTLTYPE_OPAQUE (o STRING) con `CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_LOCKED`: in un'unica chiamata
+  `newp` = il comando (testo, come dopo `cmd` sul link), `oldp` = la risposta (stesso testo che va al link; fino a
+  8 KiB, troncata con "...\n" se non ci sta). Riusa i `viva_*_link(args, out, len)` già esistenti.
+- Comandi ammessi per **tutti** (sola lettura): `gpu`, `gpu status`, `gpu freq` (senza numero), `gpu dvfs` (senza
+  on/off), `gpu lat`, `gpu calls`, `gpu clocks`, `disp`, `bat`, `stat`, `wifi status`, e `gpu kv`/`disp kv` (sotto).
+- Comandi che cambiano stato (`gpu freq N`, `gpu dvfs on|off`, `gpu lat reset`, `gpu calls reset`, `disp lat reset`,
+  `bat lpm on|off`, ...) solo per root (`kauth_cred_issuser`): l'app li manda tramite il suo helper. Mai `peek/poke`,
+  `push`, `run`, `panic`, `reboot`, `i2c*`.
+- **`gpu kv` e `disp kv`**: le stesse informazioni in righe `chiave=valore` stabili (l'app le preferisce al testo
+  libero, che resta il ripiego). Chiavi che l'app legge già:
+  - gpu: `powered` (0/1), `mode`, `gpu_id`, `mhz` (clock attuale), `opp_min_mhz`, `opp_max_mhz`, `dvfs` (0/1),
+    `load_pct`, `dvfs_ups`, `dvfs_downs`, `dvfs_boosts`, `jobs`, `running`, `queued`, `job_faults`, `mmu_faults`,
+    `gpu_faults`, `timeouts`, `resets`, `heap_grows`, `mem_kib`, `mem_peak_kib`, `mem_limit_mib`, `mem_proc_mib`,
+    `mem_refusals`, `busy_ns` (tempo totale con almeno un job in esecuzione, se costa poco: dà l'utilizzo vero),
+    `vgpu_mv`, `vsram_mv`; e per processo `proc.<pid>.name`, `proc.<pid>.kib`, `proc.<pid>.bos`, `proc.<pid>.imported_kib`.
+  - disp: `width`, `height`, `scanout` (0/1), `frames_scanned`, `frames_copied`, `swaps`, `gpu_waits`,
+    `frames_forced`, `copy_avg_us`, `lat_swap_gpu_avg_us`, `lat_chosen_screen_avg_us`, `early_shown`.
+- Il ripiego sul testo attuale (se `kv` manca) legge: `OPP %u MHz`, `load %u%%`, `jobs %llu`, `MMU faults %llu`,
+  `memory: %lld KiB (peak ... limit %lld MiB`, `dvfs on|off (%u..%u MHz`, e da `disp` `%llu frames scanned out, %llu copied`.
+
+### KA2. `kern.viva_nextbootargs`: boot-arg del prossimo avvio
+I boot-arg sono nel payload SWEETXNU dentro il ramdisk di `boot_b` (`mkpayload.py`: `cmdline[608]` a +0x48 dal
+magic). Proposta, nel driver UFS (che già legge la GPT della LUN 2, `pull part:NAME` di 0142):
+- lettura (tutti): la cmdline attualmente scritta nel payload della partizione di boot dello slot attivo (dallo
+  `androidboot.slot_suffix` che LK passa, altrimenti `boot_b`), NUL-terminata.
+- scrittura (solo root): stringa ASCII stampabile, lunghezza < 608. Controlli prima di scrivere: partizione GPT con
+  nome esatto `boot_b`/`boot_a`, header `ANDROID!` v2, offset del ramdisk = `page_size * (1 + ceil(kernel_size /
+  page_size))`, `SWEETXNU` all'inizio del ramdisk, versione 1. Scrive **solo** il blocco che contiene +0x48..+0x2a8
+  (read-modify-write di un blocco da 4 KiB, resto del blocco identico), poi rilegge e confronta. Errori: `EINVAL`
+  (stringa), `ENOENT` (partizione/magic), `EIO`.
+- Opzionale: `kern.viva_nextbootargs_orig` = la cmdline trovata al boot (per "ripristina"), e un boot-arg
+  `vivanobootargswrite=1` che disattiva la scrittura.
+L'app mostra `kern.bootargs` (avvio attuale) accanto a quella del prossimo avvio. Senza KA2 salva la riga voluta in
+`/private/var/root/viva-next-bootargs` (per `VIVA_CMDLINE` di `viva-mkboot.sh` sul Mac).

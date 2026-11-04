@@ -147,6 +147,10 @@ static inline void TSMtlStat(TSStat s, uint64_t n) {
     if (gTSMtlStatsOn) atomic_fetch_add_explicit(&gTSMtlStats[s], n, memory_order_relaxed);
 }
 static inline void TSMtlStatAlways(TSStat s, uint64_t n) { atomic_fetch_add_explicit(&gTSMtlStats[s], n, memory_order_relaxed); }
+// Viva Manager statistics page (VMShmStats.m, ../vmg_shm_stats.h): created with the first device, updated at most once
+// per second from command buffer completion. Times are mach_absolute_time.
+void VMShmStatsInit(void);
+void VMShmStatsCommandBuffer(uint64_t commit, uint64_t start, uint64_t flushed, uint64_t done);
 
 // /Library/GPUBundles/TeraScaleMTLDriver.config, or TSMTL_CONFIG_DIR (TSMtlSystem.m).
 NSString *TSMtlConfigDir(void);
@@ -248,6 +252,7 @@ NSData *VMBitcodeOfFunction(id<MTLFunction> function);
 // Commit: a kernel promise on the written IOSurfaces, or 0 (see VMCommands.m).
 - (uint32_t)promiseWrittenSurfaces:(VMDevice *)device;
 @property (nonatomic) void *vmgTrace;   // VMG_TRACE_FRAME record (VMCommands.m)
+@property (nonatomic) uint64_t vmgCommitTime, vmgFlushTime;   // mach_absolute_time, for VMShmStats
 @end
 
 id<MTLRenderCommandEncoder> VMNewRenderEncoder(VMCommandBuffer *cb, MTLRenderPassDescriptor *desc);

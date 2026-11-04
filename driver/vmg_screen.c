@@ -289,6 +289,8 @@ void vmg_air_cache_stats(uint64_t *hits, uint64_t *misses)
     *misses = g_air_misses;
 }
 
+const char *vmg_driver_build_id(void) { return g_cache_id; }
+
 vmg_device *vmg_device_create(const char *which, char *error, size_t error_size)
 {
     load_env_file();

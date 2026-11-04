@@ -151,6 +151,8 @@ char **vmg_air_vertex_outputs(const void *bitcode, size_t size, unsigned *count,
 const char *vmg_air_tag(void);
 // Translation cache (VMG_NO_AIR_CACHE=1 off): lookups answered from disk / translated and stored, this process.
 void vmg_air_cache_stats(uint64_t *hits, uint64_t *misses);
+// Driver build id (hex, the translation cache's key prefix; "unknown" before the first device).
+const char *vmg_driver_build_id(void);
 char *vmg_air_to_nir_text(vmg_device *dev, const vmg_air_input *in, char **error);
 
 typedef struct {

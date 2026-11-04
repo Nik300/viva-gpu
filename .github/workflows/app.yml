@@ -1,0 +1,22 @@
+name: app
+
+# Viva Manager (app/): the iOS app and its setuid helper, with the runner's iOS SDK. Artifact: viva-manager
+# (VivaManager.tar, installed with app/install.sh).
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [app/**, driver/vmg_shm_stats.h, .github/workflows/app.yml]
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: bash app/build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: viva-manager
+          path: app/out/VivaManager.tar

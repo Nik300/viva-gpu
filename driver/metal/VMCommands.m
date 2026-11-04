@@ -244,8 +244,9 @@ enum { VMInlineChunk = 64 << 10, VMInlineAlign = 16 };
     NSUInteger _inlineUsed;
     NSMutableArray<VMBuffer *> *_inlineChunks;   // back to the device's pool at completion
     void *_vmgTrace;
+    uint64_t _vmgCommitTime, _vmgFlushTime;
 }
-@synthesize vmgTrace = _vmgTrace;
+@synthesize vmgTrace = _vmgTrace, vmgCommitTime = _vmgCommitTime, vmgFlushTime = _vmgFlushTime;
 VM_CATCH_ALL(VMCommandBuffer)
 
 - (uint64_t)protectionOptions { return 0; }               // SPI (CoreAnimation): no content protection
@@ -483,8 +484,10 @@ static void VMTraceFramePrint(VMCommandBuffer *cb, VMFrameTrace *t, uint64_t don
 }
 
 static void VMDidComplete(VMDevice *device, VMCommandQueue *queue, VMCommandBuffer *cb, vmg_fence *fence, uint64_t start) {
+    uint64_t done = mach_absolute_time();
+    VMShmStatsCommandBuffer(cb.vmgCommitTime, start, cb.vmgFlushTime, done);
     if (cb.vmgTrace) {
-        VMTraceFramePrint(cb, cb.vmgTrace, mach_absolute_time());
+        VMTraceFramePrint(cb, cb.vmgTrace, done);
         free(cb.vmgTrace);
         cb.vmgTrace = NULL;
     }
@@ -559,7 +562,8 @@ static void VMWaitCompletion(VMDevice *device, VMCommandQueue *queue, VMCommandB
                                                ? ^(dispatch_block_t b) { [device gpuSync:b]; }
                                                : ^(dispatch_block_t b) { [device gpuAsync:b]; };
         VMFrameTrace *trace = VMTraceFrameMs() >= 0 ? calloc(1, sizeof *trace) : NULL;
-        if (trace) trace->commit = mach_absolute_time();
+        cb.vmgCommitTime = mach_absolute_time();
+        if (trace) trace->commit = cb.vmgCommitTime;
         submit(^{
             uint64_t start = mach_absolute_time();
             TSMtlStat(TSStatCommandBuffers, 1);
@@ -573,6 +577,7 @@ static void VMWaitCompletion(VMDevice *device, VMCommandQueue *queue, VMCommandB
             if (trace) trace->replayed = mach_absolute_time();
             vmg_fence *fence = NULL;
             vmg_flush(device.vmg, &fence);
+            cb.vmgFlushTime = mach_absolute_time();
             if (trace) {
                 trace->flushed = mach_absolute_time();
                 vmg_stats_take(device.vmg, &trace->st);

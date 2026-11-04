@@ -91,6 +91,7 @@ static const void *const VMGPUQueueKey = &VMGPUQueueKey;
     [self fillLimits];
     [self initGPUFamilySupport];
     TSMtlInstallLayerTuning();
+    VMShmStatsInit();
     TSMtlLog(@"device ready: %@ (%s)", _name, info->driver);
     return self;
 }

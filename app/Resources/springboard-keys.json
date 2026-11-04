@@ -1,0 +1,2544 @@
+[
+{
+"key": "SBFeaturesLockedForRemoteLock",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBLockScreenDefaults",
+"title_it": "Limita funzioni (blocco remoto)",
+"desc_it": "Limita le funzioni della schermata di blocco quando il dispositivo è bloccato da remoto (probabilmente Dov'è).",
+"internal": false
+},
+{
+"key": "SBShowLegalTextOnLockScreen",
+"domain": "com.apple.springboard",
+"type": "bool",
+"group": "SBLockScreenDefaults",
+"title_it": "Testo legale su blocco",
+"desc_it": "Mostra un testo legale sulla schermata di blocco (default attivo solo su build interne).",
+"internal": true,
+"note": "default = BSIsInternalInstall()"
+},
+{
+"key": "SBShowAuthenticationEngineeringUI",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBLockScreenDefaults",
+"title_it": "UI engineering autenticazione",
+"desc_it": "Mostra un'interfaccia di debug per l'autenticazione (Face/Touch ID, codice).",
+"internal": true
+},
+{
+"key": "SBShowSupervisionTextOnLockScreen",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBLockScreenDefaults",
+"title_it": "Testo supervisione su blocco",
+"desc_it": "Mostra sulla schermata di blocco il testo che il dispositivo è supervisionato.",
+"internal": false
+},
+{
+"key": "SBShowQuickNoteFingerGestureRecognizer",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBLockScreenDefaults",
+"title_it": "Gesto dito per Nota rapida",
+"desc_it": "Probabilmente abilita il gesto con il dito per aprire una Nota rapida.",
+"internal": true
+},
+{
+"key": "SBCoverSheetForceWakeToMaps",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBLockScreenDefaults",
+"title_it": "Risveglio forzato su Mappe",
+"desc_it": "Probabilmente forza il risveglio del dispositivo mostrando Mappe (debug navigazione).",
+"internal": true
+},
+{
+"key": "SBCoverSheetPlayerTimeout",
+"domain": "com.apple.springboard",
+"type": "double",
+"default": -1.0,
+"group": "SBLockScreenDefaults",
+"title_it": "Timeout player su blocco",
+"desc_it": "Secondi dopo cui il player \"In riproduzione\" sparisce dalla schermata di blocco (-1 = default di sistema).",
+"internal": false
+},
+{
+"key": "SBCoverSheetWeDontNeedNoEducation",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBLockScreenDefaults",
+"title_it": "Nascondi suggerimenti schermata blocco",
+"desc_it": "Probabilmente disattiva i suggerimenti/educazione della schermata di blocco (es. \"Scorri per aprire\").",
+"internal": false
+},
+{
+"key": "SBCoverSheetUseDefaultsValuesForCameraPrewarm",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBLockScreenDefaults",
+"title_it": "Usa valori custom prewarm fotocamera",
+"desc_it": "Usa i valori di questi default per il pre-avvio della fotocamera dalla schermata di blocco.",
+"internal": true
+},
+{
+"key": "SBCoverSheetPrewarmCameraOnSwipe",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": true,
+"group": "SBLockScreenDefaults",
+"title_it": "Prewarm fotocamera con swipe",
+"desc_it": "Prepara la fotocamera quando si inizia lo swipe verso la fotocamera.",
+"internal": true
+},
+{
+"key": "SBCoverSheetCameraPrewarmThreshold",
+"domain": "com.apple.springboard",
+"type": "double",
+"default": 0.05,
+"group": "SBLockScreenDefaults",
+"title_it": "Soglia prewarm fotocamera",
+"desc_it": "Frazione di swipe oltre cui viene preparata la fotocamera.",
+"internal": true
+},
+{
+"key": "SBCoverSheetPrelaunchCameraOnSwipe",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": true,
+"group": "SBLockScreenDefaults",
+"title_it": "Pre-avvio fotocamera con swipe",
+"desc_it": "Avvia in anticipo l'app Fotocamera durante lo swipe.",
+"internal": true
+},
+{
+"key": "SBCoverSheetCameraPrelaunchThreshold",
+"domain": "com.apple.springboard",
+"type": "double",
+"default": 0.05,
+"group": "SBLockScreenDefaults",
+"title_it": "Soglia pre-avvio fotocamera",
+"desc_it": "Frazione di swipe oltre cui l'app Fotocamera viene pre-avviata.",
+"internal": true
+},
+{
+"key": "SBCoverSheetPrewarmCameraOnButtonTouch",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": true,
+"group": "SBLockScreenDefaults",
+"title_it": "Prewarm fotocamera al tocco pulsante",
+"desc_it": "Prepara la fotocamera al tocco del pulsante fotocamera sulla schermata di blocco.",
+"internal": true
+},
+{
+"key": "SBCoverSheetPrelaunchCameraOnButtonTouch",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": true,
+"group": "SBLockScreenDefaults",
+"title_it": "Pre-avvio fotocamera al tocco pulsante",
+"desc_it": "Pre-avvia l'app Fotocamera al tocco del pulsante sulla schermata di blocco.",
+"internal": true
+},
+{
+"key": "SBCoverSheetUseDefaultsForDateTimeOverrides",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBLockScreenDefaults",
+"title_it": "Override data/ora blocco",
+"desc_it": "Usa una data/ora fittizia sulla schermata di blocco (screenshot/test).",
+"internal": true
+},
+{
+"key": "SBCoverSheetOverridesDateTimeIntervalSince1970",
+"domain": "com.apple.springboard",
+"type": "int",
+"default": 0,
+"group": "SBLockScreenDefaults",
+"title_it": "Data/ora fittizia (epoch)",
+"desc_it": "Data/ora fittizia mostrata sulla schermata di blocco, in secondi dal 1970.",
+"internal": true
+},
+{
+"key": "SBCoverSheetOverridesDateTimeToDefaultToday",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBLockScreenDefaults",
+"title_it": "Data fittizia: oggi standard",
+"desc_it": "Probabilmente imposta la data fittizia su un \"oggi\" predefinito (screenshot marketing).",
+"internal": true
+},
+{
+"key": "SBCoverSheetOverridesDateTimeToDefaultPast",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBLockScreenDefaults",
+"title_it": "Data fittizia: passato standard",
+"desc_it": "Probabilmente imposta la data fittizia su una data passata predefinita.",
+"internal": true
+},
+{
+"key": "SBCoverSheetSessionTestWidgetInfo",
+"domain": "com.apple.springboard",
+"type": "other",
+"group": "SBLockScreenDefaults",
+"title_it": "Info widget di test",
+"desc_it": "Dati di test per widget/attività della schermata di blocco.",
+"internal": true
+},
+{
+"key": "SBHomeSidebarIsPinned",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBHomeScreenDefaults",
+"title_it": "Barra laterale fissata",
+"desc_it": "Probabilmente tiene fissata la barra laterale della vista Oggi (iPad).",
+"internal": false
+},
+{
+"key": "SBHomeLargeIcons",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBHomeScreenDefaults",
+"title_it": "Icone grandi",
+"desc_it": "Usa icone grandi nella schermata Home (layout iPad \"Più grandi\").",
+"internal": false
+},
+{
+"key": "SBFudgeShortcutsToCauseMaximumPain",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBHomeScreenDefaults",
+"title_it": "Stress test scorciatoie",
+"desc_it": "Altera le azioni rapide delle icone per testarne i casi limite.",
+"internal": true
+},
+{
+"key": "SBHideReportWidgetStackRotationQuickAction",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBHomeScreenDefaults",
+"title_it": "Nascondi \"segnala rotazione pila widget\"",
+"desc_it": "Nasconde l'azione rapida interna per segnalare la rotazione delle pile di widget.",
+"internal": true
+},
+{
+"key": "SBShouldResetDefaultTodayList",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": true,
+"group": "SBHomeScreenDefaults",
+"title_it": "Prepara vista Oggi predefinita",
+"desc_it": "Flag di stato: al prossimo avvio ricrea la lista widget predefinita della vista Oggi.",
+"internal": true
+},
+{
+"key": "SBShouldResetStackForDefaultTodayList",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": true,
+"group": "SBHomeScreenDefaults",
+"title_it": "Prepara pila vista Oggi",
+"desc_it": "Flag di stato: ricrea la pila widget predefinita della vista Oggi.",
+"internal": true
+},
+{
+"key": "SBShouldUpgradeEnableWidgetSuggestions",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": true,
+"group": "SBHomeScreenDefaults",
+"title_it": "Migra suggerimenti widget",
+"desc_it": "Flag di migrazione per abilitare i suggerimenti nelle pile di widget.",
+"internal": true
+},
+{
+"key": "SBShouldAddDefaultWidgetsToHomeScreen",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": true,
+"group": "SBHomeScreenDefaults",
+"title_it": "Aggiungi widget predefiniti",
+"desc_it": "Flag di stato: aggiunge i widget predefiniti alla Home al primo avvio.",
+"internal": true
+},
+{
+"key": "SBEnableModalWidgetDiscoverabilityForTesting",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBHomeScreenDefaults",
+"title_it": "Test scoperta widget",
+"desc_it": "Abilita l'interfaccia di scoperta widget per i test.",
+"internal": true
+},
+{
+"key": "SBHomeScreenScreenTypeOverride",
+"domain": "com.apple.springboard",
+"type": "string",
+"group": "SBHomeScreenDefaults",
+"title_it": "Override tipo schermo",
+"desc_it": "Forza un tipo di schermo diverso per il layout della Home (debug).",
+"internal": true
+},
+{
+"key": "SBHomeAutomaticallyAddsNewApplications",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": true,
+"group": "SBHomeScreenDefaults",
+"title_it": "Aggiungi nuove app alla Home",
+"desc_it": "Le app appena scaricate vengono aggiunte alla schermata Home (altrimenti solo nella Libreria app).",
+"internal": false
+},
+{
+"key": "SBHomeScreenShowsBadgesInAppLibrary",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBHomeScreenDefaults",
+"title_it": "Badge nella Libreria app",
+"desc_it": "Mostra i badge di notifica sulle icone nella Libreria app.",
+"internal": false
+},
+{
+"key": "SBHomeScreenShowsSearchAffordance",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": true,
+"group": "SBHomeScreenDefaults",
+"title_it": "Pulsante Cerca nella Home",
+"desc_it": "Mostra il pulsante \"Cerca\" in basso nella Home al posto dei pallini delle pagine.",
+"internal": false
+},
+{
+"key": "SBHomeScreenPagesHaveEverBeenHidden",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBHomeScreenDefaults",
+"title_it": "Pagine mai nascoste",
+"desc_it": "Flag di stato: l'utente ha nascosto almeno una pagina della Home.",
+"internal": true
+},
+{
+"key": "SBHomeShouldShowLibraryEducationView",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": true,
+"group": "SBHomeScreenDefaults",
+"title_it": "Educazione Libreria app",
+"desc_it": "Mostra la schermata introduttiva della Libreria app.",
+"internal": false
+},
+{
+"key": "SBShowInternalWidgets",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBHomeScreenDefaults",
+"title_it": "Widget interni",
+"desc_it": "Mostra widget riservati alle build interne Apple.",
+"internal": true
+},
+{
+"key": "SBShouldShowWidgetIntroductionPage",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": true,
+"group": "SBHomeScreenDefaults",
+"title_it": "Introduzione widget",
+"desc_it": "Mostra il popover introduttivo dei widget.",
+"internal": false
+},
+{
+"key": "SBUserHasDeletedSuggestedWidget",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBHomeScreenDefaults",
+"title_it": "Widget suggerito eliminato",
+"desc_it": "Flag di stato: l'utente ha eliminato un widget suggerito.",
+"internal": true
+},
+{
+"key": "SBUserDidUndoSuggestedWidget",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBHomeScreenDefaults",
+"title_it": "Widget suggerito annullato",
+"desc_it": "Flag di stato: l'utente ha annullato l'aggiunta di un widget suggerito.",
+"internal": true
+},
+{
+"key": "SBWidgetScalingEnabled",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": true,
+"group": "SBHomeScreenDefaults",
+"title_it": "Scalatura widget",
+"desc_it": "Probabilmente abilita la scalatura dei widget in base alla dimensione icone.",
+"internal": true
+},
+{
+"key": "SBFocusModesRequiringIntroduction",
+"domain": "com.apple.springboard",
+"type": "other",
+"group": "SBHomeScreenDefaults",
+"title_it": "Modalità Full immersion da introdurre",
+"desc_it": "Elenco di modalità Full immersion per cui mostrare l'introduzione.",
+"internal": true
+},
+{
+"key": "SBDeveloperBrickAlert1",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBSoftwareUpdateDefaults",
+"title_it": "Avviso beta scaduta (7 giorni)",
+"desc_it": "Flag di stato: avviso di scadenza build sviluppatore a 7 giorni già mostrato.",
+"internal": true
+},
+{
+"key": "SBDeveloperBrickAlert2",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBSoftwareUpdateDefaults",
+"title_it": "Avviso beta scaduta (3 giorni)",
+"desc_it": "Flag di stato: avviso a 3 giorni già mostrato.",
+"internal": true
+},
+{
+"key": "SBDeveloperBrickAlert3",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBSoftwareUpdateDefaults",
+"title_it": "Avviso beta scaduta (domani)",
+"desc_it": "Flag di stato: avviso \"scade domani\" già mostrato.",
+"internal": true
+},
+{
+"key": "SBMaxIconListCount",
+"domain": "com.apple.springboard",
+"type": "int",
+"default": 0,
+"group": "SBIconDefaults",
+"title_it": "Numero max pagine icone",
+"desc_it": "Probabilmente limita il numero massimo di pagine della Home (0 = default).",
+"internal": false
+},
+{
+"key": "SBDidShowReorderText",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBIconDefaults",
+"title_it": "Avviso riordino mostrato",
+"desc_it": "Flag di stato: l'avviso sul riordino icone è già stato mostrato.",
+"internal": true
+},
+{
+"key": "SBDisableLiveIcons",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBIconDefaults",
+"title_it": "Disattiva icone animate",
+"desc_it": "Disattiva le icone \"vive\" (orologio e calendario aggiornati in tempo reale).",
+"internal": false
+},
+{
+"key": "SBSuppressAppShortcutTruncation",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBIconDefaults",
+"title_it": "Non troncare azioni rapide",
+"desc_it": "Probabilmente evita il troncamento del testo nelle azioni rapide delle icone.",
+"internal": false
+},
+{
+"key": "SBFolderViewSuppressSetCurrentPage",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBIconDefaults",
+"title_it": "Blocca pagina cartella",
+"desc_it": "Probabilmente impedisce di cambiare la pagina corrente all'apertura di una cartella (debug).",
+"internal": true
+},
+{
+"key": "iconState",
+"domain": "com.apple.springboard",
+"type": "other",
+"group": "SBIconDefaults",
+"title_it": "Layout icone (legacy)",
+"desc_it": "Disposizione legacy delle icone della Home; non modificare a mano.",
+"internal": true
+},
+{
+"key": "iconState2",
+"domain": "com.apple.springboard",
+"type": "other",
+"group": "SBIconDefaults",
+"title_it": "Layout icone 2 (legacy)",
+"desc_it": "Seconda copia legacy della disposizione icone; non modificare a mano.",
+"internal": true
+},
+{
+"key": "SBDisableIdleSleep",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBPowerDefaults",
+"title_it": "Disattiva sospensione inattività",
+"desc_it": "Impedisce al dispositivo di andare in stop per inattività.",
+"internal": false
+},
+{
+"key": "SBHideACPower",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBPowerDefaults",
+"title_it": "Nascondi alimentazione AC",
+"desc_it": "Probabilmente nasconde l'indicazione di collegamento all'alimentatore.",
+"internal": false
+},
+{
+"key": "SBHideLowPowerAlerts",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBPowerDefaults",
+"title_it": "Nascondi avvisi batteria scarica",
+"desc_it": "Non mostra gli avvisi di batteria al 20%/10%.",
+"internal": false
+},
+{
+"key": "SBLowBatteryLevel",
+"domain": "com.apple.springboard",
+"type": "int",
+"default": 0,
+"group": "SBPowerDefaults",
+"title_it": "Soglia batteria scarica",
+"desc_it": "Probabilmente imposta la percentuale per l'avviso di batteria scarica (0 = default).",
+"internal": false
+},
+{
+"key": "SBTrackPowerEvents",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBPowerDefaults",
+"title_it": "Traccia eventi energia",
+"desc_it": "Registra gli eventi di alimentazione (debug).",
+"internal": true
+},
+{
+"key": "SBForceLoginWindow",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBMultiUserDefaults",
+"title_it": "Forza finestra di login",
+"desc_it": "Forza la finestra di login multiutente (iPad condiviso).",
+"internal": true
+},
+{
+"key": "SBDisablesInternalDebugBlockingTasksUI",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBMultiUserDefaults",
+"title_it": "Nascondi UI task bloccanti",
+"desc_it": "Disattiva l'interfaccia interna di debug dei task bloccanti al logout.",
+"internal": true
+},
+{
+"key": "SBEnableAlwaysOn",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": true,
+"group": "SBAlwaysOnDefaults",
+"title_it": "Always On",
+"desc_it": "Abilita il display sempre attivo (solo dispositivi supportati, non iPhone X).",
+"internal": false
+},
+{
+"key": "SBAlwaysOnTapToInteract",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBAlwaysOnDefaults",
+"title_it": "Tocca per interagire (AOD)",
+"desc_it": "Probabilmente consente di interagire toccando il display in Always On.",
+"internal": true
+},
+{
+"key": "SBAlwaysOnSwipeToUnlock",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": true,
+"group": "SBAlwaysOnDefaults",
+"title_it": "Scorri per sbloccare (AOD)",
+"desc_it": "Probabilmente consente lo swipe di sblocco direttamente da Always On.",
+"internal": true
+},
+{
+"key": "SBForceAndromedaSupport",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBAlwaysOnDefaults",
+"title_it": "Forza supporto Always On",
+"desc_it": "Forza il supporto Always On (Andromeda) su hardware non previsto; probabilmente instabile.",
+"internal": true
+},
+{
+"key": "SBUseAlwaysOnBrightnessCurve",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": true,
+"group": "SBAlwaysOnDefaults",
+"title_it": "Curva luminosità AOD",
+"desc_it": "Usa la curva di luminosità dedicata all'Always On.",
+"internal": true
+},
+{
+"key": "SBAndromedaDebugColors",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBAlwaysOnDefaults",
+"title_it": "Colori debug AOD",
+"desc_it": "Colora l'interfaccia Always On per il debug.",
+"internal": true
+},
+{
+"key": "SBEnforceOverallAPLLimit",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": true,
+"group": "SBAlwaysOnDefaults",
+"title_it": "Limite APL complessivo",
+"desc_it": "Applica il limite di luminanza media (APL) in Always On.",
+"internal": true
+},
+{
+"key": "SBAndromedaMaximumFlipbookDuration",
+"domain": "com.apple.springboard",
+"type": "other",
+"group": "SBAlwaysOnDefaults",
+"title_it": "Intervallo render max AOD",
+"desc_it": "Durata massima del \"flipbook\" pre-renderizzato in Always On.",
+"internal": true
+},
+{
+"key": "SBShowWallpaperInAlwaysOn",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": true,
+"group": "SBAlwaysOnDefaults",
+"title_it": "Sfondo in Always On",
+"desc_it": "Mostra lo sfondo nel display sempre attivo.",
+"internal": false
+},
+{
+"key": "SBShowNotificationsInAlwaysOn",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": true,
+"group": "SBAlwaysOnDefaults",
+"title_it": "Notifiche in Always On",
+"desc_it": "Mostra le notifiche nel display sempre attivo.",
+"internal": false
+},
+{
+"key": "ThermalLockoutEnabledBrickMode",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBSecurityDefaults",
+"title_it": "Blocco termico attivo",
+"desc_it": "Stato: dispositivo bloccato per surriscaldamento.",
+"internal": true
+},
+{
+"key": "SBFDeviceLockPendingWipe",
+"domain": "com.apple.springboard",
+"type": "other",
+"group": "SBSecurityDefaults",
+"title_it": "Inizializzazione in sospeso",
+"desc_it": "Stato: inizializzazione del dispositivo in sospeso dopo troppi codici errati. Non modificare.",
+"internal": true
+},
+{
+"key": "SBDeviceLockBlocked",
+"domain": "com.apple.springboard",
+"type": "other",
+"group": "SBSecurityDefaults",
+"title_it": "Bloccato per codice",
+"desc_it": "Stato: dispositivo disabilitato per troppi tentativi di codice. Non modificare.",
+"internal": true
+},
+{
+"key": "SBDeviceLockFailedAttempts",
+"domain": "com.apple.springboard",
+"type": "other",
+"group": "SBSecurityDefaults",
+"title_it": "Tentativi codice errati",
+"desc_it": "Stato: numero di tentativi di codice falliti.",
+"internal": true
+},
+{
+"key": "SBDeviceLockBlockTimeIntervalSinceReferenceDate",
+"domain": "com.apple.springboard",
+"type": "other",
+"group": "SBSecurityDefaults",
+"title_it": "Fine blocco codice",
+"desc_it": "Stato: istante in cui termina il blocco per codice errato.",
+"internal": true
+},
+{
+"key": "SBDeviceLockBlockStateGeneration",
+"domain": "com.apple.springboard",
+"type": "other",
+"group": "SBSecurityDefaults",
+"title_it": "Generazione stato blocco",
+"desc_it": "Stato interno del blocco codice.",
+"internal": true
+},
+{
+"key": "SBDeviceWipeEnabled",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBSecurityDefaults",
+"title_it": "Inizializza dopo 10 tentativi",
+"desc_it": "Cancella i dati dopo 10 tentativi di codice errati (di solito gestito da Impostazioni/MDM).",
+"internal": false
+},
+{
+"key": "SBDontLockEver",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBSecurityDefaults",
+"title_it": "Non bloccare mai",
+"desc_it": "Il dispositivo non si blocca mai (né codice né schermata di blocco); probabilmente solo debug.",
+"internal": true
+},
+{
+"key": "SBLockAndUnlockWithCase",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": true,
+"group": "SBSecurityDefaults",
+"title_it": "Blocco/sblocco con custodia",
+"desc_it": "Blocca e sblocca chiudendo/aprendo una custodia smart.",
+"internal": false
+},
+{
+"key": "SBEnableLayerBasedViewSecurity",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": true,
+"group": "SBSecurityDefaults",
+"title_it": "Sicurezza viste a livello layer",
+"desc_it": "Protegge i contenuti sensibili a livello di layer (debug sicurezza).",
+"internal": true
+},
+{
+"key": "SBEnableSecureDrawViolationAlerts",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": true,
+"group": "SBSecurityDefaults",
+"title_it": "Avvisi violazioni secure draw",
+"desc_it": "Mostra avvisi sulle violazioni del disegno sicuro (debug).",
+"internal": true
+},
+{
+"key": "SBAssertNoZombieInCallScenes",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBInCallPresentationDefaults",
+"title_it": "Verifica scene chiamata zombie",
+"desc_it": "Asserzione di debug sulle scene di chiamata orfane.",
+"internal": true
+},
+{
+"key": "SBSkipPromptUnlockEntitlementCheck",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBInCallPresentationDefaults",
+"title_it": "Salta controllo entitlement sblocco",
+"desc_it": "Salta il controllo entitlement per la richiesta di sblocco durante la chiamata (debug).",
+"internal": true
+},
+{
+"key": "SBReallyDisableReachability",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBAccessibilityDefaults",
+"title_it": "Disattiva davvero Uso con una mano",
+"desc_it": "Disattiva completamente la funzione Reachability.",
+"internal": false
+},
+{
+"key": "SBReachabilityEnabled",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": true,
+"group": "SBAccessibilityDefaults",
+"title_it": "Uso con una mano",
+"desc_it": "Abilita Reachability (abbassa la parte alta dello schermo).",
+"internal": false
+},
+{
+"key": "SBLastRotationLockedOrientation",
+"domain": "com.apple.springboard",
+"type": "int",
+"default": 0,
+"group": "SBRotationDefaults",
+"title_it": "Ultimo orientamento bloccato",
+"desc_it": "Stato: ultimo orientamento bloccato (iPhone).",
+"internal": true
+},
+{
+"key": "SBLastRotationLockedOrientationiPad",
+"domain": "com.apple.springboard",
+"type": "int",
+"default": 0,
+"group": "SBRotationDefaults",
+"title_it": "Ultimo orientamento bloccato (iPad)",
+"desc_it": "Stato: ultimo orientamento bloccato (iPad).",
+"internal": true
+},
+{
+"key": "SBEnableVideoRotation",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBRotationDefaults",
+"title_it": "Rotazione video",
+"desc_it": "Probabilmente consente la rotazione dei video anche con blocco rotazione attivo.",
+"internal": false
+},
+{
+"key": "SBPostModernRotationForciblyEnabled",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBRotationDefaults",
+"title_it": "Forza nuova rotazione",
+"desc_it": "Forza il nuovo sistema di rotazione dell'interfaccia (debug).",
+"internal": true
+},
+{
+"key": "SBAppLibraryInDockEnabled",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": true,
+"group": "SBFloatingDockDefaults",
+"title_it": "Libreria app nel Dock",
+"desc_it": "Mostra la Libreria app nel Dock (iPad).",
+"internal": false
+},
+{
+"key": "SBRecentsEnabled",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": true,
+"group": "SBFloatingDockDefaults",
+"title_it": "App recenti nel Dock",
+"desc_it": "Mostra app suggerite e recenti nel Dock (iPad).",
+"internal": false
+},
+{
+"key": "SBCountryCodesShowingEmergencyOnly",
+"domain": "com.apple.springboard",
+"type": "other",
+"group": "SBStatusBarDefaults",
+"title_it": "Paesi \"Solo SOS\"",
+"desc_it": "Elenco codici paese in cui la barra di stato mostra \"Solo SOS\".",
+"internal": true
+},
+{
+"key": "SBSuppressScreenSharingStatusBarOverridePreferenceKey",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBStatusBarDefaults",
+"title_it": "Nascondi indicatore condivisione schermo",
+"desc_it": "Non altera la barra di stato durante la condivisione schermo.",
+"internal": true
+},
+{
+"key": "SBShowBatteryLevel",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBStatusBarDefaults",
+"title_it": "Mostra livello batteria",
+"desc_it": "Probabilmente mostra il livello batteria nella barra di stato.",
+"internal": false
+},
+{
+"key": "SBShowBatteryPercentage",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBStatusBarDefaults",
+"title_it": "Percentuale batteria",
+"desc_it": "Mostra la percentuale della batteria nella barra di stato (su iPhone con notch probabilmente ignorato).",
+"internal": false,
+"note": "default YES on iPad, NO on iPhone"
+},
+{
+"key": "SBCarPlayShowOptimalCellData",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBStatusBarDefaults",
+"title_it": "Dati cellulare ottimali CarPlay",
+"desc_it": "Probabilmente mostra l'indicatore dati ottimale nella barra di stato CarPlay.",
+"internal": true
+},
+{
+"key": "SBShowStatusBarOverridesForRecording",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBStatusBarDefaults",
+"title_it": "Override barra stato registrazione",
+"desc_it": "Applica gli override della barra di stato durante la registrazione schermo.",
+"internal": true
+},
+{
+"key": "SBShowRSSI",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBStatusBarDefaults",
+"title_it": "Mostra RSSI",
+"desc_it": "Mostra il valore numerico del segnale (dBm) al posto delle tacche; probabilmente solo build interne.",
+"internal": false
+},
+{
+"key": "SBStatusBarishLogOptions",
+"domain": "com.apple.springboard",
+"type": "int",
+"default": 0,
+"group": "SBStatusBarDefaults",
+"title_it": "Log barra di stato",
+"desc_it": "Livello di log della barra di stato.",
+"internal": true
+},
+{
+"key": "SBShowThermalWarning",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBStatusBarDefaults",
+"title_it": "Indicatore termico",
+"desc_it": "Mostra un indicatore di stato termico nella barra di stato (debug).",
+"internal": true
+},
+{
+"key": "SBDefaultKeyCommandTabPlistRepresentation",
+"domain": "com.apple.springboard",
+"type": "other",
+"group": "SBRecentDisplayItemsDefaults",
+"title_it": "Elenco Cmd-Tab",
+"desc_it": "Stato: elenco app recenti per Cmd-Tab.",
+"internal": true
+},
+{
+"key": "SBDefaultKeyDockRecentsPlistRepresentation",
+"domain": "com.apple.springboard",
+"type": "other",
+"group": "SBRecentDisplayItemsDefaults",
+"title_it": "Recenti del Dock",
+"desc_it": "Stato: elenco app recenti del Dock.",
+"internal": true
+},
+{
+"key": "SBDataPlanActivationPromptCount",
+"domain": "com.apple.springboard",
+"type": "int",
+"default": 0,
+"group": "SBMiscellaneousDefaults",
+"title_it": "Contatore richieste piano dati",
+"desc_it": "Stato: quante volte è stata mostrata la richiesta di attivazione piano dati.",
+"internal": true
+},
+{
+"key": "SBSuppressNoSimAlert",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBMiscellaneousDefaults",
+"title_it": "Nascondi avviso \"Nessuna SIM\"",
+"desc_it": "Non mostra l'avviso quando manca la SIM.",
+"internal": false
+},
+{
+"key": "SBWalletPreArmForceLockButton",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBMiscellaneousDefaults",
+"title_it": "Wallet: pre-armo con tasto laterale",
+"desc_it": "Probabilmente forza il pre-armo di Wallet tramite il tasto laterale (debug).",
+"internal": true
+},
+{
+"key": "SBBacklightLevel2",
+"domain": "com.apple.springboard",
+"type": "double",
+"default": 0.0,
+"group": "SBMiscellaneousDefaults",
+"title_it": "Luminosità retroilluminazione",
+"desc_it": "Livello di retroilluminazione salvato (0-1); gestito di solito da backboardd.",
+"internal": true
+},
+{
+"key": "SBSupressAlertsForKeynote",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBMiscellaneousDefaults",
+"title_it": "Sopprimi avvisi (Keynote)",
+"desc_it": "Sopprime gli avvisi di sistema durante presentazioni/demo.",
+"internal": false
+},
+{
+"key": "SBSensitiveUIEnabled",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": true,
+"group": "SBMiscellaneousDefaults",
+"title_it": "UI sensibile",
+"desc_it": "Probabilmente abilita la protezione dei contenuti sensibili.",
+"internal": true
+},
+{
+"key": "SBDisableAsyncRenderingSurfaceRetention",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBMiscellaneousDefaults",
+"title_it": "No ritenzione superfici async",
+"desc_it": "Disattiva la ritenzione delle superfici di rendering asincrono (debug).",
+"internal": true
+},
+{
+"key": "SBShouldLaunchWithMallocStackLogging",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBMiscellaneousDefaults",
+"title_it": "Malloc stack logging",
+"desc_it": "Avvia SpringBoard con MallocStackLogging (debug memoria).",
+"internal": true
+},
+{
+"key": "SBDisableAutomaticMallocStackLogging",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBMiscellaneousDefaults",
+"title_it": "No malloc stack logging automatico",
+"desc_it": "Disattiva il MallocStackLogging automatico (debug).",
+"internal": true
+},
+{
+"key": "SBEnableDynamicJetsamLimits",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": true,
+"group": "SBMiscellaneousDefaults",
+"title_it": "Limiti jetsam dinamici",
+"desc_it": "Usa limiti di memoria jetsam dinamici per le app.",
+"internal": true
+},
+{
+"key": "SBAllowAutoPIP",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": true,
+"group": "SBPIPDefaults",
+"title_it": "PiP automatico",
+"desc_it": "Avvia automaticamente il Picture in Picture uscendo da un'app video.",
+"internal": false
+},
+{
+"key": "SBPIPVisualizeKeyboardFrame",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBPIPDefaults",
+"title_it": "Visualizza area tastiera PiP",
+"desc_it": "Mostra l'area della tastiera considerata dal PiP (debug).",
+"internal": true
+},
+{
+"key": "SBPIPVisualizePositionRegions",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBPIPDefaults",
+"title_it": "Visualizza regioni PiP",
+"desc_it": "Mostra le regioni di posizionamento del PiP (debug).",
+"internal": true
+},
+{
+"key": "SBPIPInitiallyUsesMinimumPreferredContentSize",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBPIPDefaults",
+"title_it": "PiP dimensione minima",
+"desc_it": "Il PiP parte con la dimensione minima.",
+"internal": false
+},
+{
+"key": "SBPIPLastKnownCornerPositionByContentType",
+"domain": "com.apple.springboard",
+"type": "other",
+"group": "SBPIPDefaults",
+"title_it": "Posizione PiP salvata",
+"desc_it": "Stato: ultimo angolo usato dal PiP per tipo di contenuto.",
+"internal": true
+},
+{
+"key": "SBPIPLastKnownSizeByContentType",
+"domain": "com.apple.springboard",
+"type": "other",
+"group": "SBPIPDefaults",
+"title_it": "Dimensione PiP salvata",
+"desc_it": "Stato: ultima dimensione del PiP per tipo di contenuto.",
+"internal": true
+},
+{
+"key": "SBLogMesaTimestamps",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBBiometricAuthenticationDefaults",
+"title_it": "Log timestamp Touch ID",
+"desc_it": "Registra i tempi di Touch ID (Mesa) nei log.",
+"internal": true
+},
+{
+"key": "SBRemoteDumpEnabled",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBStateDumpDefaults",
+"title_it": "State dump remoto",
+"desc_it": "Abilita il dump remoto dello stato di SpringBoard.",
+"internal": true
+},
+{
+"key": "SBRemoteDumpTimeout",
+"domain": "com.apple.springboard",
+"type": "other",
+"group": "SBStateDumpDefaults",
+"title_it": "Timeout state dump",
+"desc_it": "Timeout del dump remoto dello stato.",
+"internal": true
+},
+{
+"key": "SBTestRunnerRecoveryApplicationBundleIdentifier",
+"domain": "com.apple.springboard",
+"type": "string",
+"group": "SBTestingDefaults",
+"title_it": "App di recupero test",
+"desc_it": "Bundle ID dell'app di recupero per i test automatici.",
+"internal": true
+},
+{
+"key": "SBUnobscureIntersensorRegion",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBSystemApertureDefaults",
+"title_it": "Mostra zona tra sensori",
+"desc_it": "Non oscura la zona tra i sensori (Dynamic Island, non presente su iPhone X).",
+"internal": true
+},
+{
+"key": "SBAlwaysShowSystemApertureOnClonedDisplays",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBSystemApertureDefaults",
+"title_it": "Isola su display clonati",
+"desc_it": "Mostra sempre la Dynamic Island sui display duplicati.",
+"internal": true
+},
+{
+"key": "SBAlwaysShowSystemApertureInSnapshots",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBSystemApertureDefaults",
+"title_it": "Isola negli snapshot",
+"desc_it": "Include la Dynamic Island negli snapshot.",
+"internal": true
+},
+{
+"key": "SBStandByTime",
+"domain": "com.apple.springboard.usage",
+"type": "other",
+"group": "SBUsageDefaults",
+"title_it": "Tempo in standby",
+"desc_it": "Statistica: tempo in standby dall'ultima carica completa.",
+"internal": true
+},
+{
+"key": "SBBatteryUsageTime",
+"domain": "com.apple.springboard.usage",
+"type": "other",
+"group": "SBUsageDefaults",
+"title_it": "Tempo di utilizzo",
+"desc_it": "Statistica: tempo di utilizzo dall'ultima carica completa.",
+"internal": true
+},
+{
+"key": "SBWHaveChargedPartially",
+"domain": "com.apple.springboard.usage",
+"type": "bool",
+"default": false,
+"group": "SBUsageDefaults",
+"title_it": "Carica parziale",
+"desc_it": "Statistica: c'è stata una carica parziale.",
+"internal": true
+},
+{
+"key": "SBMedusaEnabled",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBWorkspaceDefaults",
+"title_it": "Multitasking (Split View/Slide Over)",
+"desc_it": "Abilita il multitasking a finestre (default attivo su iPad, spento su iPhone; su iPhone probabilmente instabile).",
+"internal": true,
+"note": "default YES on iPad, NO on iPhone"
+},
+{
+"key": "SBMedusaDeviceSimulation",
+"domain": "com.apple.springboard",
+"type": "int",
+"default": 0,
+"group": "SBWorkspaceDefaults",
+"title_it": "Simulazione dispositivo multitasking",
+"desc_it": "Simula il multitasking di un altro tipo di dispositivo (debug).",
+"internal": true
+},
+{
+"key": "SBNeverBreadcrumb",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBWorkspaceDefaults",
+"title_it": "Disattiva \"Torna a app\"",
+"desc_it": "Non mostra il link \"◀ App\" in alto a sinistra quando un'app ne apre un'altra.",
+"internal": false
+},
+{
+"key": "SBExternalDisplayArrangementEdge",
+"domain": "com.apple.springboard",
+"type": "int",
+"default": 1,
+"group": "SBExternalDisplayDefaults",
+"title_it": "Lato display esterno",
+"desc_it": "Lato su cui è disposto il display esterno.",
+"internal": true
+},
+{
+"key": "SBExternalDisplayArrangementOffset",
+"domain": "com.apple.springboard",
+"type": "double",
+"default": 0.0,
+"group": "SBExternalDisplayDefaults",
+"title_it": "Offset display esterno",
+"desc_it": "Scostamento della disposizione del display esterno.",
+"internal": true
+},
+{
+"key": "SBExternalDisplayMirroringEnabled",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBExternalDisplayDefaults",
+"title_it": "Duplicazione display esterno",
+"desc_it": "Duplica lo schermo sul display esterno.",
+"internal": true
+},
+{
+"key": "SBExternalDisplayEducationReasons",
+"domain": "com.apple.springboard",
+"type": "int",
+"default": 0,
+"group": "SBExternalDisplayDefaults",
+"title_it": "Educazione display esterno",
+"desc_it": "Stato: motivi per cui mostrare l'introduzione al display esterno.",
+"internal": true
+},
+{
+"key": "SBExtendedDisplayOverrideSupportForAirPlayAndDontFileRadars",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBExternalDisplayDefaults",
+"title_it": "Display esteso via AirPlay",
+"desc_it": "Forza il supporto display esteso anche via AirPlay (non supportato).",
+"internal": true
+},
+{
+"key": "SBExtendedDisplayContentsScaleAndDontFileRadars",
+"domain": "com.apple.springboard",
+"type": "double",
+"default": 2.0,
+"group": "SBExternalDisplayDefaults",
+"title_it": "Scala display esteso",
+"desc_it": "Fattore di scala dei contenuti sul display esteso.",
+"internal": true
+},
+{
+"key": "SBDisplayModeSettings",
+"domain": "com.apple.springboard",
+"type": "other",
+"default": {},
+"group": "SBExternalDisplayDefaults",
+"title_it": "Impostazioni modalità display",
+"desc_it": "Mappa delle modalità per display esterni.",
+"internal": true
+},
+{
+"key": "CHAMOIS_97748869",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": true,
+"group": "SBExternalDisplayDefaults",
+"title_it": "Flag Stage Manager",
+"desc_it": "Feature flag interno legato a Stage Manager (Chamois).",
+"internal": true
+},
+{
+"key": "SBRingerMuted",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBSoundDefaults",
+"title_it": "Suoneria silenziata",
+"desc_it": "Stato del silenziamento suoneria (gestito dall'interruttore laterale).",
+"internal": true
+},
+{
+"key": "calendar-alarm",
+"domain": "com.apple.springboard",
+"type": "string",
+"default": "/Applications/MobileCal.app/alarm.aiff",
+"group": "SBSoundDefaults",
+"title_it": "Suono allarme calendario",
+"desc_it": "Percorso del suono per gli avvisi del Calendario.",
+"internal": false
+},
+{
+"key": "silent-vibrate",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": true,
+"group": "SBSoundDefaults",
+"title_it": "Vibra in modalità silenziosa",
+"desc_it": "Vibra quando l'interruttore è su silenzioso.",
+"internal": false
+},
+{
+"key": "ring-vibrate",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": true,
+"group": "SBSoundDefaults",
+"title_it": "Vibra con suoneria",
+"desc_it": "Vibra quando squilla con suoneria attiva.",
+"internal": false
+},
+{
+"key": "SBPlaySoundOnDeviceWake",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBSoundDefaults",
+"title_it": "Suono al risveglio",
+"desc_it": "Probabilmente riproduce un suono al risveglio del dispositivo.",
+"internal": false
+},
+{
+"key": "SBForceMedusaAdoption",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBApplicationDefaults",
+"title_it": "Forza adozione multitasking",
+"desc_it": "Tratta tutte le app come compatibili con il multitasking (debug).",
+"internal": true
+},
+{
+"key": "SBIgnoreSBUsesNetwork",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBApplicationDefaults",
+"title_it": "Ignora SBUsesNetwork",
+"desc_it": "Ignora la dichiarazione di uso rete delle app (indicatore attività rete).",
+"internal": true
+},
+{
+"key": "SBShowInternalApps",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBApplicationDefaults",
+"title_it": "Mostra app interne",
+"desc_it": "Mostra le app interne nascoste.",
+"internal": true
+},
+{
+"key": "SBShowNonDefaultSystemApps",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBApplicationDefaults",
+"title_it": "Mostra app di sistema nascoste",
+"desc_it": "Mostra le app di sistema normalmente nascoste dalla Home.",
+"internal": true
+},
+{
+"key": "SBAllowScreenshotsInLoginWindow",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBApplicationDefaults",
+"title_it": "Screenshot nel login",
+"desc_it": "Consente screenshot nella finestra di login (iPad condiviso).",
+"internal": true
+},
+{
+"key": "SBBundleIdentifierToForceHomeAffordanceInset",
+"domain": "com.apple.springboard",
+"type": "string",
+"group": "SBApplicationDefaults",
+"title_it": "App con inset forzato barra Home",
+"desc_it": "Bundle ID per cui forzare l'inset dell'indicatore Home (debug).",
+"internal": true
+},
+{
+"key": "SBAllowUseOfNonRecapPPT",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBApplicationDefaults",
+"title_it": "PPT non-RECAP",
+"desc_it": "Consente test di prestazione non RECAP (debug).",
+"internal": true
+},
+{
+"key": "SBLaserForLaunchPPT",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBApplicationDefaults",
+"title_it": "Laser per PPT avvio",
+"desc_it": "Debug test di prestazione di avvio.",
+"internal": true
+},
+{
+"key": "ThermalLockoutWiFiWasEnabled",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBThermalDefaults",
+"title_it": "Wi-Fi attivo prima del blocco termico",
+"desc_it": "Stato: Wi-Fi acceso prima del blocco per surriscaldamento.",
+"internal": true
+},
+{
+"key": "SBJibblerBluetoothDisabled",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBVoiceControlDefaults",
+"title_it": "No Controllo vocale da Bluetooth",
+"desc_it": "Disattiva l'avvio del Controllo vocale da dispositivi Bluetooth.",
+"internal": false
+},
+{
+"key": "SBVoiceControlDisableHandlerActions",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBVoiceControlDefaults",
+"title_it": "Disattiva azioni Controllo vocale",
+"desc_it": "Disattiva le azioni del gestore del Controllo vocale (debug).",
+"internal": true
+},
+{
+"key": "SBJibblerLogging",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBVoiceControlDefaults",
+"title_it": "Log Controllo vocale",
+"desc_it": "Abilita il log del Controllo vocale.",
+"internal": true
+},
+{
+"key": "SBInBuddyForActivationChange",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBSetupDefaults",
+"title_it": "Configurazione per cambio attivazione",
+"desc_it": "Stato: in Configurazione iniziale per cambio di attivazione.",
+"internal": true
+},
+{
+"key": "SBSwitcherBottomEdgeGestureSwipeCount",
+"domain": "com.apple.springboard",
+"type": "int",
+"default": 0,
+"group": "SBAppSwitcherDefaults",
+"title_it": "Contatore swipe bordo inferiore",
+"desc_it": "Statistica: numero di swipe dal bordo inferiore per il multitasking.",
+"internal": true
+},
+{
+"key": "SBKillableInAppSwitcher",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBAppSwitcherDefaults",
+"title_it": "SpringBoard chiudibile nello switcher",
+"desc_it": "Probabilmente mostra SpringBoard nello switcher come chiudibile (debug).",
+"internal": true
+},
+{
+"key": "SBTrackpadSwitcherGesturesEnabled",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": true,
+"group": "SBAppSwitcherDefaults",
+"title_it": "Gesti trackpad switcher",
+"desc_it": "Abilita i gesti multitasking col trackpad.",
+"internal": false
+},
+{
+"key": "SBRecentAppLayoutsPlistRepresentation",
+"domain": "com.apple.springboard",
+"type": "other",
+"group": "SBAppSwitcherDefaults",
+"title_it": "Layout app recenti",
+"desc_it": "Stato: elenco app/layout recenti nello switcher. Non modificare.",
+"internal": true
+},
+{
+"key": "SBChamoisWindowingEnabled",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBAppSwitcherDefaults",
+"title_it": "Stage Manager",
+"desc_it": "Abilita Stage Manager (solo iPad supportati).",
+"internal": true
+},
+{
+"key": "SBChamoisWindowingEverEnabled",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBAppSwitcherDefaults",
+"title_it": "Stage Manager mai usato",
+"desc_it": "Stato: Stage Manager è stato abilitato almeno una volta.",
+"internal": true
+},
+{
+"key": "SBChamoisHideStrips",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBAppSwitcherDefaults",
+"title_it": "Stage Manager: nascondi app recenti",
+"desc_it": "Nasconde la striscia delle app recenti in Stage Manager.",
+"internal": true
+},
+{
+"key": "SBChamoisHideDock",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBAppSwitcherDefaults",
+"title_it": "Stage Manager: nascondi Dock",
+"desc_it": "Nasconde il Dock in Stage Manager.",
+"internal": true
+},
+{
+"key": "SBChamoisHideStripsExternal",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBAppSwitcherDefaults",
+"title_it": "Stage Manager: nascondi recenti (esterno)",
+"desc_it": "Nasconde le app recenti su display esterno.",
+"internal": true
+},
+{
+"key": "SBChamoisHideDockExternal",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBAppSwitcherDefaults",
+"title_it": "Stage Manager: nascondi Dock (esterno)",
+"desc_it": "Nasconde il Dock su display esterno.",
+"internal": true
+},
+{
+"key": "SBRecentDisplays",
+"domain": "com.apple.springboard",
+"type": "other",
+"group": "SBAppSwitcherDefaults",
+"title_it": "App recenti (legacy)",
+"desc_it": "Stato legacy app recenti.",
+"internal": true
+},
+{
+"key": "SBRecentDisplayItems",
+"domain": "com.apple.springboard",
+"type": "other",
+"group": "SBAppSwitcherDefaults",
+"title_it": "Elementi recenti (legacy)",
+"desc_it": "Stato legacy elementi recenti.",
+"internal": true
+},
+{
+"key": "SBRecentDisplayItemRoles",
+"domain": "com.apple.springboard",
+"type": "other",
+"group": "SBAppSwitcherDefaults",
+"title_it": "Ruoli elementi recenti (legacy)",
+"desc_it": "Stato legacy ruoli elementi recenti.",
+"internal": true
+},
+{
+"key": "SBShouldShowSplitPeekEducation",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": true,
+"group": "SBAppSwitcherDefaults",
+"title_it": "Educazione Split View",
+"desc_it": "Mostra l'introduzione a Split View.",
+"internal": false
+},
+{
+"key": "SBShouldShowSlideOverPeekEducation",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": true,
+"group": "SBAppSwitcherDefaults",
+"title_it": "Educazione Slide Over",
+"desc_it": "Mostra l'introduzione a Slide Over.",
+"internal": false
+},
+{
+"key": "SBCameraShutterButtonLongPressTimeout",
+"domain": "com.apple.springboard",
+"type": "double",
+"default": 0.25,
+"group": "SBCameraHardwareButtonDefaults",
+"title_it": "Timeout pressione lunga otturatore",
+"desc_it": "Secondi di pressione per la pressione lunga del tasto fotocamera.",
+"internal": true
+},
+{
+"key": "SBCameraShutterButtonLongPressCancellationTimeout",
+"domain": "com.apple.springboard",
+"type": "double",
+"default": 2.0,
+"group": "SBCameraHardwareButtonDefaults",
+"title_it": "Timeout annullamento pressione lunga",
+"desc_it": "Secondi oltre cui la pressione lunga del tasto fotocamera viene annullata.",
+"internal": true
+},
+{
+"key": "SBCameraShutterButtonShouldUsePocketDetection",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBCameraHardwareButtonDefaults",
+"title_it": "Rilevamento tasca otturatore",
+"desc_it": "Usa il rilevamento tasca per il tasto fotocamera.",
+"internal": true
+},
+{
+"key": "SBUseSystemGestures",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": true,
+"group": "SBGestureDefaults",
+"title_it": "Gesti di sistema",
+"desc_it": "Abilita i gesti multitasking di sistema (iPad).",
+"internal": false
+},
+{
+"key": "SBSystemGestureLogging",
+"domain": "com.apple.springboard",
+"type": "other",
+"group": "SBGestureDefaults",
+"title_it": "Log gesti di sistema",
+"desc_it": "Opzioni di log dei gesti di sistema.",
+"internal": true
+},
+{
+"key": "SBAnalyticsEngagementPlistRepresentation",
+"domain": "com.apple.springboard",
+"type": "other",
+"group": "SBAnalyticsDefaults",
+"title_it": "Dati analytics",
+"desc_it": "Stato: dati di engagement per le analisi.",
+"internal": true
+},
+{
+"key": "kSBProceduralWallpaperHomeDefaultKey",
+"domain": "com.apple.springboard",
+"type": "string",
+"group": "SBWallpaperLegacyDefaults",
+"title_it": "Sfondo procedurale Home",
+"desc_it": "ID dello sfondo procedurale/dinamico della Home (legacy).",
+"internal": true
+},
+{
+"key": "kSBProceduralWallpaperHomeOptionsKey",
+"domain": "com.apple.springboard",
+"type": "other",
+"group": "SBWallpaperLegacyDefaults",
+"title_it": "Opzioni sfondo procedurale Home",
+"desc_it": "Opzioni dello sfondo procedurale della Home (legacy).",
+"internal": true
+},
+{
+"key": "kSBProceduralWallpaperHomeUserSetKey",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBWallpaperLegacyDefaults",
+"title_it": "Sfondo Home impostato dall'utente",
+"desc_it": "Stato: sfondo procedurale Home scelto dall'utente.",
+"internal": true
+},
+{
+"key": "kSBProceduralWallpaperLockDefaultKey",
+"domain": "com.apple.springboard",
+"type": "string",
+"group": "SBWallpaperLegacyDefaults",
+"title_it": "Sfondo procedurale blocco",
+"desc_it": "ID dello sfondo procedurale della schermata di blocco (legacy).",
+"internal": true
+},
+{
+"key": "kSBProceduralWallpaperLockOptionsKey",
+"domain": "com.apple.springboard",
+"type": "other",
+"group": "SBWallpaperLegacyDefaults",
+"title_it": "Opzioni sfondo procedurale blocco",
+"desc_it": "Opzioni dello sfondo procedurale della schermata di blocco (legacy).",
+"internal": true
+},
+{
+"key": "kSBProceduralWallpaperLockUserSetKey",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBWallpaperLegacyDefaults",
+"title_it": "Sfondo blocco impostato dall'utente",
+"desc_it": "Stato: sfondo procedurale blocco scelto dall'utente.",
+"internal": true
+},
+{
+"key": "SBWallpaperParallaxFactorHomeScreen",
+"domain": "com.apple.springboard",
+"type": "double",
+"default": 1.0,
+"group": "SBWallpaperLegacyDefaults",
+"title_it": "Parallasse sfondo Home",
+"desc_it": "Fattore di parallasse dello sfondo Home (legacy).",
+"internal": true
+},
+{
+"key": "SBWallpaperZoomScaleHomeScreen",
+"domain": "com.apple.springboard",
+"type": "double",
+"default": 1.0,
+"group": "SBWallpaperLegacyDefaults",
+"title_it": "Zoom sfondo Home",
+"desc_it": "Scala di zoom dello sfondo Home (legacy).",
+"internal": true
+},
+{
+"key": "SBWallpaperCropRectHomeScreenKey",
+"domain": "com.apple.springboard",
+"type": "string",
+"group": "SBWallpaperLegacyDefaults",
+"title_it": "Ritaglio sfondo Home",
+"desc_it": "Rettangolo di ritaglio dello sfondo Home (legacy).",
+"internal": true
+},
+{
+"key": "SBWallpaperScrollHomeScreenKey",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBWallpaperLegacyDefaults",
+"title_it": "Ritaglio supportato Home",
+"desc_it": "Lo sfondo Home supporta il ritaglio/scorrimento (legacy).",
+"internal": true
+},
+{
+"key": "SBWallpaperMagnifyHomeScreenKey",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBWallpaperLegacyDefaults",
+"title_it": "Zoom prospettico Home",
+"desc_it": "Zoom prospettico dello sfondo Home (legacy).",
+"internal": true
+},
+{
+"key": "SBWallpaperPortraitHomeScreenKey",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": true,
+"group": "SBWallpaperLegacyDefaults",
+"title_it": "Sfondo Home verticale",
+"desc_it": "Lo sfondo Home è verticale (legacy).",
+"internal": true
+},
+{
+"key": "SBWallpaperNameHomeScreenKey",
+"domain": "com.apple.springboard",
+"type": "string",
+"group": "SBWallpaperLegacyDefaults",
+"title_it": "Nome sfondo Home",
+"desc_it": "Nome dello sfondo Home (legacy).",
+"internal": true
+},
+{
+"key": "SBWallpaperWallpaperKitDataHomeScreenKey",
+"domain": "com.apple.springboard",
+"type": "other",
+"group": "SBWallpaperLegacyDefaults",
+"title_it": "Dati WallpaperKit Home",
+"desc_it": "Dati WallpaperKit dello sfondo Home (legacy).",
+"internal": true
+},
+{
+"key": "SBWallpaperParallaxFactorLockScreen",
+"domain": "com.apple.springboard",
+"type": "double",
+"default": 1.0,
+"group": "SBWallpaperLegacyDefaults",
+"title_it": "Parallasse sfondo blocco",
+"desc_it": "Fattore di parallasse dello sfondo di blocco (legacy).",
+"internal": true
+},
+{
+"key": "SBWallpaperZoomScaleLockScreen",
+"domain": "com.apple.springboard",
+"type": "double",
+"default": 1.0,
+"group": "SBWallpaperLegacyDefaults",
+"title_it": "Zoom sfondo blocco",
+"desc_it": "Scala di zoom dello sfondo di blocco (legacy).",
+"internal": true
+},
+{
+"key": "SBWallpaperCropRectLockScreenKey",
+"domain": "com.apple.springboard",
+"type": "string",
+"group": "SBWallpaperLegacyDefaults",
+"title_it": "Ritaglio sfondo blocco",
+"desc_it": "Rettangolo di ritaglio dello sfondo di blocco (legacy).",
+"internal": true
+},
+{
+"key": "SBWallpaperScrollLockScreenKey",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBWallpaperLegacyDefaults",
+"title_it": "Ritaglio supportato blocco",
+"desc_it": "Lo sfondo di blocco supporta il ritaglio (legacy).",
+"internal": true
+},
+{
+"key": "SBWallpaperMagnifyLockScreenKey",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBWallpaperLegacyDefaults",
+"title_it": "Zoom prospettico blocco",
+"desc_it": "Zoom prospettico dello sfondo di blocco (legacy).",
+"internal": true
+},
+{
+"key": "SBWallpaperPortraitLockScreenKey",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": true,
+"group": "SBWallpaperLegacyDefaults",
+"title_it": "Sfondo blocco verticale",
+"desc_it": "Lo sfondo di blocco è verticale (legacy).",
+"internal": true
+},
+{
+"key": "SBWallpaperHasVideoKey",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBWallpaperLegacyDefaults",
+"title_it": "Sfondo blocco video",
+"desc_it": "Lo sfondo di blocco è un video/Live Photo (legacy).",
+"internal": true
+},
+{
+"key": "SBWallpaperStillTimeInVideoKey",
+"domain": "com.apple.springboard",
+"type": "double",
+"default": 0.0,
+"group": "SBWallpaperLegacyDefaults",
+"title_it": "Fotogramma fermo video",
+"desc_it": "Istante del fotogramma fermo nel video di sfondo (legacy).",
+"internal": true
+},
+{
+"key": "SBWallpaperNameLockScreenKey",
+"domain": "com.apple.springboard",
+"type": "string",
+"group": "SBWallpaperLegacyDefaults",
+"title_it": "Nome sfondo blocco",
+"desc_it": "Nome dello sfondo di blocco (legacy).",
+"internal": true
+},
+{
+"key": "SBWallpaperWallpaperKitDataLockScreenKey",
+"domain": "com.apple.springboard",
+"type": "other",
+"group": "SBWallpaperLegacyDefaults",
+"title_it": "Dati WallpaperKit blocco",
+"desc_it": "Dati WallpaperKit dello sfondo di blocco (legacy).",
+"internal": true
+},
+{
+"key": "SBWallpaperColorLockScreen",
+"domain": "com.apple.springboard",
+"type": "other",
+"group": "SBWallpaperLegacyDefaults",
+"title_it": "Colore sfondo blocco",
+"desc_it": "Colore a tinta unita dello sfondo di blocco (legacy).",
+"internal": true
+},
+{
+"key": "SBWallpaperColorHomeScreen",
+"domain": "com.apple.springboard",
+"type": "other",
+"group": "SBWallpaperLegacyDefaults",
+"title_it": "Colore sfondo Home",
+"desc_it": "Colore a tinta unita dello sfondo Home (legacy).",
+"internal": true
+},
+{
+"key": "SBWallpaperImageHashLockScreen",
+"domain": "com.apple.springboard",
+"type": "other",
+"group": "SBWallpaperLegacyDefaults",
+"title_it": "Hash immagine blocco",
+"desc_it": "Hash dell'immagine di sfondo di blocco (legacy).",
+"internal": true
+},
+{
+"key": "SBWallpaperImageHashHomeScreen",
+"domain": "com.apple.springboard",
+"type": "other",
+"group": "SBWallpaperLegacyDefaults",
+"title_it": "Hash immagine Home",
+"desc_it": "Hash dell'immagine di sfondo Home (legacy).",
+"internal": true
+},
+{
+"key": "SBWallpaperGradientLockScreen",
+"domain": "com.apple.springboard",
+"type": "other",
+"group": "SBWallpaperLegacyDefaults",
+"title_it": "Gradiente sfondo blocco",
+"desc_it": "Gradiente dello sfondo di blocco (legacy).",
+"internal": true
+},
+{
+"key": "SBWallpaperGradientHomeScreen",
+"domain": "com.apple.springboard",
+"type": "other",
+"group": "SBWallpaperLegacyDefaults",
+"title_it": "Gradiente sfondo Home",
+"desc_it": "Gradiente dello sfondo Home (legacy).",
+"internal": true
+},
+{
+"key": "SBLastSystemVersion",
+"domain": "com.apple.springboard",
+"type": "string",
+"group": "SBBootDefaults",
+"title_it": "Ultima versione sistema",
+"desc_it": "Stato: build iOS all'ultimo avvio (usato per migrazioni).",
+"internal": true
+},
+{
+"key": "SBLastRestoreIdentifier",
+"domain": "com.apple.springboard",
+"type": "string",
+"group": "SBBootDefaults",
+"title_it": "Ultimo ID ripristino",
+"desc_it": "Stato: identificativo dell'ultimo ripristino.",
+"internal": true
+},
+{
+"key": "SBDontLockAfterCrash",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBBootDefaults",
+"title_it": "Non bloccare dopo crash",
+"desc_it": "Dopo un crash/respring di SpringBoard non mostra la schermata di blocco.",
+"internal": false
+},
+{
+"key": "SBRecordBootToSpringBoardDidFinishLaunchingTime",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBBootDefaults",
+"title_it": "Misura tempo di avvio",
+"desc_it": "Registra il tempo dall'avvio a SpringBoard pronto (debug).",
+"internal": true
+},
+{
+"key": "SBHasCompletedSynchronizingCloudCriticalData",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBBootDefaults",
+"title_it": "Sync dati cloud critici",
+"desc_it": "Stato: sincronizzazione dei dati cloud critici completata.",
+"internal": true
+},
+{
+"key": "SBBootTransitionContext",
+"domain": "com.apple.springboard",
+"type": "other",
+"group": "SBBootDefaults",
+"title_it": "Contesto transizione avvio",
+"desc_it": "Stato: contesto della transizione di avvio.",
+"internal": true
+},
+{
+"key": "SBMinimumLockscreenIdleTime",
+"domain": "com.apple.springboard",
+"type": "double",
+"default": 0.0,
+"group": "SBIdleTimerDefaults",
+"title_it": "Tempo minimo inattività blocco",
+"desc_it": "Probabilmente il tempo minimo prima dello spegnimento sulla schermata di blocco (0 = default).",
+"internal": false
+},
+{
+"key": "SBDisableAutoDim",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBIdleTimerDefaults",
+"title_it": "Disattiva auto-oscuramento",
+"desc_it": "Lo schermo non si oscura né si spegne per inattività.",
+"internal": false
+},
+{
+"key": "SBDontDimOrLockOnAC",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBIdleTimerDefaults",
+"title_it": "Non oscurare sotto carica",
+"desc_it": "Non oscura né blocca lo schermo quando collegato all'alimentazione.",
+"internal": false
+},
+{
+"key": "SBSupportLiftToWake",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": true,
+"group": "SBIdleTimerDefaults",
+"title_it": "Alza per riattivare",
+"desc_it": "Riattiva lo schermo sollevando l'iPhone.",
+"internal": false
+},
+{
+"key": "SBSupportTapToWake",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": true,
+"group": "SBIdleTimerDefaults",
+"title_it": "Tocca per riattivare",
+"desc_it": "Riattiva lo schermo toccandolo.",
+"internal": false
+},
+{
+"key": "SBDisableAttentionAwareness",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBIdleTimerDefaults",
+"title_it": "Disattiva rilevamento attenzione",
+"desc_it": "Disattiva il rilevamento dello sguardo (Face ID) per oscuramento/blocco.",
+"internal": false
+},
+{
+"key": "SBEnableExtraBacklightLogging",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBIdleTimerDefaults",
+"title_it": "Log retroilluminazione",
+"desc_it": "Log aggiuntivi sulla retroilluminazione.",
+"internal": true
+},
+{
+"key": "SBHasSeenACaseLatchCoverOnce",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBHardwareDefaults",
+"title_it": "Custodia smart rilevata",
+"desc_it": "Stato: è stata rilevata almeno una volta una custodia smart.",
+"internal": true
+},
+{
+"key": "SBDisableHomeButton",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBHardwareDefaults",
+"title_it": "Disattiva tasto Home",
+"desc_it": "Disattiva il tasto Home fisico (non presente su iPhone X).",
+"internal": true
+},
+{
+"key": "SBUseHardwareSwitchAsOrientationLock",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBHardwareDefaults",
+"title_it": "Interruttore come blocco rotazione",
+"desc_it": "L'interruttore laterale blocca la rotazione invece di silenziare (iPad vecchi).",
+"internal": false
+},
+{
+"key": "SBDisableProximity",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBHardwareDefaults",
+"title_it": "Disattiva sensore prossimità",
+"desc_it": "Disattiva il sensore di prossimità (es. durante le chiamate).",
+"internal": false
+},
+{
+"key": "SBDisableHomeButtonDoublePress",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBHardwareDefaults",
+"title_it": "Disattiva doppio clic Home",
+"desc_it": "Disattiva il doppio clic del tasto Home.",
+"internal": true
+},
+{
+"key": "SBButtonForceFeel",
+"domain": "com.apple.springboard",
+"type": "int",
+"default": 2,
+"group": "SBHardwareDefaults",
+"title_it": "Feedback tasto Home",
+"desc_it": "Intensità aptica del tasto Home (1-3; non applicabile a iPhone X).",
+"internal": true
+},
+{
+"key": "SBDisableNaturalVolumeButtonArrangement",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBHardwareDefaults",
+"title_it": "Disattiva volume \"naturale\"",
+"desc_it": "Disattiva l'inversione dei tasti volume in base all'orientamento (iPad).",
+"internal": false
+},
+{
+"key": "SBBottomLeftCornerGestureFeature",
+"domain": "com.apple.springboard",
+"type": "int",
+"default": 0,
+"group": "SBCornerGestureDefaults",
+"title_it": "Gesto angolo in basso a sinistra",
+"desc_it": "Funzione del gesto dall'angolo in basso a sinistra (es. screenshot / Nota rapida, iPad).",
+"internal": false
+},
+{
+"key": "SBBottomLeftCornerGestureTouchTypes",
+"domain": "com.apple.springboard",
+"type": "int",
+"default": 3,
+"group": "SBCornerGestureDefaults",
+"title_it": "Tipo tocco angolo sinistro",
+"desc_it": "Tipi di tocco (dito/Pencil) accettati nell'angolo in basso a sinistra.",
+"internal": false
+},
+{
+"key": "SBBottomRightCornerGestureFeature",
+"domain": "com.apple.springboard",
+"type": "int",
+"default": 1,
+"group": "SBCornerGestureDefaults",
+"title_it": "Gesto angolo in basso a destra",
+"desc_it": "Funzione del gesto dall'angolo in basso a destra (iPad).",
+"internal": false
+},
+{
+"key": "SBBottomRightCornerGestureTouchTypes",
+"domain": "com.apple.springboard",
+"type": "int",
+"default": 3,
+"group": "SBCornerGestureDefaults",
+"title_it": "Tipo tocco angolo destro",
+"desc_it": "Tipi di tocco accettati nell'angolo in basso a destra.",
+"internal": false
+},
+{
+"key": "SBDisablesSOSForAccessibility",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBSOSDefaults",
+"title_it": "Disattiva SOS per accessibilità",
+"desc_it": "Disattiva SOS emergenze per conflitti con scorciatoie di accessibilità.",
+"internal": true
+},
+{
+"key": "SBPerformedCheckForTripleClickSOSMigrationAlert",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBSOSDefaults",
+"title_it": "Controllo migrazione SOS triplo clic",
+"desc_it": "Stato: controllo migrazione SOS col triplo clic già eseguito.",
+"internal": true
+},
+{
+"key": "SBNotificationCenterUseDuet",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": true,
+"group": "SBNotificationCenterDefaults",
+"title_it": "Suggerimenti Duet nel Centro notifiche",
+"desc_it": "Usa i suggerimenti Duet nel Centro notifiche/widget.",
+"internal": true
+},
+{
+"key": "SBBatteryWidgetAlwaysAvailable",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBNotificationCenterDefaults",
+"title_it": "Widget Batterie sempre disponibile",
+"desc_it": "Mostra sempre il widget Batterie.",
+"internal": false
+},
+{
+"key": "SBShowInternalWidgets",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBNotificationCenterDefaults",
+"title_it": "Widget interni",
+"desc_it": "Mostra widget riservati alle build interne Apple.",
+"internal": true
+},
+{
+"key": "SBWidgetSnapshottingEnabled",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": true,
+"group": "SBNotificationCenterDefaults",
+"title_it": "Snapshot widget",
+"desc_it": "Abilita gli snapshot dei widget.",
+"internal": true
+},
+{
+"key": "SBWidgetLogging",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBNotificationCenterDefaults",
+"title_it": "Log widget",
+"desc_it": "Log aggiuntivi per i widget.",
+"internal": true
+},
+{
+"key": "SBWidgetSnapshotDebugLabels",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBNotificationCenterDefaults",
+"title_it": "Etichette debug snapshot widget",
+"desc_it": "Mostra etichette di debug sugli snapshot dei widget.",
+"internal": true
+},
+{
+"key": "SBDidPurgeNonCAMLSnapshots",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBNotificationCenterDefaults",
+"title_it": "Pulizia snapshot non-CAML",
+"desc_it": "Stato: snapshot vecchi eliminati.",
+"internal": true
+},
+{
+"key": "SBDidPurgeNonASTCSnapshots",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBNotificationCenterDefaults",
+"title_it": "Pulizia snapshot non-ASTC",
+"desc_it": "Stato: snapshot vecchi eliminati.",
+"internal": true
+},
+{
+"key": "SBStoreDemoAppLock",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBDemoDefaults",
+"title_it": "Blocco app demo Apple Store",
+"desc_it": "Blocca le app in modalità demo negozio.",
+"internal": true
+},
+{
+"key": "SBDisplayIDsWithBadgingEnabled",
+"domain": "com.apple.springboard",
+"type": "other",
+"group": "SBNotificationDefaults",
+"title_it": "App con badge",
+"desc_it": "Elenco legacy delle app con badge abilitati.",
+"internal": true
+},
+{
+"key": "AlarmList",
+"domain": "com.apple.springboard",
+"type": "other",
+"group": "SBNotificationDefaults",
+"title_it": "Elenco allarmi (legacy)",
+"desc_it": "Elenco allarmi legacy.",
+"internal": true
+},
+{
+"key": "SBTestBannerPlaysTextTone",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBNotificationDefaults",
+"title_it": "Banner di test con suono",
+"desc_it": "Il banner di test riproduce il suono messaggio.",
+"internal": true
+},
+{
+"key": "SBBulletinDontSuppressForPrivacyWhenUnlocked",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBNotificationDefaults",
+"title_it": "Mostra anteprime se sbloccato",
+"desc_it": "Probabilmente non nasconde le anteprime notifiche per privacy quando sbloccato.",
+"internal": false
+},
+{
+"key": "SBAlwaysAllowDefaultAction",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBNotificationDefaults",
+"title_it": "Consenti sempre azione predefinita",
+"desc_it": "Consente sempre l'azione predefinita delle notifiche (debug).",
+"internal": true
+},
+{
+"key": "SBAlwaysAllowLongLookGesture",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBNotificationDefaults",
+"title_it": "Consenti sempre espansione notifica",
+"desc_it": "Consente sempre l'espansione (long look) delle notifiche.",
+"internal": true
+},
+{
+"key": "NCAlwaysSpeakNotifications",
+"domain": "com.apple.springboard",
+"type": "bool",
+"default": false,
+"group": "SBNotificationDefaults",
+"title_it": "Leggi sempre le notifiche",
+"desc_it": "Probabilmente fa leggere ad alta voce tutte le notifiche.",
+"internal": false
+},
+{
+"key": "coachingHintsEnabled",
+"domain": "com.apple.biometrickitd",
+"type": "bool",
+"default": true,
+"group": "SBBiometricKitDefaults",
+"title_it": "Suggerimenti Face ID/Touch ID",
+"desc_it": "Mostra i suggerimenti di posizionamento per l'autenticazione biometrica.",
+"internal": false
+},
+{
+"key": "LockIcons",
+"domain": "com.apple.demo-settings",
+"type": "bool",
+"default": false,
+"group": "SBExternalDemoDefaults",
+"title_it": "Blocca icone (demo)",
+"desc_it": "Blocca le icone in modalità demo negozio.",
+"internal": true
+},
+{
+"key": "DuetWhitelistedApps",
+"domain": "com.apple.Duet",
+"type": "other",
+"group": "SBExternalDuetDefaults",
+"title_it": "App consentite Duet",
+"desc_it": "Elenco app consentite per i suggerimenti Duet.",
+"internal": true
+},
+{
+"key": "DisableOnLockScreen",
+"domain": "com.apple.mobilenotes",
+"type": "bool",
+"default": false,
+"group": "SBExternalNotesDefaults",
+"title_it": "Disattiva Note dal blocco",
+"desc_it": "Disattiva l'accesso a Note dalla schermata di blocco.",
+"internal": false
+},
+{
+"key": "HideMyNumber",
+"domain": "com.apple.mobilephone",
+"type": "bool",
+"default": false,
+"group": "SBExternalPhoneDefaults",
+"title_it": "Nascondi il mio numero",
+"desc_it": "Nasconde il proprio numero in uscita (impostazione Telefono).",
+"internal": false
+},
+{
+"key": "SetupDone",
+"domain": "com.apple.purplebuddy",
+"type": "bool",
+"default": false,
+"group": "SBExternalSetupDefaults",
+"title_it": "Configurazione completata",
+"desc_it": "Stato: configurazione iniziale completata. Modificarlo può riavviare Buddy.",
+"internal": true
+},
+{
+"key": "SetupState",
+"domain": "com.apple.purplebuddy",
+"type": "string",
+"group": "SBExternalSetupDefaults",
+"title_it": "Stato configurazione",
+"desc_it": "Stato della configurazione iniziale.",
+"internal": true
+},
+{
+"key": "keyboard",
+"domain": "com.apple.preferences.sounds",
+"type": "bool",
+"default": true,
+"group": "SBExternalSoundsDefaults",
+"title_it": "Clic tastiera",
+"desc_it": "Suoni della tastiera.",
+"internal": false
+},
+{
+"key": "effects-haptic",
+"domain": "com.apple.preferences.sounds",
+"type": "bool",
+"default": true,
+"group": "SBExternalSoundsDefaults",
+"title_it": "Feedback aptico di sistema",
+"desc_it": "Feedback aptico per controlli e interazioni di sistema.",
+"internal": false
+},
+{
+"key": "buttons-can-change-ringer-volume",
+"domain": "com.apple.preferences.sounds",
+"type": "bool",
+"default": false,
+"group": "SBExternalSoundsDefaults",
+"title_it": "Modifica con tasti",
+"desc_it": "I tasti volume cambiano il volume della suoneria.",
+"internal": false
+},
+{
+"key": "wifi-network",
+"domain": "com.apple.preferences.network",
+"type": "bool",
+"default": false,
+"group": "SBExternalWifiDefaults",
+"title_it": "Wi-Fi (preferenza)",
+"desc_it": "Preferenza Wi-Fi letta da SpringBoard; probabilmente non accende/spegne realmente il Wi-Fi.",
+"internal": true
+}
+]
