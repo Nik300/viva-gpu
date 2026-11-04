@@ -54,6 +54,13 @@ static void load_env_file(void)
         setenv(line, eq + 1, 0);
     }
     fclose(f);
+    // VMG_STDERR=PATH: the driver's messages of processes whose stderr goes nowhere (backboardd), appended to PATH.
+    const char *err = getenv("VMG_STDERR");
+    if (err && *err) {
+        char path[1024];
+        snprintf(path, sizeof path, "%s.%d", err, (int)getpid());
+        if (freopen(path, "a", stderr)) setvbuf(stderr, NULL, _IOLBF, 0);
+    }
 }
 
 // ---- Translation cache --------------------------------------------------------------------------------------------
@@ -581,6 +588,12 @@ vmg_texture *vmg_texture_create_iosurface(vmg_device *dev, const vmg_texture_des
         if (wh.stride && !(wh.stride & 63))
             res = dev->screen->resource_from_handle(dev->screen, &templ, &wh, PIPE_HANDLE_USAGE_FRAMEBUFFER_WRITE);
         vmg_drm_surface_fd_close((int)wh.handle);
+        if (!res && wh.stride && !(wh.stride & 63) && logged < 32) {
+            logged++;
+            fprintf(stderr, "vmg: IOSurface %u plane %u %ux%u '%c%c%c%c' bpr %u: import refused, copied (texture %ux%u %s)\n",
+                    surface_id, plane, sw, sh, sfmt >> 24, (sfmt >> 16) & 0xff, (sfmt >> 8) & 0xff, sfmt & 0xff, wh.stride,
+                    templ.width0, templ.height0, util_format_short_name(templ.format));
+        }
         if (!res) {
             templ.bind &= ~(unsigned)PIPE_BIND_SHARED;
             res = dev->screen->resource_create(dev->screen, &templ);
