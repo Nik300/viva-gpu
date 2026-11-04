@@ -251,6 +251,14 @@ void vmg_cmd_barrier(vmg_device *dev);
 
 // Submits everything recorded so far. *fence (if non-NULL) signals when the GPU has finished it.
 void vmg_flush(vmg_device *dev, vmg_fence **fence);
+
+// What the GPU queue did since the last vmg_stats_take (VMG_TRACE_FRAME, per command buffer; GPU queue only).
+typedef struct {
+    uint32_t passes, draws, dispatches, blits;
+    uint32_t copy_in, copy_out;             // CPU copies of IOSurface/buffer textures the GPU cannot use in place
+    uint64_t copy_in_bytes, copy_out_bytes;
+} vmg_cb_stats;
+void vmg_stats_take(vmg_device *dev, vmg_cb_stats *out);
 // timeout_ns: 0 = poll; UINT64_MAX = forever. Returns true when signalled.
 bool vmg_fence_wait(vmg_device *dev, vmg_fence *fence, uint64_t timeout_ns);
 // Any thread: waits for the GPU only. Visibility results are written by vmg_fence_wait, on the GPU queue, when

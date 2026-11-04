@@ -6,6 +6,7 @@
 #import <mach/mach_time.h>
 #import <objc/runtime.h>
 #import <unistd.h>
+#include "../../vgpu/vgpu.h"
 
 #define VM_CATCH_ALL(cls) + (void)initialize { if (self == [cls class]) TSMtlInstallCatchAll(self); }
 
@@ -242,7 +243,9 @@ enum { VMInlineChunk = 64 << 10, VMInlineAlign = 16 };
     VMBuffer *_inline;
     NSUInteger _inlineUsed;
     NSMutableArray<VMBuffer *> *_inlineChunks;   // back to the device's pool at completion
+    void *_vmgTrace;
 }
+@synthesize vmgTrace = _vmgTrace;
 VM_CATCH_ALL(VMCommandBuffer)
 
 - (uint64_t)protectionOptions { return 0; }               // SPI (CoreAnimation): no content protection
@@ -442,7 +445,49 @@ VM_CATCH_ALL(VMCommandQueue)
     return [[VMCommandBuffer alloc] initWithQueue:self retainedReferences:desc.retainedReferences];
 }
 
+// VMG_TRACE_FRAME=MS (stderr; VMG_STDERR for backboardd): every command buffer that took MS or more from commit to
+// completion (0: all), with where the time went (waiting for the GPU queue, replay, flush, GPU), what it recorded and
+// the kernel calls made while it was replayed and flushed. To find what a slow frame is made of.
+typedef struct {
+    uint64_t commit, start, replayed, flushed;
+    vmg_cb_stats st;
+    uint64_t calls[VGPU_SEL_COUNT], jobs;
+} VMFrameTrace;
+
+static int VMTraceFrameMs(void) {
+    static int ms = -2;
+    if (ms == -2) { const char *e = getenv("VMG_TRACE_FRAME"); ms = e ? atoi(e) : -1; }
+    return ms;
+}
+
+static double VMAbsMs(uint64_t abs) {
+    static mach_timebase_info_data_t tb;
+    if (!tb.denom) mach_timebase_info(&tb);
+    return (double)abs * tb.numer / tb.denom / 1e6;
+}
+
+static void VMTraceFramePrint(VMCommandBuffer *cb, VMFrameTrace *t, uint64_t done) {
+    static uint64_t seq;
+    seq++;
+    double total = VMAbsMs(done - t->commit);
+    if (total < VMTraceFrameMs()) return;
+    fprintf(stderr, "vmg: cb %llu '%s' %.1f ms: queue %.1f replay %.1f flush %.1f gpu %.1f | %u passes %u draws %u dispatches "
+            "%u blits, copies %u in (%llu KB) %u out (%llu KB) | %llu jobs, create_bo %llu gem_close %llu wait_bo %llu "
+            "sync_wait %llu import_surf %llu\n", (unsigned long long)seq, cb.label ? cb.label.UTF8String : "", total,
+            VMAbsMs(t->start - t->commit), VMAbsMs(t->replayed - t->start), VMAbsMs(t->flushed - t->replayed),
+            VMAbsMs(done - t->flushed), t->st.passes, t->st.draws, t->st.dispatches, t->st.blits, t->st.copy_in,
+            (unsigned long long)(t->st.copy_in_bytes >> 10), t->st.copy_out, (unsigned long long)(t->st.copy_out_bytes >> 10),
+            (unsigned long long)t->jobs, (unsigned long long)t->calls[VGPU_SEL_CREATE_BO],
+            (unsigned long long)t->calls[VGPU_SEL_GEM_CLOSE], (unsigned long long)t->calls[VGPU_SEL_WAIT_BO],
+            (unsigned long long)t->calls[VGPU_SEL_SYNCOBJ_WAIT], (unsigned long long)t->calls[VGPU_SEL_IMPORT_IOSURFACE]);
+}
+
 static void VMDidComplete(VMDevice *device, VMCommandQueue *queue, VMCommandBuffer *cb, vmg_fence *fence, uint64_t start) {
+    if (cb.vmgTrace) {
+        VMTraceFramePrint(cb, cb.vmgTrace, mach_absolute_time());
+        free(cb.vmgTrace);
+        cb.vmgTrace = NULL;
+    }
     vmg_fence_release(device.vmg, fence);
     [cb endSurfaceUse];
     [cb releaseKept];
@@ -513,12 +558,29 @@ static void VMWaitCompletion(VMDevice *device, VMCommandQueue *queue, VMCommandB
         void (^submit)(dispatch_block_t) = cb.writesSurface && !async_surface && !promise
                                                ? ^(dispatch_block_t b) { [device gpuSync:b]; }
                                                : ^(dispatch_block_t b) { [device gpuAsync:b]; };
+        VMFrameTrace *trace = VMTraceFrameMs() >= 0 ? calloc(1, sizeof *trace) : NULL;
+        if (trace) trace->commit = mach_absolute_time();
         submit(^{
             uint64_t start = mach_absolute_time();
             TSMtlStat(TSStatCommandBuffers, 1);
+            uint64_t calls0[VGPU_SEL_COUNT], jobs0 = 0;
+            if (trace) {
+                trace->start = start;
+                vmg_stats_take(device.vmg, &trace->st);   // drop what came before this command buffer
+                vgpu_counters(calls0, &jobs0);
+            }
             [cb execute];
+            if (trace) trace->replayed = mach_absolute_time();
             vmg_fence *fence = NULL;
             vmg_flush(device.vmg, &fence);
+            if (trace) {
+                trace->flushed = mach_absolute_time();
+                vmg_stats_take(device.vmg, &trace->st);
+                vgpu_counters(trace->calls, &trace->jobs);
+                for (unsigned k = 0; k < VGPU_SEL_COUNT; k++) trace->calls[k] -= calls0[k];
+                trace->jobs -= jobs0;
+                cb.vmgTrace = trace;
+            }
             vmg_surface_promise_resolve(device.vmg, promise, fence);
             // "Scheduled" after the flush: presentDrawable hands the IOSurface to the compositor from there.
             [cb didScheduleWithStartTime:start endTime:mach_absolute_time() error:nil];

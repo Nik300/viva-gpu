@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -117,6 +118,13 @@ static const char *const g_stat_names[VGPU_SEL_COUNT] = {
     [VGPU_SEL_SURFACE_PROMISE] = "SURFACE_PROMISE",
 };
 static int g_stats = -1;
+static _Atomic uint64_t g_cnt[VGPU_SEL_COUNT], g_jobs;   // always counted (VMG_TRACE_FRAME)
+
+void vgpu_counters(uint64_t calls[VGPU_SEL_COUNT], uint64_t *jobs)
+{
+    for (unsigned i = 0; i < VGPU_SEL_COUNT; i++) calls[i] = atomic_load_explicit(&g_cnt[i], memory_order_relaxed);
+    *jobs = atomic_load_explicit(&g_jobs, memory_order_relaxed);
+}
 
 static void print_stats(void)
 {
@@ -137,6 +145,10 @@ int vgpu_ioctl(int fd, enum vgpu_selector sel, void *arg)
         g_stats = getenv("VGPU_STATS") != NULL;
         if (g_stats) atexit(print_stats);
     }
+    atomic_fetch_add_explicit(&g_cnt[sel], 1, memory_order_relaxed);
+    if (sel == VGPU_SEL_SUBMIT) atomic_fetch_add_explicit(&g_jobs, 1, memory_order_relaxed);
+    else if (sel == VGPU_SEL_SUBMIT_BATCH)
+        atomic_fetch_add_explicit(&g_jobs, ((struct vgpu_submit_batch *)arg)->count, memory_order_relaxed);
     if (!g_stats) return backend()->ioctl(conn, sel, arg, selector_size[sel]);
     uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     int r = backend()->ioctl(conn, sel, arg, selector_size[sel]);

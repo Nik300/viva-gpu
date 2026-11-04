@@ -118,6 +118,7 @@ struct vmg_device {
     // VMG_TRACE_CB: fragment shaders drawn by the current command buffer (printed at the flush when the set changes)
     const char *cb_fs[24]; unsigned cb_fs_count, cb_draws; char cb_last[512];
     uint64_t copy_epoch;               // bumped by every vmg_flush and every copy-out of a copied texture
+    vmg_cb_stats stats;                // VMG_TRACE_FRAME (vmg_stats_take)
     vmg_texture **copy_out; unsigned copy_out_count, copy_out_cap;   // surface textures written, copied out at the flush
     struct pipe_rasterizer_state raster;
     void *raster_cso; bool raster_dirty;

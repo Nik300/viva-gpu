@@ -106,6 +106,9 @@ void vmg_texture_sync(vmg_device *dev, vmg_texture *t, bool to_texture)
                     w, h, util_format_short_name(t->res->format), to_texture ? "in" : "out", zero, n, black,
                     n ? (unsigned)(lum / (3 * n)) : 0, (long)ts.tv_sec, ts.tv_nsec / 1000000);
     }
+    uint64_t bytes = (uint64_t)util_format_get_stride(t->res->format, w) * util_format_get_nblocksy(t->res->format, h);
+    if (to_texture) { dev->stats.copy_in++; dev->stats.copy_in_bytes += bytes; }
+    else { dev->stats.copy_out++; dev->stats.copy_out_bytes += bytes; }
     if (to_texture) {
         struct pipe_box box;
         u_box_2d(0, 0, (int)w, (int)h, &box);
@@ -199,8 +202,15 @@ static void set_surface(struct pipe_surface *ps, vmg_texture *t, unsigned level,
     ps->first_layer = ps->last_layer = (uint16_t)layer;
 }
 
+void vmg_stats_take(vmg_device *dev, vmg_cb_stats *out)
+{
+    *out = dev->stats;
+    memset(&dev->stats, 0, sizeof dev->stats);
+}
+
 void vmg_cmd_begin_pass(vmg_device *dev, const vmg_pass_desc *pass)
 {
+    dev->stats.passes++;
     struct pipe_context *pipe = dev->pipe;
     dev->pass = *pass;
     static int trace_draw = -1;   // VMG_TRACE_DRAW=1: every pass (attachments, load/store) and draw (shader, blend)
@@ -651,6 +661,7 @@ static enum mesa_prim prim_of(uint8_t p)
 
 void vmg_cmd_draw(vmg_device *dev, const vmg_draw_info *d)
 {
+    dev->stats.draws++;
     vmg_render_pipeline *p = dev->pipeline;
     if (!p || !p->desc.vertex) return;
     struct pipe_context *pipe = dev->pipe;
@@ -711,6 +722,7 @@ void vmg_cmd_draw(vmg_device *dev, const vmg_draw_info *d)
 
 void vmg_cmd_dispatch(vmg_device *dev, const vmg_dispatch_info *d)
 {
+    dev->stats.dispatches++;
     vmg_shader *k = d->pipeline->kernel;
     struct pipe_context *pipe = dev->pipe;
     uint32_t header[12] = {0};
@@ -750,6 +762,7 @@ void vmg_cmd_dispatch(vmg_device *dev, const vmg_dispatch_info *d)
 
 void vmg_cmd_copy_buffer(vmg_device *dev, vmg_resource *src, size_t so, vmg_resource *dst, size_t doff, size_t size)
 {
+    dev->stats.blits++;
     struct pipe_box box;
     u_box_1d((int)so, (int)size, &box);
     dst->gpu_writes++;
@@ -758,6 +771,7 @@ void vmg_cmd_copy_buffer(vmg_device *dev, vmg_resource *src, size_t so, vmg_reso
 
 void vmg_cmd_fill_buffer(vmg_device *dev, vmg_resource *dst, size_t off, size_t size, uint8_t value)
 {
+    dev->stats.blits++;
     uint32_t v = value * 0x01010101u;
     dst->gpu_writes++;
     if (!(off & 3) && !(size & 3)) dev->pipe->clear_buffer(dev->pipe, dst->res, (unsigned)off, (unsigned)size, &v, 4);
@@ -767,6 +781,7 @@ void vmg_cmd_fill_buffer(vmg_device *dev, vmg_resource *dst, size_t off, size_t 
 void vmg_cmd_copy_texture(vmg_device *dev, vmg_texture *src, unsigned ss, unsigned sl, uint32_t sx, uint32_t sy, uint32_t sz,
                           uint32_t w, uint32_t h, uint32_t d, vmg_texture *dst, unsigned ds, unsigned dl, uint32_t dx, uint32_t dy, uint32_t dz)
 {
+    dev->stats.blits++;
     static int trace_draw = -1;
     if (trace_draw < 0) trace_draw = getenv("VMG_TRACE_DRAW") != NULL;
     if (trace_draw)
@@ -813,6 +828,7 @@ void vmg_cmd_copy_buffer_to_texture(vmg_device *dev, vmg_resource *src, size_t o
                                     vmg_texture *dst, unsigned slice, unsigned level, uint32_t x, uint32_t y, uint32_t z,
                                     uint32_t w, uint32_t h, uint32_t d)
 {
+    dev->stats.blits++;
     // Read the buffer through a synchronized map (waits for earlier GPU writes to it), then upload.
     struct pipe_box sbox;
     u_box_1d((int)off, (int)(image_pitch * MAX2(d, 1) ? image_pitch * MAX2(d, 1) : row_pitch * h), &sbox);
@@ -829,6 +845,7 @@ void vmg_cmd_copy_texture_to_buffer(vmg_device *dev, vmg_texture *src, unsigned 
                                     uint32_t z, uint32_t w, uint32_t h, uint32_t d, vmg_resource *dst, size_t off,
                                     size_t row_pitch, size_t image_pitch)
 {
+    dev->stats.blits++;
     vmg_texture_sync(dev, src, true);
     struct pipe_box dbox;
     size_t total = image_pitch ? image_pitch * MAX2(d, 1) : row_pitch * h;
@@ -843,6 +860,7 @@ void vmg_cmd_copy_texture_to_buffer(vmg_device *dev, vmg_texture *src, unsigned 
 
 void vmg_cmd_generate_mipmaps(vmg_device *dev, vmg_texture *t)
 {
+    dev->stats.blits++;
     util_gen_mipmap(dev->pipe, t->res, t->format, t->first_level, t->last_level, t->first_layer, t->last_layer,
                     PIPE_TEX_FILTER_LINEAR);
 }

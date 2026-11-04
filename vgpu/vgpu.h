@@ -28,6 +28,8 @@ int vgpu_close(int fd);
 bool vgpu_is_fd(int fd);
 // One selector of viva_gpu_uapi.h; arg points to its structure (sizeof checked). Returns 0 or -errno.
 int vgpu_ioctl(int fd, enum vgpu_selector sel, void *arg);
+// Running totals (any thread; relaxed): kernel calls per selector, and job chains submitted (SUBMIT + batched ones).
+void vgpu_counters(uint64_t calls[VGPU_SEL_COUNT], uint64_t *jobs);
 // Maps a BO: token = vgpu_mmap_bo.offset. Returns the CPU address or NULL (errno set).
 void *vgpu_mmap(int fd, uint64_t token, size_t size);
 int vgpu_munmap(int fd, void *addr, size_t size);

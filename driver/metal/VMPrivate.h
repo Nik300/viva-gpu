@@ -247,6 +247,7 @@ NSData *VMBitcodeOfFunction(id<MTLFunction> function);
 @property (readonly) BOOL writesSurface;
 // Commit: a kernel promise on the written IOSurfaces, or 0 (see VMCommands.m).
 - (uint32_t)promiseWrittenSurfaces:(VMDevice *)device;
+@property (nonatomic) void *vmgTrace;   // VMG_TRACE_FRAME record (VMCommands.m)
 @end
 
 id<MTLRenderCommandEncoder> VMNewRenderEncoder(VMCommandBuffer *cb, MTLRenderPassDescriptor *desc);
