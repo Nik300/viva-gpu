@@ -461,6 +461,7 @@ vmg_resource *vmg_buffer_create(vmg_device *dev, size_t size, void *user_memory,
     if (user_memory && r->map != user_memory && r->map) {   // copy fallback
         memcpy(r->map, user_memory, size);
         r->user_copy = true;
+        r->user_ptr = user_memory;
     }
     if (contents) *contents = r->map;
     return r;
@@ -476,6 +477,11 @@ void vmg_resource_release(vmg_device *dev, vmg_resource *r)
     if (!r) return;
     if (r->transfer) dev->pipe->buffer_unmap(dev->pipe, r->transfer);
     pipe_resource_reference(&r->res, NULL);
+    for (struct vmg_buffer_copy *c = r->copies, *n; c; c = n) {
+        n = c->next;
+        pipe_resource_reference(&c->res, NULL);
+        free(c);
+    }
     free(r);
 }
 
@@ -694,10 +700,33 @@ vmg_texture *vmg_texture_create_buffer(vmg_device *dev, const vmg_texture_desc *
         fprintf(stderr, "vmg: buffer texture %ux%u %s offset %zu bpr %zu: copied at each command buffer that samples it\n",
                 templ.width0, templ.height0, util_format_short_name(templ.format), offset, bpr);
     }
-    res = dev->screen->resource_create(dev->screen, &templ);
-    if (!res) return NULL;
+    struct vmg_buffer_copy *c = NULL;
+    if (buffer->user_copy && buffer->map) {
+        for (c = buffer->copies; c; c = c->next) {
+            const struct pipe_resource *o = c->res;
+            if (c->offset == offset && c->bpr == bpr && o->format == templ.format && o->target == templ.target &&
+                o->width0 == templ.width0 && o->height0 == templ.height0 && o->depth0 == templ.depth0 &&
+                o->array_size == templ.array_size && o->last_level == templ.last_level &&
+                o->nr_samples == templ.nr_samples && o->bind == templ.bind)
+                break;
+        }
+        if (c) pipe_resource_reference(&res, c->res);
+    }
+    if (!res) {
+        res = dev->screen->resource_create(dev->screen, &templ);
+        if (!res) return NULL;
+        if (buffer->user_copy && buffer->map) {
+            c = calloc(1, sizeof *c);
+            if (c) {
+                c->offset = offset; c->bpr = bpr;
+                pipe_resource_reference(&c->res, res);
+                c->next = buffer->copies;
+                buffer->copies = c;
+            }
+        }
+    }
     vmg_texture *t = texture_wrap(res, d);
-    if (buffer->map) { t->buffer = buffer; t->buffer_offset = offset; t->buffer_bpr = bpr; t->surface_copy = true; }
+    if (buffer->map) { t->buffer = buffer; t->buffer_offset = offset; t->buffer_bpr = bpr; t->surface_copy = true; t->bcopy = c; }
     return t;
 }
 
@@ -727,6 +756,7 @@ vmg_texture *vmg_texture_create_view(vmg_device *dev, vmg_texture *parent, unsig
     t->surface_id = parent->surface_id; t->plane = parent->plane; t->surface_copy = parent->surface_copy;
     if (parent->surface) t->surface = (void *)CFRetain(parent->surface);
     t->buffer = parent->buffer; t->buffer_offset = parent->buffer_offset; t->buffer_bpr = parent->buffer_bpr;
+    t->bcopy = parent->bcopy;
     return t;
 }
 

@@ -27,6 +27,19 @@ struct vmg_resource {
     uint64_t gpu_writes;
     bool user_copy;
     volatile bool cpu_access;
+    void *user_ptr;                   // user_copy: the client's memory (cached; the BO mapping is write-combined)
+    // user_copy buffers: the copied textures over them, shared by every texture over the same region with the same
+    // layout. CoreAnimation makes new texture objects over the same image buffers (the wallpaper, ~10 MB, when the
+    // home screen comes back): each started with its own full copy-in.
+    struct vmg_buffer_copy *copies;
+};
+
+struct vmg_buffer_copy {
+    struct vmg_buffer_copy *next;
+    size_t offset, bpr;
+    struct pipe_resource *res;        // owned reference
+    uint64_t gen;                     // buffer->gpu_writes at its last copy-in
+    bool filled;
 };
 
 struct vmg_texture {
@@ -50,6 +63,7 @@ struct vmg_texture {
     vmg_resource *buffer; size_t buffer_offset, buffer_bpr;
     uint64_t buffer_hash;             // XXH3 of the buffer bytes at the last copy-in: unchanged = no copy-in
     uint64_t buffer_gen;              // buffer->gpu_writes at the last copy-in (user_copy buffers: no hashing)
+    struct vmg_buffer_copy *bcopy;    // user_copy buffers: the shared copy this texture samples (else NULL)
     bool buffer_hash_valid;
     uint64_t copy_epoch;              // dev->copy_epoch at the last copy (see vmg_texture_sync)
     bool copy_out_pending;            // the GPU wrote it this command buffer; copied out at the flush (vmg_flush)

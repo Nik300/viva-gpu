@@ -64,9 +64,14 @@ void vmg_texture_sync(vmg_device *dev, vmg_texture *t, bool to_texture)
     // of a frame (two wallpaper images ~14 MB, plus an upload blit each). The bytes are hashed instead (XXH3, a
     // fraction of the copy) and copied only when they changed. VMG_SURFACE_RECOPY=1 copies them every time.
     if (to_texture && t->buffer && !recopy && t->buffer->user_copy && !t->buffer->cpu_access) {
-        if (t->buffer_hash_valid && t->buffer_gen == t->buffer->gpu_writes) return;
+        struct vmg_buffer_copy *c = t->bcopy;
+        if (c ? c->filled && c->gen == t->buffer->gpu_writes
+              : t->buffer_hash_valid && t->buffer_gen == t->buffer->gpu_writes) return;
+        if (c) { c->gen = t->buffer->gpu_writes; c->filled = true; }
         t->buffer_gen = t->buffer->gpu_writes;
         t->buffer_hash_valid = true;
+        // Nothing wrote the BO since its creation: the client's memory holds the same bytes, and it is cached.
+        if (t->buffer->gpu_writes == 0 && t->buffer->user_ptr) base = (uint8_t *)t->buffer->user_ptr + t->buffer_offset;
     } else if (to_texture && t->buffer && !recopy) {
         t->buffer_gen = t->buffer->gpu_writes;
         size_t len = (size_t)bpr * (util_format_get_nblocksy(t->res->format, h) - 1) + util_format_get_stride(t->res->format, w);
@@ -79,6 +84,7 @@ void vmg_texture_sync(vmg_device *dev, vmg_texture *t, bool to_texture)
     } else if (t->buffer) {
         t->buffer_hash_valid = false;   // copied out (the buffer now holds the texture) or recopy: hash again
         if (!to_texture) t->buffer->gpu_writes++;
+        if (t->bcopy) t->bcopy->filled = false;
     }
     uint32_t lock_seed = 0;
     if (s) IOSurfaceLock(s, to_texture ? kIOSurfaceLockReadOnly : 0, &lock_seed);
