@@ -29,7 +29,7 @@ static int cmp(const void *a, const void *b) { double x = *(const double *)a, y 
 
 static id<MTLTexture> surfaceTexture(id<MTLDevice> dev) {
     size_t bpr = (W * 4 + 63) & ~(size_t)63;
-    NSDictionary *p = @{ (id)kIOSurfaceWidth: @W, (id)kIOSurfaceHeight: @H, (id)kIOSurfaceBytesPerElement: @4,
+    NSDictionary *p = @{ (id)kIOSurfaceWidth: @(W), (id)kIOSurfaceHeight: @(H), (id)kIOSurfaceBytesPerElement: @4,
                          (id)kIOSurfaceBytesPerRow: @(bpr), (id)kIOSurfacePixelFormat: @((uint32_t)'BGRA') };
     IOSurfaceRef s = IOSurfaceCreate((__bridge CFDictionaryRef)p);
     MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:W height:H mipmapped:NO];
