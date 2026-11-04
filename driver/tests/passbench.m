@@ -17,7 +17,13 @@ static NSString *const kMSL = @
     "#include <metal_stdlib>\nusing namespace metal;\n"
     "struct V { float4 p [[position]]; };\n"
     "vertex V vs(uint i [[vertex_id]]) { V v; float2 t = float2((i << 1) & 2, i & 2); v.p = float4(t * 2 - 1, 0, 1); return v; }\n"
-    "fragment half4 fs(constant float4 &c [[buffer(0)]]) { return half4(c); }\n";
+    "fragment half4 fs(constant float4 &c [[buffer(0)]]) { return half4(c); }\n"
+    "fragment half4 fs_lit() { return half4(0.5, 0.2, 0.3, 0.25); }\n"
+    "fragment half4 fs_tex(V v [[stage_in]], texture2d<half> t [[texture(0)]], sampler s [[sampler(0)]]) {\n"
+    "  return t.sample(s, v.p.xy / float2(1125, 2436)) * half(0.25); }\n";
+
+static id<MTLTexture> g_src;   // sampled by fs_tex
+static id<MTLSamplerState> g_smp;
 
 static double ms(uint64_t abs) {
     static mach_timebase_info_data_t tb;
@@ -61,6 +67,8 @@ static double run(id<MTLCommandQueue> q, id<MTLRenderPipelineState> ps, id<MTLTe
             rp.colorAttachments[0].clearColor = MTLClearColorMake(0.1, 0.2, 0.3, 1);
             id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
             [e setRenderPipelineState:ps];
+            [e setFragmentTexture:g_src atIndex:0];
+            [e setFragmentSamplerState:g_smp atIndex:0];
             for (int i = 0; i < draws; i++) {
                 float c[4] = { 0.5f, 0.1f * (i % 10), 0.3f, 0.25f };
                 [e setFragmentBytes:c length:sizeof c atIndex:0];
@@ -89,12 +97,24 @@ int main(int argc, char **argv) {
         MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
         pd.vertexFunction = [lib newFunctionWithName:@"vs"];
         pd.fragmentFunction = [lib newFunctionWithName:@"fs"];
+        id<MTLRenderPipelineState> variants[4];   // fs_lit, fs_tex blended; fs_lit, fs unblended
         pd.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
         pd.colorAttachments[0].blendingEnabled = YES;
         pd.colorAttachments[0].sourceRGBBlendFactor = pd.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorOne;
         pd.colorAttachments[0].destinationRGBBlendFactor = pd.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
         id<MTLRenderPipelineState> ps = [dev newRenderPipelineStateWithDescriptor:pd error:&err];
         if (!ps) { fprintf(stderr, "passbench: %s\n", err.description.UTF8String); return 1; }
+        pd.fragmentFunction = [lib newFunctionWithName:@"fs_lit"];
+        variants[0] = [dev newRenderPipelineStateWithDescriptor:pd error:&err];
+        pd.fragmentFunction = [lib newFunctionWithName:@"fs_tex"];
+        variants[1] = [dev newRenderPipelineStateWithDescriptor:pd error:&err];
+        pd.colorAttachments[0].blendingEnabled = NO;
+        pd.fragmentFunction = [lib newFunctionWithName:@"fs_lit"];
+        variants[2] = [dev newRenderPipelineStateWithDescriptor:pd error:&err];
+        pd.fragmentFunction = [lib newFunctionWithName:@"fs"];
+        variants[3] = [dev newRenderPipelineStateWithDescriptor:pd error:&err];
+        g_src = privateTexture(dev);
+        g_smp = [dev newSamplerStateWithDescriptor:[MTLSamplerDescriptor new]];
         id<MTLCommandQueue> q = [dev newCommandQueue];
         id<MTLTexture> tex[2] = { surfaceTexture(dev), privateTexture(dev) };
         const char *names[2] = { "IOSurface (linear)", "private" };
@@ -110,6 +130,13 @@ int main(int argc, char **argv) {
             printf("  1 pass, 10 full-screen blended draws: load+store %.2f\n",
                    run(q, ps, tex[k], 1, 10, MTLLoadActionLoad, MTLStoreActionStore, runs));
         }
+        printf("private, 1 pass, 10 full-screen draws (clear+store), by fragment shader:\n");
+        printf("  blended: constant buffer %.2f  literal %.2f  texture %.2f | opaque: literal %.2f  constant buffer %.2f\n",
+               run(q, ps, tex[1], 1, 10, MTLLoadActionClear, MTLStoreActionStore, runs),
+               variants[0] ? run(q, variants[0], tex[1], 1, 10, MTLLoadActionClear, MTLStoreActionStore, runs) : -1,
+               variants[1] ? run(q, variants[1], tex[1], 1, 10, MTLLoadActionClear, MTLStoreActionStore, runs) : -1,
+               variants[2] ? run(q, variants[2], tex[1], 1, 10, MTLLoadActionClear, MTLStoreActionStore, runs) : -1,
+               variants[3] ? run(q, variants[3], tex[1], 1, 10, MTLLoadActionClear, MTLStoreActionStore, runs) : -1);
     }
     return 0;
 }
