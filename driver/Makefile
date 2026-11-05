@@ -4,21 +4,21 @@ CC        = clang
 MESA      = ../mesa/out/macos
 MESA_CF   = $(filter-out -std=%,$(shell cat $(MESA)/cflags.txt))
 MESA_LD   = $(shell cat $(MESA)/ldflags.txt)
-CFLAGS    = -O1 -g -Wall -Wno-unused-function -Wno-four-char-constants -DVMG_HAVE_LLVMPIPE=1 $(MESA_CF) -I.
+CFLAGS    = -O1 -g -Wall -Wno-unused-function -Wno-four-char-constants -DVMG_HAVE_LLVMPIPE=1 $(MESA_CF) -I. -Iisa
 OUT       = out/macos
-C_SRC     = vmg_air.c vmg_screen.c vmg_exec.c
+C_SRC     = vmg_air.c vmg_screen.c vmg_exec.c $(wildcard isa/*.c)
 M_SRC     = vmg_formats.m
 OBJ       = $(addprefix $(OUT)/,$(C_SRC:.c=.o) $(M_SRC:.m=.o))
-HDR       = vmg.h vmg_internal.h vmg_llvm.h
+HDR       = vmg.h vmg_internal.h vmg_llvm.h $(wildcard isa/*.h)
 
 all: $(OUT)/libvmg.a $(OUT)/test_vmg $(OUT)/airnir
 
 $(OUT)/%.o: %.c $(HDR)
-	@mkdir -p $(OUT)
+	@mkdir -p $(dir $@)
 	@$(CC) -std=gnu11 $(CFLAGS) -c $< -o $@
 
 $(OUT)/%.o: %.m $(HDR)
-	@mkdir -p $(OUT)
+	@mkdir -p $(dir $@)
 	@$(CC) -fobjc-arc $(CFLAGS) -c $< -o $@
 
 $(OUT)/libvmg.a: $(OBJ)
@@ -56,10 +56,13 @@ $(OUT)/phase3: $(SHIM)/tests/phase2.m $(OUT)/libVivaMetal.dylib
 $(OUT)/phase1 $(OUT)/translate $(OUT)/uploads: $(OUT)/%: $(SHIM)/tests/%.m $(OUT)/libVivaMetal.dylib
 	@$(CC) $(OBJC) -I$(SHIM)/src $< -L$(OUT) -lVivaMetal -Wl,-rpath,@executable_path $(FRAMEWORKS) -framework Cocoa -o $@
 
-metal: $(OUT)/libVivaMetal.dylib $(addprefix $(OUT)/,$(SHIM_TESTS)) $(OUT)/compute $(OUT)/ca
+metal: $(OUT)/libVivaMetal.dylib $(addprefix $(OUT)/,$(SHIM_TESTS)) $(OUT)/compute $(OUT)/ca $(OUT)/isatest
 test-metal: metal
 	@for t in $(SHIM_TESTS); do echo "== $$t (llvmpipe)"; $(OUT)/$$t | tail -2 || exit 1; done
 $(OUT)/compute: tests/compute.m $(OUT)/libVivaMetal.dylib
 	@$(CC) $(OBJC) $< -L$(OUT) -lVivaMetal -Wl,-rpath,@executable_path $(FRAMEWORKS) -o $@
 $(OUT)/ca: tests/ca.m $(OUT)/libVivaMetal.dylib
 	@$(CC) $(OBJC) $< -L$(OUT) -lVivaMetal -Wl,-rpath,@executable_path $(FRAMEWORKS) -framework ImageIO -framework CoreText -framework UniformTypeIdentifiers -o $@
+# ISA compiler test cases (tests/isa_cases.m, also used by Viva Manager). On llvmpipe: `isatest -mode nir`.
+$(OUT)/isatest: tests/isatest.m tests/isa_cases.m tests/isa_cases.h $(OUT)/libVivaMetal.dylib
+	@$(CC) $(OBJC) tests/isatest.m tests/isa_cases.m -L$(OUT) -lVivaMetal -Wl,-rpath,@executable_path $(FRAMEWORKS) -o $@

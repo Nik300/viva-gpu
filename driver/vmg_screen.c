@@ -34,6 +34,8 @@
 #include "frontend/sw_winsys.h"
 #endif
 #include "../vgpu/vgpu.h"
+#include "isa/vmg_isa.h"
+#include "isa/vmg_isa_api.h"
 
 // ---- Device ---------------------------------------------------------------------------------------------------------
 
@@ -299,6 +301,9 @@ void vmg_air_cache_stats(uint64_t *hits, uint64_t *misses)
 
 const char *vmg_driver_build_id(void) { return g_cache_id; }
 
+static uint32_t g_gpu_product_id;
+uint32_t vmg_gpu_product_id(void) { return g_gpu_product_id; }
+
 vmg_device *vmg_device_create(const char *which, char *error, size_t error_size)
 {
     load_env_file();
@@ -330,6 +335,8 @@ vmg_device *vmg_device_create(const char *which, char *error, size_t error_size)
         struct pipe_screen_config config = { .driver_name_is_inferred = false, .options = &options, .options_info = &info };
         dev->screen = panfrost_create_screen(dev->fd, &config, NULL);
         dev->panfrost = true;
+        // Panfrost names the GPU from its product id: Mali-G57 = 0x9093 (the only one the ISA compiler targets)
+        if (dev->screen && strstr(dev->screen->get_name(dev->screen), "Mali-G57")) g_gpu_product_id = 0x9093;
 #if VMG_HAVE_LLVMPIPE
     } else if (!strcmp(which, "llvmpipe")) {
         dev->winsys = null_sw_create();
@@ -478,6 +485,19 @@ vmg_resource *vmg_buffer_create(vmg_device *dev, size_t size, void *user_memory,
     return r;
 }
 
+uint64_t vmg_buffer_gpu_address(vmg_device *dev, vmg_resource *r)
+{
+    if (!dev->panfrost || !dev->pipe->set_global_binding || !r || !r->res) return 0;
+    // Gallium's global binding reports the address (the handle holds the offset in, the address out); slot 63 is
+    // ours, unbound again at once.
+    uint64_t addr = 0;
+    uint32_t *handle = (uint32_t *)&addr;
+    struct pipe_resource *res = r->res;
+    dev->pipe->set_global_binding(dev->pipe, 63, 1, &res, &handle);
+    dev->pipe->set_global_binding(dev->pipe, 63, 1, NULL, NULL);
+    return addr;
+}
+
 void vmg_buffer_cpu_access(vmg_resource *r)
 {
     if (r && !r->cpu_access) r->cpu_access = true;
@@ -519,6 +539,9 @@ static void texture_template(vmg_device *dev, const vmg_texture_desc *d, struct 
     templ->target = target_of(d->type);
     templ->format = vmg_pipe_format(d->mtl_format);
     templ->width0 = MAX2(d->width, 1);
+    // Buffer textures: Gallium sizes PIPE_BUFFER resources (and their views) in bytes, Metal in texels. In texels the
+    // resource was blocksize times too small and the per-command-buffer copy-in overflowed the heap.
+    if (templ->target == PIPE_BUFFER && templ->format != PIPE_FORMAT_NONE) templ->width0 *= util_format_get_blocksize(templ->format);
     templ->height0 = (uint16_t)MAX2(d->height, 1);
     templ->depth0 = (uint16_t)(d->type == VMG_TEX_3D ? MAX2(d->depth, 1) : 1);
     unsigned layers = MAX2(d->array_length, 1);
@@ -949,9 +972,213 @@ static bool vmg_half32(vmg_device *dev)
 
 static mesa_shader_stage nir_stage_of(const void *bitcode, size_t size) { (void)bitcode; (void)size; return MESA_SHADER_NONE; }
 
+// ---- Direct AIR -> Valhall ISA path (driver/isa, VMG_ISA=1) -------------------------------------------------------------
+
+// Deep copy of a translation input (fragment variants are compiled later, at pipeline creation).
+struct vmg_isa_input {
+    vmg_air_input in;
+    void *bitcode;
+    const void **linked; size_t *linked_size; const char **linked_names;
+    const char **varyings;
+    uint32_t color_formats[VMG_MAX_COLOR];
+};
+
+static struct vmg_isa_input *isa_input_copy(const vmg_air_input *in)
+{
+    struct vmg_isa_input *c = calloc(1, sizeof *c);
+    c->in = *in;
+    c->bitcode = malloc(in->bitcode_size);
+    memcpy(c->bitcode, in->bitcode, in->bitcode_size);
+    c->in.bitcode = c->bitcode;
+    if (in->linked_count) {
+        c->linked = calloc(in->linked_count, sizeof *c->linked);
+        c->linked_size = calloc(in->linked_count, sizeof *c->linked_size);
+        c->linked_names = calloc(in->linked_count, sizeof *c->linked_names);
+        for (unsigned i = 0; i < in->linked_count; i++) {
+            void *b = malloc(in->linked_size[i]);
+            memcpy(b, in->linked[i], in->linked_size[i]);
+            c->linked[i] = b; c->linked_size[i] = in->linked_size[i];
+            c->linked_names[i] = strdup(in->linked_names[i] ? in->linked_names[i] : "");
+        }
+        c->in.linked = c->linked; c->in.linked_size = c->linked_size; c->in.linked_names = c->linked_names;
+    }
+    if (in->varying_count) {
+        c->varyings = calloc(in->varying_count, sizeof *c->varyings);
+        for (unsigned i = 0; i < in->varying_count; i++) c->varyings[i] = strdup(in->varyings[i]);
+        c->in.varyings = c->varyings;
+    }
+    if (in->color_formats) { memcpy(c->color_formats, in->color_formats, sizeof c->color_formats); c->in.color_formats = c->color_formats; }
+    return c;
+}
+
+static void isa_input_free(struct vmg_isa_input *c)
+{
+    if (!c) return;
+    for (unsigned i = 0; i < c->in.linked_count; i++) { free((void *)c->linked[i]); free((void *)c->linked_names[i]); }
+    for (unsigned i = 0; i < c->in.varying_count; i++) free((void *)c->varyings[i]);
+    free(c->linked); free(c->linked_size); free(c->linked_names); free(c->varyings); free(c->bitcode);
+    free(c);
+}
+
+// vmg_isa_compile through the translation cache (A9): the final Valhall binary is cached, not just the NIR.
+static struct vmg_isa_program *isa_compile_cached(vmg_device *dev, const vmg_air_input *in, const vmg_isa_options *opt,
+                                                  uint32_t attached, vmg_reflection *r, struct util_dynarray *pool, char **error)
+{
+    vmg_key key;
+    char kind[96];
+    char okey[48];
+    vmg_isa_options_key(opt, okey, sizeof okey);
+    snprintf(kind, sizeof kind, "isa:%s:%x", okey, attached);
+    bool cache = g_air_cache && !(opt->disabled >> VMG_ISA_A9 & 1) && !(opt->trace && *opt->trace);
+    if (cache) {
+        air_cache_key(dev, kind, in, key);
+        size_t size = 0;
+        uint8_t *data = cache_get(key, &size);
+        if (data && size >= 12) {
+            uint32_t rsz, psz, bsz;
+            memcpy(&rsz, data, 4); memcpy(&psz, data + 4, 4); memcpy(&bsz, data + 8, 4);
+            if (rsz == sizeof *r && size == 12 + (size_t)rsz + psz + bsz) {
+                struct vmg_isa_program *p = vmg_isa_program_deserialize(data + 12 + rsz + psz, bsz);
+                if (p) {
+                    memcpy(r, data + 12, rsz);
+                    if (psz) memcpy(util_dynarray_grow_bytes(pool, psz, 1), data + 12 + rsz, psz);
+                    free(data);
+                    g_air_hits++;
+                    vmg_isa_note(true, vmg_isa_program_name(p), NULL, 0, true);
+                    return p;
+                }
+            }
+        }
+        free(data);
+    }
+    struct vmg_isa_program *p = vmg_isa_compile(in, opt, 0, attached, r, pool, error);
+    if (p && cache) {
+        g_air_misses++;
+        size_t bsz;
+        void *ser = vmg_isa_program_serialize(p, &bsz);
+        size_t size = 12 + sizeof *r + pool->size + bsz;
+        uint8_t *buf = malloc(size);
+        uint32_t rsz = sizeof *r, psz = pool->size, b32 = (uint32_t)bsz;
+        memcpy(buf, &rsz, 4); memcpy(buf + 4, &psz, 4); memcpy(buf + 8, &b32, 4);
+        memcpy(buf + 12, r, rsz);
+        if (psz) memcpy(buf + 12 + rsz, pool->data, psz);
+        memcpy(buf + 12 + rsz + psz, ser, bsz);
+        cache_put(key, buf, size);
+        free(buf); free(ser);
+    }
+    return p;
+}
+
+static void *isa_create_cso(vmg_device *dev, struct vmg_isa_program *p, const vmg_reflection *r)
+{
+    int stage = vmg_isa_program_stage(p);
+    nir_shader *shell = vmg_isa_shell(p, dev->screen->nir_options[stage], r);
+    struct pipe_shader_state state = {0};
+    state.type = PIPE_SHADER_IR_NIR;
+    state.ir.nir = shell;
+    void *cso;
+    if (stage == MESA_SHADER_VERTEX) cso = dev->pipe->create_vs_state(dev->pipe, &state);
+    else if (stage == MESA_SHADER_FRAGMENT) cso = dev->pipe->create_fs_state(dev->pipe, &state);
+    else {
+        struct pipe_compute_state cs = {0};
+        cs.ir_type = PIPE_SHADER_IR_NIR;
+        cs.prog = shell;
+        cs.static_shared_mem = r->static_shared;
+        cso = dev->pipe->create_compute_state(dev->pipe, &cs);
+    }
+    free(state.error_message);
+    return cso;
+}
+
+static void shader_finish_common(vmg_device *dev, vmg_shader *sh, struct util_dynarray *pool);
+
+// Vertex variants compiled from Panfrost's hook (noperspective mask of the linked fragment shader).
+static struct vmg_isa_program *isa_vertex_variant(void *input, const vmg_isa_options *opt)
+{
+    struct vmg_isa_input *c = input;
+    struct util_dynarray pool;
+    util_dynarray_init(&pool, NULL);
+    vmg_reflection r;
+    char *err = NULL;
+    struct vmg_isa_program *p = vmg_isa_compile(&c->in, opt, 0, ~0u, &r, &pool, &err);
+    util_dynarray_fini(&pool);   // identical to the shader's pool
+    free(err);
+    return p;
+}
+
+static vmg_shader *isa_shader_create(vmg_device *dev, const vmg_air_input *in, const vmg_isa_options *opt, vmg_reflection *refl,
+                                     char **error)
+{
+    struct util_dynarray pool;
+    util_dynarray_init(&pool, NULL);
+    vmg_reflection r;
+    memset(&r, 0, sizeof r);
+    struct vmg_isa_program *p = isa_compile_cached(dev, in, opt, ~0u, &r, &pool, error);
+    if (!p) { util_dynarray_fini(&pool); return NULL; }
+    vmg_shader *sh = calloc(1, sizeof *sh);
+    sh->stage = r.stage;
+    snprintf(sh->name, sizeof sh->name, "%s", vmg_isa_program_name(p));
+    sh->refl = r;
+    if (refl) *refl = r;
+    sh->isa = p;
+    shader_finish_common(dev, sh, &pool);
+    if (r.stage == VMG_FRAGMENT) {
+        sh->colors_written = r.color_outputs;
+        if (sh->colors_written & ~1u) sh->isa_in = isa_input_copy(in);
+    }
+    if (r.stage == VMG_VERTEX) {
+        sh->isa_in = isa_input_copy(in);
+        vmg_isa_program_set_input(p, sh->isa_in);
+    }
+    sh->cso = isa_create_cso(dev, p, &r);
+    if (getenv("VMG_TRACE")) fprintf(stderr, "vmg: %s shader %s on the ISA path\n", r.stage == VMG_VERTEX ? "vertex" : r.stage == VMG_FRAGMENT ? "fragment" : "compute", sh->name);
+    if (!sh->cso) {
+        *error = strdup("driver rejected the ISA program");
+        vmg_shader_release(dev, sh);
+        return NULL;
+    }
+    return sh;
+}
+
+// Pool buffer (constant buffer 1) and constexpr samplers of a shader.
+static void shader_finish_common(vmg_device *dev, vmg_shader *sh, struct util_dynarray *pool)
+{
+    sh->pool_size = pool->size;
+    if (pool->size) { sh->pool = malloc(pool->size); memcpy(sh->pool, pool->data, pool->size); }
+    util_dynarray_fini(pool);
+    if (sh->pool_size) {
+        struct pipe_resource templ = {0};
+        templ.target = PIPE_BUFFER;
+        templ.format = PIPE_FORMAT_R8_UNORM;
+        templ.width0 = (unsigned)align(sh->pool_size, 16);
+        templ.height0 = templ.depth0 = templ.array_size = 1;
+        templ.bind = PIPE_BIND_CONSTANT_BUFFER;
+        templ.usage = PIPE_USAGE_IMMUTABLE;
+        sh->pool_buffer = dev->screen->resource_create(dev->screen, &templ);
+        if (sh->pool_buffer) dev->pipe->buffer_subdata(dev->pipe, sh->pool_buffer, PIPE_MAP_WRITE, 0, (unsigned)sh->pool_size, sh->pool);
+    }
+    for (unsigned i = 0; i < sh->refl.constexpr_samplers; i++) sh->constexpr_samplers[i] = vmg_sampler_create_constexpr(dev, sh->refl.constexpr_words[i]);
+}
+
 vmg_shader *vmg_shader_create(vmg_device *dev, const vmg_air_input *in, vmg_reflection *refl, char **error)
 {
     (void)nir_stage_of;
+    if (dev->panfrost) {
+        vmg_isa_options iopt;
+        vmg_isa_options_from_env(&iopt);
+        if (iopt.enabled) {
+            static bool hooks;
+            if (!hooks) { vmg_isa_install_hooks(); vmg_isa_set_input_hook(isa_vertex_variant); hooks = true; }
+            vmg_air_input ii = *in;
+            ii.half32 = false;   // native fp16 on the ISA path
+            char *ierr = NULL;
+            vmg_shader *sh = isa_shader_create(dev, &ii, &iopt, refl, &ierr);
+            if (sh) return sh;
+            if (getenv("VMG_TRACE") || getenv("VMG_TRACE_ISA")) fprintf(stderr, "vmg: ISA path: %s -> NIR path\n", ierr ? ierr : "?");
+            if (iopt.strict) { *error = ierr ? ierr : strdup("ISA compilation failed (VMG_ISA_STRICT)"); return NULL; }
+            free(ierr);
+        }
+    }
     struct util_dynarray pool;
     util_dynarray_init(&pool, NULL);
     vmg_reflection r;
@@ -1018,6 +1245,8 @@ vmg_shader *vmg_shader_create(vmg_device *dev, const vmg_air_input *in, vmg_refl
         sh->colors_written = (uint32_t)(nir->info.outputs_written >> FRAG_RESULT_DATA0) & 0xff;
         if (sh->colors_written & ~1u) sh->nir_keep = nir_shader_clone(NULL, nir);   // writes beyond colour 0
     }
+    // VMG_PRECOMPILE=1 (tools): fragment shaders compiled at creation (separate), so BIFROST_MESA_DEBUG=shaders shows them.
+    if (getenv("VMG_PRECOMPILE")) nir->info.separate_shader = true;
     struct pipe_shader_state state = {0};
     state.type = PIPE_SHADER_IR_NIR;
     state.ir.nir = nir;
@@ -1047,6 +1276,7 @@ void vmg_shader_release(vmg_device *dev, vmg_shader *sh)
 {
     if (!sh) return;
     ralloc_free(sh->nir_keep);
+    isa_input_free(sh->isa_in);
     if (sh->cso) {
         if (sh->stage == VMG_VERTEX) dev->pipe->delete_vs_state(dev->pipe, sh->cso);
         else if (sh->stage == VMG_FRAGMENT) dev->pipe->delete_fs_state(dev->pipe, sh->cso);
@@ -1055,6 +1285,7 @@ void vmg_shader_release(vmg_device *dev, vmg_shader *sh)
     for (unsigned i = 0; i < 16; i++) vmg_sampler_release(dev, sh->constexpr_samplers[i]);
     pipe_resource_reference(&sh->pool_buffer, NULL);
     free(sh->pool);
+    vmg_isa_program_free(sh->isa);   // after the CSO: Panfrost no longer needs it
     free(sh);
 }
 
@@ -1135,6 +1366,24 @@ vmg_render_pipeline *vmg_render_pipeline_create(vmg_device *dev, const vmg_rende
         for (unsigned i = 0; i < VMG_MAX_COLOR; i++) if (d->color[i].format) attached |= 1u << i;
         if (d->fragment->colors_written & ~attached) p->fs_variant = fragment_variant(dev, d->fragment, attached);
     }
+    if (d->fragment && d->fragment->isa_in) {
+        // ISA path (B7): the variant is compiled without the BLENDs of the targets that have no attachment.
+        uint32_t attached = 0;
+        for (unsigned i = 0; i < VMG_MAX_COLOR; i++) if (d->color[i].format) attached |= 1u << i;
+        if (d->fragment->colors_written & ~attached) {
+            vmg_isa_options iopt;
+            vmg_isa_options_from_env(&iopt);
+            iopt.enabled = true;
+            struct util_dynarray pool;
+            util_dynarray_init(&pool, NULL);
+            vmg_reflection r;
+            char *err = NULL;
+            if (!(iopt.disabled >> VMG_ISA_B7 & 1)) p->fs_variant_isa = isa_compile_cached(dev, &d->fragment->isa_in->in, &iopt, attached, &r, &pool, &err);
+            util_dynarray_fini(&pool);
+            free(err);
+            if (p->fs_variant_isa) p->fs_variant = isa_create_cso(dev, p->fs_variant_isa, &r);
+        }
+    }
     struct pipe_blend_state bs = {0};
     bs.independent_blend_enable = 1;
     // Panfrost sizes its blend descriptors by max_rt (llvmpipe ignores it): left at 0, writes to [[color(1+)]] were
@@ -1209,6 +1458,7 @@ void vmg_render_pipeline_release(vmg_device *dev, vmg_render_pipeline *p)
 {
     if (!p) return;
     if (p->fs_variant) dev->pipe->delete_fs_state(dev->pipe, p->fs_variant);
+    vmg_isa_program_free(p->fs_variant_isa);
     if (p->blend) dev->pipe->delete_blend_state(dev->pipe, p->blend);
     if (p->velems) dev->pipe->delete_vertex_elements_state(dev->pipe, p->velems);
     free(p);

@@ -331,8 +331,17 @@ typedef struct { uint64_t type; uint32_t subtype; const char *name; } VMTargetDe
 
 #pragma mark Pipelines
 
+// VMG_ISA_STRICT=1 (tests of the ISA compiler): a pipeline the driver cannot draw with is an error, not an inert state.
+static BOOL VMStrictFailure(NSString *failure, NSError **error) {
+    const char *strict = getenv("VMG_ISA_STRICT"), *isa = getenv("VMG_ISA");
+    if (!failure || !strict || *strict == '0' || !isa || *isa == '0') return NO;
+    if (error) *error = [NSError errorWithDomain:@"VivaMetal" code:1 userInfo:@{ NSLocalizedDescriptionKey : failure }];
+    return YES;
+}
+
 - (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTLRenderPipelineDescriptor *)desc error:(NSError **)error {
-    return [[VMRenderPipelineState alloc] initWithDevice:self descriptor:desc error:error];
+    VMRenderPipelineState *p = [[VMRenderPipelineState alloc] initWithDevice:self descriptor:desc error:error];
+    return VMStrictFailure(p.failure, error) ? nil : p;
 }
 - (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTLRenderPipelineDescriptor *)desc options:(MTLPipelineOption)options
                                                         reflection:(MTLAutoreleasedRenderPipelineReflection *)reflection error:(NSError **)error {
@@ -354,8 +363,23 @@ typedef struct { uint64_t type; uint32_t subtype; const char *name; } VMTargetDe
         handler(state, nil, error);
     });
 }
+- (id<MTLRenderPipelineState>)newRenderPipelineStateWithTileDescriptor:(MTLTileRenderPipelineDescriptor *)desc options:(MTLPipelineOption)options
+                                                            reflection:(MTLAutoreleasedRenderPipelineReflection *)reflection error:(NSError **)error {
+    if (reflection) *reflection = nil;
+    VMTilePipelineState *p = [[VMTilePipelineState alloc] initWithDevice:self descriptor:desc error:error];
+    return VMStrictFailure(p.failure, error) ? nil : p;
+}
+- (void)newRenderPipelineStateWithTileDescriptor:(MTLTileRenderPipelineDescriptor *)desc options:(MTLPipelineOption)options
+                               completionHandler:(MTLNewRenderPipelineStateWithReflectionCompletionHandler)handler {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSError *error = nil;
+        id<MTLRenderPipelineState> s = [self newRenderPipelineStateWithTileDescriptor:desc options:options reflection:nil error:&error];
+        handler(s, nil, error);
+    });
+}
 - (id<MTLComputePipelineState>)newComputePipelineStateWithFunction:(id<MTLFunction>)function error:(NSError **)error {
-    return [[VMComputePipelineState alloc] initWithDevice:self function:function error:error];
+    VMComputePipelineState *p = [[VMComputePipelineState alloc] initWithDevice:self function:function error:error];
+    return VMStrictFailure(p.failure, error) ? nil : p;
 }
 - (id<MTLComputePipelineState>)newComputePipelineStateWithFunction:(id<MTLFunction>)function options:(MTLPipelineOption)options
                                                         reflection:(MTLAutoreleasedComputePipelineReflection *)reflection error:(NSError **)error {
@@ -365,7 +389,9 @@ typedef struct { uint64_t type; uint32_t subtype; const char *name; } VMTargetDe
 - (id<MTLComputePipelineState>)newComputePipelineStateWithDescriptor:(MTLComputePipelineDescriptor *)desc options:(MTLPipelineOption)options
                                                           reflection:(MTLAutoreleasedComputePipelineReflection *)reflection error:(NSError **)error {
     if (reflection) *reflection = nil;
-    return [self newComputePipelineStateWithFunction:desc.computeFunction error:error];
+    MTLLinkedFunctions *linked = [desc respondsToSelector:@selector(linkedFunctions)] ? desc.linkedFunctions : nil;
+    VMComputePipelineState *p = [[VMComputePipelineState alloc] initWithDevice:self function:desc.computeFunction linked:linked error:error];
+    return VMStrictFailure(p.failure, error) ? nil : p;
 }
 - (void)newComputePipelineStateWithFunction:(id<MTLFunction>)function completionHandler:(MTLNewComputePipelineStateCompletionHandler)handler {
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{

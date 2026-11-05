@@ -55,6 +55,9 @@ bool vmg_format_supported(vmg_device *dev, unsigned mtl_format, bool render_targ
 vmg_resource *vmg_buffer_create(vmg_device *dev, size_t size, void *user_memory, void **contents);
 // The CPU got the buffer's contents pointer (it may write it from now on; any thread).
 void vmg_buffer_cpu_access(vmg_resource *r);
+// GPU virtual address of a buffer (MTLBuffer.gpuAddress: pointers stored in argument buffers, read by the ISA path's
+// global loads/stores, G3). GPU queue. 0 if the driver has no such addresses (llvmpipe).
+uint64_t vmg_buffer_gpu_address(vmg_device *dev, vmg_resource *r);
 void vmg_resource_release(vmg_device *dev, vmg_resource *res);
 
 enum vmg_texture_type { VMG_TEX_1D, VMG_TEX_1D_ARRAY, VMG_TEX_2D, VMG_TEX_2D_ARRAY, VMG_TEX_2D_MS,
@@ -153,6 +156,11 @@ const char *vmg_air_tag(void);
 void vmg_air_cache_stats(uint64_t *hits, uint64_t *misses);
 // Driver build id (hex, the translation cache's key prefix; "unknown" before the first device).
 const char *vmg_driver_build_id(void);
+// Direct AIR -> Valhall ISA compiler counters of this process (driver/isa): functions compiled, fallbacks to the NIR
+// path, compile time, last fallback reason. And the GPU product id of the Panfrost device (0x9093 = Mali-G57 MC2;
+// 0 before a device exists or on other drivers).
+void vmg_isa_counters(uint64_t *functions, uint64_t *fallbacks, uint64_t *compile_us, char *last_fallback, size_t size);
+uint32_t vmg_gpu_product_id(void);
 char *vmg_air_to_nir_text(vmg_device *dev, const vmg_air_input *in, char **error);
 
 typedef struct {
@@ -238,8 +246,15 @@ typedef struct {
     uint32_t grid[3];                             // dispatchThreads: exact grid (0 = whole groups)
     vmg_resource *indirect; size_t indirect_offset;
     uint32_t shared_sizes[8];                     // setThreadgroupMemoryLength:atIndex:
+    uint32_t tile[2];                             // tile dispatches: tile width / height (system values 52, 56)
 } vmg_dispatch_info;
 void vmg_cmd_dispatch(vmg_device *dev, const vmg_dispatch_info *d);
+// Tile shading (dispatchThreadsPerTile, G2) on a GPU without tile shaders: the render pass is ended (keeping its
+// attachments), the tile kernel runs as compute with one threadgroup per tile over the attachments (images
+// VMG_TILE_IMAGE_BASE + color index; the ISA compiler maps imageblock reads/writes to them), and the pass resumes
+// loading what the kernel left, with the encoder's state restored.
+#define VMG_TILE_IMAGE_BASE 24
+void vmg_cmd_dispatch_tile(vmg_device *dev, vmg_compute_pipeline *kernel, uint32_t tile_w, uint32_t tile_h, const uint32_t threads[3]);
 
 void vmg_cmd_copy_buffer(vmg_device *dev, vmg_resource *src, size_t src_off, vmg_resource *dst, size_t dst_off, size_t size);
 void vmg_cmd_fill_buffer(vmg_device *dev, vmg_resource *dst, size_t off, size_t size, uint8_t value);

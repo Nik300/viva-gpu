@@ -41,6 +41,8 @@ static void VMAttachment(vmg_attachment *out, MTLRenderPassAttachmentDescriptor 
     VMDevice *_device;
     VMCommandBuffer *_cb;
     VMRenderPipelineState *_pipeline;
+    VMTilePipelineState *_tile;
+    uint32_t _tileW, _tileH;
     uint8_t _cull, _winding, _fill, _clip;   // Metal defaults: none, clockwise, fill, clip
 }
 VM_CATCH_ALL(VMRenderEncoder)
@@ -67,6 +69,9 @@ VM_CATCH_ALL(VMRenderEncoder)
     pass.height = (uint32_t)desc.renderTargetHeight;
     pass.layers = (uint32_t)desc.renderTargetArrayLength;
     pass.samples = (uint32_t)desc.defaultRasterSampleCount;
+    if ([desc respondsToSelector:@selector(tileWidth)]) { _tileW = (uint32_t)desc.tileWidth; _tileH = (uint32_t)desc.tileHeight; }
+    if (!_tileW) _tileW = 16;
+    if (!_tileH) _tileH = 16;
     VMBuffer *vis = (VMBuffer *)desc.visibilityResultBuffer;
     if (vis) [keep addObject:vis];
     pass.visibility = vis.vmg;
@@ -86,6 +91,11 @@ VM_CATCH_ALL(VMRenderEncoder)
 #pragma mark State
 
 - (void)setRenderPipelineState:(id<MTLRenderPipelineState>)state {
+    if ([(id)state isKindOfClass:[VMTilePipelineState class]]) {   // tile pipeline: used by dispatchThreadsPerTile
+        _tile = (VMTilePipelineState *)state;
+        [_cb keepAlive:state];
+        return;
+    }
     VMRenderPipelineState *p = (VMRenderPipelineState *)state;
     _pipeline = p;
     [_cb keepAlive:p];
@@ -94,6 +104,22 @@ VM_CATCH_ALL(VMRenderEncoder)
     vmg_render_pipeline *rp = p.vmg;
     [_cb recordCommand:^{ vmg_cmd_set_render_pipeline(d.vmg, rp); }];
 }
+
+- (void)dispatchThreadsPerTile:(MTLSize)threads {
+    vmg_compute_pipeline *k = _tile.kernel.vmg;
+    if (!k) return;
+    VMDevice *d = _device;
+    uint32_t tx = (uint32_t)threads.width, ty = (uint32_t)threads.height, tz = (uint32_t)MAX(threads.depth, 1);
+    uint32_t tw = _tileW, tt = _tileH;
+    [_cb recordCommand:^{ uint32_t th[3] = { tx, ty, tz }; vmg_cmd_dispatch_tile(d.vmg, k, tw, tt, th); }];
+}
+- (NSUInteger)tileWidth { return _tileW; }
+- (NSUInteger)tileHeight { return _tileH; }
+// Tile function arguments: the compute stage's bindings (the tile kernel runs as compute)
+- (void)setTileBytes:(const void *)p length:(NSUInteger)l atIndex:(NSUInteger)i { [self bindBytes:p length:l index:i stage:VMG_COMPUTE]; }
+- (void)setTileBuffer:(id<MTLBuffer>)b offset:(NSUInteger)o atIndex:(NSUInteger)i { [self bindBuffer:b offset:o index:i stage:VMG_COMPUTE]; }
+- (void)setTileTexture:(id<MTLTexture>)t atIndex:(NSUInteger)i { [self bindTexture:t index:i stage:VMG_COMPUTE]; }
+- (void)setTileSamplerState:(id<MTLSamplerState>)s atIndex:(NSUInteger)i { [self bindSampler:s index:i stage:VMG_COMPUTE]; }
 
 - (void)setViewport:(MTLViewport)v {
     VMDevice *d = _device;

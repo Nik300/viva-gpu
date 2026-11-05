@@ -78,9 +78,17 @@ driver() {
     $CC $TARGET -O2 -g -Wall -Wno-four-char-constants -I"$GPU/libdrm-xnu/include" -I"$GPU/libdrm-xnu/include/libdrm" -c "$f" -o "$o"
   done
   for f in vmg_air vmg_screen vmg_exec; do
-    stale "$OBJ/$f.o" "$GPU/driver/$f.c" "${dh[@]}" "${vh[@]}" || continue
+    stale "$OBJ/$f.o" "$GPU/driver/$f.c" "${dh[@]}" "${vh[@]}" "$GPU"/driver/isa/*.h || continue
     echo "cc $f.c"
-    $CC $TARGET -std=gnu11 -O2 -g -DVMG_HAVE_LLVMPIPE=0 $CF -I"$GPU/driver" -c "$GPU/driver/$f.c" -o "$OBJ/$f.o"
+    $CC $TARGET -std=gnu11 -O2 -g -DVMG_HAVE_LLVMPIPE=0 $CF -I"$GPU/driver" -I"$GPU/driver/isa" -c "$GPU/driver/$f.c" -o "$OBJ/$f.o"
+  done
+  # Direct AIR -> Valhall ISA compiler (driver/isa)
+  local ih=("$GPU"/driver/isa/*.h)
+  for f in "$GPU"/driver/isa/*.c; do
+    local n; n="isa_$(basename "${f%.c}")"
+    stale "$OBJ/$n.o" "$f" "${ih[@]}" "${dh[@]}" || continue
+    echo "cc isa/$(basename "$f")"
+    $CC $TARGET -std=gnu11 -O2 -g -DVMG_HAVE_LLVMPIPE=0 $CF -I"$GPU/driver" -I"$GPU/driver/isa" -c "$f" -o "$OBJ/$n.o"
   done
   if stale "$OBJ/vmg_formats.o" "$GPU/driver/vmg_formats.m" "${dh[@]}"; then
     echo "cc vmg_formats.m"
@@ -120,6 +128,8 @@ void TSMtlRegisterGLSL(id a, id b) {}' > "$OUT/obj/tsdevice.m"
       -framework IOSurface -o "$T/ca"
   $CC $TARGET -fobjc-arc -O1 -g "$GPU/driver/tests/passbench.m" "$OUT/obj/tsdevice.m" -framework Foundation -framework Metal \
       -framework IOSurface -o "$T/passbench"
+  $CC $TARGET -fobjc-arc -O1 -g "$GPU/driver/tests/isatest.m" "$GPU/driver/tests/isa_cases.m" "$OUT/obj/tsdevice.m" \
+      -framework Foundation -framework Metal -o "$T/isatest"
   # vctl: drives the UI (touches, home, launching apps) for tests on real screens; entitlements for HID dispatch.
   $CC $TARGET -fobjc-arc -O1 -g "$HERE/vctl.m" -framework Foundation -framework IOKit -framework IOSurface -framework CoreGraphics -framework ImageIO -o "$T/vctl"
   for f in "$T"/*; do [ "$f" = "$T/vctl" ] || codesign -s - -f "$f"; done

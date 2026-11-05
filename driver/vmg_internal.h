@@ -92,12 +92,17 @@ struct vmg_shader {
     // Fragment shaders writing several colours keep their NIR: a pipeline without an attachment for one of them gets a
     // variant without that output (Metal drops the write; Panfrost would read a blend descriptor past its table).
     struct nir_shader *nir_keep; uint32_t colors_written;
+    // Direct AIR -> Valhall ISA path (VMG_ISA=1, driver/isa): the compiled program behind the CSO, and a copy of the
+    // input for fragment variants (outputs without an attachment dropped, B7).
+    struct vmg_isa_program *isa;
+    struct vmg_isa_input *isa_in;
 };
 
 struct vmg_render_pipeline {
     vmg_render_pipeline_desc desc;
     void *blend, *velems;
     void *fs_variant;                 // fragment shader without the outputs that have no attachment (NULL: the shader's)
+    struct vmg_isa_program *fs_variant_isa;   // its program on the ISA path
     unsigned velem_buffer[VMG_MAX_VERTEX_ATTRIBS];   // Metal buffer slot of each Gallium vertex buffer
     unsigned velem_buffers;
     uint32_t velem_strides[VMG_MAX_VERTEX_ATTRIBS];

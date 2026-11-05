@@ -10,6 +10,7 @@
 #pragma mark - Buffer
 
 @implementation VMBuffer {
+    uint64_t _gpuAddress;
     __weak VMDevice *_device;
     VMDevice *_strongDevice;   // keeps the vmg device alive until the resource is released on its queue
     NSUInteger _length;
@@ -63,7 +64,18 @@ VM_CATCH_ALL(VMBuffer)
 - (void)makeAliasable {}
 - (id<MTLHeap>)heap { return nil; }
 - (NSUInteger)heapOffset { return 0; }
-- (uint64_t)gpuAddress { return (uint64_t)(uintptr_t)_contents; }   // Metal 3 API (not in Apple4): unique and non-zero
+// Metal 3 API (not in Apple4): the buffer's GPU virtual address, which shaders reach through pointers stored in
+// argument buffers (ISA path, G3). Drivers without GPU addresses (llvmpipe): the CPU address, unique and non-zero.
+- (uint64_t)gpuAddress {
+    if (!_gpuAddress) {
+        __block uint64_t a = 0;
+        VMDevice *d = _device;
+        vmg_resource *r = _vmg;
+        if (d) [d gpuSync:^{ a = vmg_buffer_gpu_address(d.vmg, r); }];
+        _gpuAddress = a ? a : (uint64_t)(uintptr_t)_contents;
+    }
+    return _gpuAddress;
+}
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)desc offset:(NSUInteger)offset bytesPerRow:(NSUInteger)bpr {
     return [[VMTexture alloc] initWithDevice:_device descriptor:desc buffer:self offset:offset bytesPerRow:bpr];
 }

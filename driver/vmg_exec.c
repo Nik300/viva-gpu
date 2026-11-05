@@ -765,7 +765,9 @@ void vmg_cmd_dispatch(vmg_device *dev, const vmg_dispatch_info *d)
     dev->stats.dispatches++;
     vmg_shader *k = d->pipeline->kernel;
     struct pipe_context *pipe = dev->pipe;
-    uint32_t header[12] = {0};
+    uint32_t header[16] = {0};
+    header[13] = d->tile[0];   // byte 52: tile width (tile dispatches)
+    header[14] = d->tile[1];   // byte 56: tile height
     // Threadgroup arguments, packed after the shader's static threadgroup memory.
     uint32_t off = align(k->refl.static_shared, 16), dyn = 0;
     for (unsigned i = 0; i < 8; i++) {
@@ -777,7 +779,7 @@ void vmg_cmd_dispatch(vmg_device *dev, const vmg_dispatch_info *d)
         header[8 + i] = d->grid[0] ? d->grid[i] : MAX2(d->groups[i], 1) * th;
     }
     pipe->bind_compute_state(pipe, k->cso);
-    bind_stage(dev, VMG_COMPUTE, k, header, 12);
+    bind_stage(dev, VMG_COMPUTE, k, header, 16);
     struct pipe_grid_info g = {0};
     g.work_dim = 3;
     for (unsigned i = 0; i < 3; i++) {
@@ -1015,4 +1017,50 @@ void vmg_fence_release(vmg_device *dev, vmg_fence *fence)
     if (fe->vis_count) { vmg_fence_wait(dev, fence, UINT64_MAX); }
     if (fence->fence) dev->screen->fence_reference(dev->screen, &fence->fence, NULL);
     free(fe);
+}
+
+void vmg_cmd_dispatch_tile(vmg_device *dev, vmg_compute_pipeline *kernel, uint32_t tile_w, uint32_t tile_h, const uint32_t threads[3])
+{
+    if (!dev->in_pass || !kernel) return;
+    vmg_pass_desc saved = dev->pass;
+    vmg_render_pipeline *pipeline = dev->pipeline;
+    vmg_dsa *dsa = dev->dsa;
+    struct pipe_rasterizer_state raster = dev->raster;
+    struct pipe_viewport_state viewport = dev->viewport;
+    struct pipe_scissor_state scissor = dev->scissor;
+    bool scissor_set = dev->scissor_set;
+    uint32_t w = dev->fb.width, h = dev->fb.height;
+    // 1. end the pass keeping every attachment
+    for (unsigned i = 0; i < VMG_MAX_COLOR; i++) if (dev->pass.color[i].texture) dev->pass.color[i].store = VMG_STORE_STORE;
+    if (dev->pass.depth.texture) dev->pass.depth.store = VMG_STORE_STORE;
+    if (dev->pass.stencil.texture) dev->pass.stencil.store = VMG_STORE_STORE;
+    vmg_cmd_end_pass(dev);
+    // 2. the tile kernel: one threadgroup per tile, attachments as images
+    for (unsigned i = 0; i < VMG_MAX_COLOR && VMG_TILE_IMAGE_BASE + i < VMG_MAX_TEXTURES; i++)
+        if (saved.color[i].texture) vmg_cmd_set_texture(dev, VMG_COMPUTE, VMG_TILE_IMAGE_BASE + i, saved.color[i].texture);
+    tile_w = MAX2(tile_w, 1); tile_h = MAX2(tile_h, 1);
+    vmg_dispatch_info d = {0};
+    d.pipeline = kernel;
+    d.groups[0] = DIV_ROUND_UP(w, tile_w); d.groups[1] = DIV_ROUND_UP(h, tile_h); d.groups[2] = 1;
+    for (unsigned k = 0; k < 3; k++) d.threads[k] = MAX2(threads[k], 1);
+    d.tile[0] = tile_w; d.tile[1] = tile_h;
+    vmg_cmd_dispatch(dev, &d);
+    for (unsigned i = 0; i < VMG_MAX_COLOR && VMG_TILE_IMAGE_BASE + i < VMG_MAX_TEXTURES; i++)
+        if (saved.color[i].texture) vmg_cmd_set_texture(dev, VMG_COMPUTE, VMG_TILE_IMAGE_BASE + i, NULL);
+    // 3. the pass again, loading the attachments, with the encoder's state
+    vmg_pass_desc again = saved;
+    for (unsigned i = 0; i < VMG_MAX_COLOR; i++) if (again.color[i].texture) again.color[i].load = VMG_LOAD_LOAD;
+    if (again.depth.texture) again.depth.load = VMG_LOAD_LOAD;
+    if (again.stencil.texture) again.stencil.load = VMG_LOAD_LOAD;
+    vmg_cmd_begin_pass(dev, &again);
+    dev->stats.passes--;   // the same Metal pass
+    if (pipeline) vmg_cmd_set_render_pipeline(dev, pipeline);
+    if (dsa) vmg_cmd_set_dsa(dev, dsa);
+    dev->raster = raster;
+    dev->raster_dirty = true;
+    dev->viewport = viewport;
+    dev->pipe->set_viewport_states(dev->pipe, 0, 1, &viewport);
+    dev->scissor = scissor;
+    dev->scissor_set = scissor_set;
+    dev->pipe->set_scissor_states(dev->pipe, 0, 1, &scissor);
 }

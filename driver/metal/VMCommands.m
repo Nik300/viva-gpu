@@ -139,6 +139,12 @@ VM_CATCH_ALL(VMComputeEncoder)
 - (MTLDispatchType)dispatchType { return MTLDispatchTypeSerial; }
 - (void)setComputePipelineState:(id<MTLComputePipelineState>)state { _pipeline = (VMComputePipelineState *)state; }
 
+- (void)setVisibleFunctionTable:(id<MTLVisibleFunctionTable>)table atBufferIndex:(NSUInteger)index {
+    if ([(id)table isKindOfClass:[VMVisibleFunctionTable class]]) [self setBuffer:((VMVisibleFunctionTable *)table).buffer offset:0 atIndex:index];
+}
+- (void)setVisibleFunctionTables:(const id<MTLVisibleFunctionTable> __nullable [])tables withBufferRange:(NSRange)range {
+    for (NSUInteger i = 0; i < range.length; i++) [self setVisibleFunctionTable:tables[i] atBufferIndex:range.location + i];
+}
 - (void)setBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index {
     VMDevice *d = VMEncoderDevice(self);
     VMBuffer *b = (VMBuffer *)buffer;

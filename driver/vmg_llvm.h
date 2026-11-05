@@ -4,7 +4,9 @@
 // Enum values are those of the stable LLVM C API.
 #pragma once
 #include <stddef.h>
+#include <stdbool.h>
 #include <stdint.h>
+#include "vmg.h"
 
 typedef struct LLVMOpaqueContext *LLVMContextRef;
 typedef struct LLVMOpaqueModule *LLVMModuleRef;
@@ -184,3 +186,8 @@ TS_LLVM_OPTIONAL_FUNCS(TS_LLVM_DECLARE)
 
 // Loads libLLVM and resolves every function above; returns 0 (with a reason) if anything is missing.
 int vmg_llvm_load(const char **error);
+
+// A1 (vmg_air.c): bitcode parsed, visible functions linked, everything inlined into the entry point, IR cleaned.
+// Shared by the AIR -> NIR translator and the AIR -> Valhall ISA compiler (driver/isa).
+bool vmg_air_module_load(const vmg_air_input *in, LLVMContextRef *ctx, LLVMModuleRef *mod, char **error);
+void vmg_air_module_free(LLVMContextRef ctx, LLVMModuleRef mod);

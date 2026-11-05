@@ -2380,46 +2380,63 @@ static nir_shader *translate_module(const nir_shader_compiler_options *options, 
     return s;
 }
 
-nir_shader *vmg_air_translate(const nir_shader_compiler_options *options, const vmg_air_input *in, vmg_reflection *refl,
-                              struct util_dynarray *pool, char **error)
+// A1, shared by the NIR and ISA paths: parses the bitcode, links the visible functions, inlines everything into the
+// entry point and cleans the IR with LLVM's passes. *ctx/*mod are for vmg_air_module_free.
+bool vmg_air_module_load(const vmg_air_input *in, LLVMContextRef *ctx_out, LLVMModuleRef *mod_out, char **error)
 {
-    g_half32 = in->half32;
     const char *loadError;
     *error = NULL;
-    if (!vmg_llvm_load(&loadError)) { *error = strdup(loadError); return NULL; }
-    glsl_type_singleton_init_or_ref();
+    *ctx_out = NULL; *mod_out = NULL;
+    if (!vmg_llvm_load(&loadError)) { *error = strdup(loadError); return false; }
     LLVMContextRef ctx = ts_LLVMContextCreate();
     LLVMMemoryBufferRef mb = ts_LLVMCreateMemoryBufferWithMemoryRange(in->bitcode, in->bitcode_size, "air", 0);
     LLVMModuleRef mod = NULL;
     bool bad = ts_LLVMParseBitcodeInContext2(ctx, mb, &mod) || !mod;
     ts_LLVMDisposeMemoryBuffer(mb);
-    nir_shader *s = NULL;
-    if (bad) *error = strdup("bitcode parse failed");
-    else {
-        char *err = in->linked_count ? link_visible(ctx, mod, in) : NULL;
-        if (!err) {
-            force_inlining(mod, entry_function(mod));
-            err = run_passes(mod, "always-inline");
-        }
-        if (!err) err = run_passes(mod, kCleanupPasses);
-        if (err) *error = err;
-        else {
-            // A pushed buffer pointer mixed with another memory (select/phi between buffers) does not translate:
-            // that function is translated again with every buffer an SSBO.
-            static int no_push = -1;
-            if (no_push < 0) no_push = getenv("VMG_NO_PUSH") != NULL;
-            size_t pool_size = pool ? pool->size : 0;
-            s = translate_module(options, mod, in, refl, pool, !no_push, error);
-            if (!s && !no_push) {
-                free(*error);
-                *error = NULL;
-                if (pool) pool->size = pool_size;
-                s = translate_module(options, mod, in, refl, pool, false, error);
-            }
-        }
-        ts_LLVMDisposeModule(mod);
+    if (bad) { *error = strdup("bitcode parse failed"); ts_LLVMContextDispose(ctx); return false; }
+    char *err = in->linked_count ? link_visible(ctx, mod, in) : NULL;
+    if (!err) {
+        force_inlining(mod, entry_function(mod));
+        err = run_passes(mod, "always-inline");
     }
-    ts_LLVMContextDispose(ctx);
+    if (!err) err = run_passes(mod, kCleanupPasses);
+    if (err) {
+        *error = err;
+        ts_LLVMDisposeModule(mod);
+        ts_LLVMContextDispose(ctx);
+        return false;
+    }
+    *ctx_out = ctx; *mod_out = mod;
+    return true;
+}
+
+void vmg_air_module_free(LLVMContextRef ctx, LLVMModuleRef mod)
+{
+    if (mod) ts_LLVMDisposeModule(mod);
+    if (ctx) ts_LLVMContextDispose(ctx);
+}
+
+nir_shader *vmg_air_translate(const nir_shader_compiler_options *options, const vmg_air_input *in, vmg_reflection *refl,
+                              struct util_dynarray *pool, char **error)
+{
+    g_half32 = in->half32;
+    LLVMContextRef ctx;
+    LLVMModuleRef mod;
+    if (!vmg_air_module_load(in, &ctx, &mod, error)) return NULL;
+    glsl_type_singleton_init_or_ref();
+    // A pushed buffer pointer mixed with another memory (select/phi between buffers) does not translate:
+    // that function is translated again with every buffer an SSBO.
+    static int no_push = -1;
+    if (no_push < 0) no_push = getenv("VMG_NO_PUSH") != NULL;
+    size_t pool_size = pool ? pool->size : 0;
+    nir_shader *s = translate_module(options, mod, in, refl, pool, !no_push, error);
+    if (!s && !no_push) {
+        free(*error);
+        *error = NULL;
+        if (pool) pool->size = pool_size;
+        s = translate_module(options, mod, in, refl, pool, false, error);
+    }
+    vmg_air_module_free(ctx, mod);
     glsl_type_singleton_decref();
     return s;
 }

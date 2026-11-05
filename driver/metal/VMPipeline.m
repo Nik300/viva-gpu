@@ -12,15 +12,15 @@ NSData *VMBitcodeOfFunction(id<MTLFunction> function) {
 }
 
 // Bitcode of the linked (visible) functions, by name.
-static NSDictionary<NSString *, NSData *> *VMLinkedBitcode(MTLLinkedFunctions *lf) {
-    if (!lf) return nil;
-    NSMutableDictionary *d = [NSMutableDictionary dictionary];
-    for (NSArray<id<MTLFunction>> *list in @[lf.functions ?: @[], lf.privateFunctions ?: @[]])
-        for (id<MTLFunction> f in list) {
-            NSData *bc = VMBitcodeOfFunction(f);
-            if (bc && f.name) d[f.name] = bc;
-        }
-    return d.count ? d : nil;
+// Bitcode of the linked (visible) functions, in MTLLinkedFunctions order: a visible function table entry is the
+// function's position in this list + 1 (driver/isa, G4).
+static NSArray<NSArray *> *VMLinkedBitcode(MTLLinkedFunctions *lf) {
+    NSMutableArray<NSArray *> *a = [NSMutableArray array];
+    for (id<MTLFunction> f in lf.functions) {
+        NSData *bc = VMBitcodeOfFunction(f);
+        if (bc && f.name) [a addObject:@[f.name, bc]];
+    }
+    return a.count ? a : nil;
 }
 
 // Translates one function into a vmg shader on the GPU queue (create_*_state is a context call).
@@ -28,13 +28,13 @@ static vmg_shader *VMShaderFor(VMDevice *device, id<MTLFunction> function, MTLLi
                                NSArray<NSString *> *varyings, const uint32_t *colorFormats, NSString **failure) {
     NSData *bitcode = VMBitcodeOfFunction(function);
     if (!bitcode) { *failure = [NSString stringWithFormat:@"%@: no AIR bitcode", function.name]; return NULL; }
-    NSDictionary<NSString *, NSData *> *lb = VMLinkedBitcode(linked);
+    NSArray<NSArray *> *lb = VMLinkedBitcode(linked);
     NSUInteger nl = lb.count, nv = varyings.count;
     const void **lptr = calloc(nl + 1, sizeof(void *));
     size_t *lsize = calloc(nl + 1, sizeof(size_t));
     const char **lname = calloc(nl + 1, sizeof(char *));
     NSUInteger i = 0;
-    for (NSString *name in lb) { lptr[i] = lb[name].bytes; lsize[i] = lb[name].length; lname[i] = name.UTF8String; i++; }
+    for (NSArray *e in lb) { NSData *d = e[1]; lptr[i] = d.bytes; lsize[i] = d.length; lname[i] = [e[0] UTF8String]; i++; }
     const char **vk = calloc(nv + 1, sizeof(char *));
     for (i = 0; i < nv; i++) vk[i] = varyings[i].UTF8String;
     vmg_air_input in = { .bitcode = bitcode.bytes, .bitcode_size = bitcode.length, .linked = lptr, .linked_size = lsize,
@@ -164,16 +164,24 @@ VM_CATCH_ALL(VMRenderPipelineState)
     __weak VMDevice *_device;
     VMDevice *_strongDevice;
     vmg_shader *_kernel;
+    NSArray<NSString *> *_linkedNames;
     uint32_t _simd, _maxThreads;
     NSUInteger _staticThreadgroupMemory;
 }
 VM_CATCH_ALL(VMComputePipelineState)
 
 - (instancetype)initWithDevice:(VMDevice *)device function:(id<MTLFunction>)function error:(NSError **)error {
+    return [self initWithDevice:device function:function linked:nil error:error];
+}
+
+- (instancetype)initWithDevice:(VMDevice *)device function:(id<MTLFunction>)function linked:(MTLLinkedFunctions *)linked error:(NSError **)error {
     if (!(self = [super init])) return nil;
     _device = _strongDevice = device;
+    NSMutableArray<NSString *> *names = [NSMutableArray array];
+    for (id<MTLFunction> f in linked.functions) if (VMBitcodeOfFunction(f) && f.name) [names addObject:f.name];
+    _linkedNames = names;
     NSString *failure = nil;
-    _kernel = VMShaderFor(device, function, nil, @[], NULL, &failure);
+    _kernel = VMShaderFor(device, function, linked, @[], NULL, &failure);
     if (_kernel) {
         __block vmg_compute_pipeline *p = NULL;
         __block char *err = NULL;
@@ -208,9 +216,90 @@ VM_CATCH_ALL(VMComputePipelineState)
 
 - (id<MTLDevice>)device { return _device; }
 - (NSUInteger)threadExecutionWidth { return _simd; }
+- (id<MTLFunctionHandle>)functionHandleWithFunction:(id<MTLFunction>)function {
+    NSUInteger i = [_linkedNames indexOfObject:function.name];
+    return i == NSNotFound ? nil : [[VMFunctionHandle alloc] initWithFunction:function index:(uint32_t)i];
+}
+- (id<MTLVisibleFunctionTable>)newVisibleFunctionTableWithDescriptor:(MTLVisibleFunctionTableDescriptor *)desc {
+    VMDevice *d = _device;
+    return d ? (id<MTLVisibleFunctionTable>)[[VMVisibleFunctionTable alloc] initWithDevice:d count:desc.functionCount] : nil;
+}
 - (NSUInteger)maxTotalThreadsPerThreadgroup { return _maxThreads; }
 - (NSUInteger)staticThreadgroupMemoryLength { return _staticThreadgroupMemory; }
 - (BOOL)supportIndirectCommandBuffers { return NO; }
 - (NSUInteger)imageblockMemoryLengthForDimensions:(MTLSize)d { return 0; }
 - (MTLResourceID)gpuResourceID { return (MTLResourceID){ (uint64_t)(uintptr_t)(__bridge void *)self }; }
+@end
+
+#pragma mark - Visible functions (G4)
+
+// A function of a pipeline's linked functions: the entry a visible function table stores for it.
+@implementation VMFunctionHandle
+- (instancetype)initWithFunction:(id<MTLFunction>)f index:(uint32_t)index {
+    if ((self = [super init])) { _function = f; _index = index; }
+    return self;
+}
+- (MTLFunctionType)functionType { return _function.functionType; }
+- (NSString *)name { return _function.name; }
+- (id<MTLDevice>)device { return _function.device; }
+@end
+
+// Table of visible functions: a buffer of uint32 entries, each the function's place in the pipeline's linked
+// functions + 1 (0 = none). The ISA compiler turns calls through it into a choice among the linked functions.
+@implementation VMVisibleFunctionTable {
+    VMBuffer *_buffer;
+    NSUInteger _count;
+}
+- (instancetype)initWithDevice:(VMDevice *)device count:(NSUInteger)count {
+    if (!(self = [super init])) return nil;
+    _count = MAX(count, 1);
+    _buffer = [[VMBuffer alloc] initWithDevice:device length:_count * 4 options:MTLResourceStorageModeShared bytes:NULL deallocator:nil];
+    if (!_buffer) return nil;
+    memset(_buffer.contents, 0, _count * 4);
+    return self;
+}
+- (id<MTLBuffer>)buffer { return _buffer; }
+- (void)setFunction:(id<MTLFunctionHandle>)function atIndex:(NSUInteger)index {
+    if (index >= _count) return;
+    uint32_t v = [(id)function isKindOfClass:[VMFunctionHandle class]] ? ((VMFunctionHandle *)function).index + 1 : 0;
+    ((uint32_t *)_buffer.contents)[index] = v;
+}
+- (void)setFunctions:(const id<MTLFunctionHandle> __nullable [])functions withRange:(NSRange)range {
+    for (NSUInteger i = 0; i < range.length; i++) [self setFunction:functions[i] atIndex:range.location + i];
+}
+- (MTLResourceID)gpuResourceID { MTLResourceID r; memset(&r, 0, sizeof r); return r; }
+- (id<MTLDevice>)device { return _buffer.device; }
+- (NSUInteger)allocatedSize { return _count * 4; }
+- (MTLCPUCacheMode)cpuCacheMode { return MTLCPUCacheModeDefaultCache; }
+- (MTLStorageMode)storageMode { return MTLStorageModeShared; }
+- (MTLHazardTrackingMode)hazardTrackingMode { return MTLHazardTrackingModeTracked; }
+- (MTLResourceOptions)resourceOptions { return MTLResourceStorageModeShared; }
+- (MTLPurgeableState)setPurgeableState:(MTLPurgeableState)state { return MTLPurgeableStateNonVolatile; }
+- (id<MTLHeap>)heap { return nil; }
+- (NSUInteger)heapOffset { return 0; }
+- (void)makeAliasable {}
+- (BOOL)isAliasable { return NO; }
+@end
+
+#pragma mark - Tile pipelines (G2)
+
+@implementation VMTilePipelineState {
+    __weak VMDevice *_device;
+    MTLTileRenderPipelineDescriptor *_desc;
+}
+VM_CATCH_ALL(VMTilePipelineState)
+
+- (instancetype)initWithDevice:(VMDevice *)device descriptor:(MTLTileRenderPipelineDescriptor *)desc error:(NSError **)error {
+    if (!(self = [super init])) return nil;
+    _device = device;
+    _desc = [desc copy];
+    _kernel = [[VMComputePipelineState alloc] initWithDevice:device function:desc.tileFunction linked:nil error:error];
+    _failure = _kernel.failure;
+    return self;
+}
+- (id<MTLDevice>)device { return _device; }
+- (NSUInteger)maxTotalThreadsPerThreadgroup { return _kernel.maxTotalThreadsPerThreadgroup; }
+- (BOOL)threadgroupSizeMatchesTileSize { return _desc.threadgroupSizeMatchesTileSize; }
+- (NSUInteger)imageblockSampleLength { return 0; }
+- (MTLResourceID)gpuResourceID { MTLResourceID r; memset(&r, 0, sizeof r); return r; }
 @end

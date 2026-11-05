@@ -231,8 +231,29 @@ NSData *VMBitcodeOfFunction(id<MTLFunction> function);
 
 @interface VMComputePipelineState : _MTLObjectWithLabel <MTLComputePipelineState>
 - (instancetype)initWithDevice:(VMDevice *)device function:(id<MTLFunction>)function error:(NSError **)error;
+- (instancetype)initWithDevice:(VMDevice *)device function:(id<MTLFunction>)function linked:(MTLLinkedFunctions *)linked
+                         error:(NSError **)error;
 @property (readonly) vmg_compute_pipeline *vmg;  // NULL when the kernel could not be translated (dispatches are skipped)
 @property (readonly) NSString *failure;
+@end
+
+// Tile render pipeline (G2): the tile function runs as a compute kernel at dispatchThreadsPerTile (vmg_cmd_dispatch_tile).
+@interface VMTilePipelineState : _MTLObjectWithLabel <MTLRenderPipelineState>
+- (instancetype)initWithDevice:(VMDevice *)device descriptor:(MTLTileRenderPipelineDescriptor *)desc error:(NSError **)error;
+@property (readonly) VMComputePipelineState *kernel;
+@property (readonly) NSString *failure;
+@end
+
+// Visible function tables (driver/isa, G4): entry = the function's place in the pipeline's linked functions + 1.
+@interface VMFunctionHandle : NSObject <MTLFunctionHandle>
+- (instancetype)initWithFunction:(id<MTLFunction>)function index:(uint32_t)index;
+@property (readonly) id<MTLFunction> function;
+@property (readonly) uint32_t index;
+@end
+
+@interface VMVisibleFunctionTable : NSObject <MTLVisibleFunctionTable>
+- (instancetype)initWithDevice:(VMDevice *)device count:(NSUInteger)count;
+@property (readonly) id<MTLBuffer> buffer;
 @end
 
 @interface VMCommandQueue : _MTLCommandQueue <MTLCommandQueue>

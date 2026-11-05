@@ -9,7 +9,8 @@
 
 #define VMG_SHM_STATS_DIR     "/private/var/tmp/vmg-stats"
 #define VMG_SHM_STATS_MAGIC   0x534d4756u   // 'VGMS'
-#define VMG_SHM_STATS_VERSION 1
+#define VMG_SHM_STATS_VERSION 2
+#define VMG_SHM_STATS_HAS_ISA 1
 #define VMG_SHM_STATS_CALLS   32            // >= VGPU_SEL_COUNT (uapi selectors, by index)
 
 typedef struct {
@@ -38,6 +39,13 @@ typedef struct {
     // Kernel (vgpu) calls by uapi selector, and GPU jobs submitted.
     uint64_t jobs;
     uint64_t calls[VMG_SHM_STATS_CALLS];
+
+    // Version 2: direct AIR -> Valhall ISA compiler (driver/isa, VMG_ISA=1).
+    uint64_t isa_functions;          // functions compiled on the ISA path (cache hits included)
+    uint64_t isa_fallbacks;          // functions that went back to the NIR path
+    uint64_t isa_compile_us;         // total ISA compile time
+    char     isa_last_fallback[96];  // "<function>: <first unsupported operation / disabled feature>"
+    uint32_t gpu_product_id;         // 0x9093 on the Mali-G57 MC2 (Viva Manager's compatibility check)
 } vmg_shm_stats;
 
 #endif
