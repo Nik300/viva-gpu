@@ -155,6 +155,7 @@ bool vi_validate(vi_shader *s);
 
 // Constant folding, 16-bit lane peepholes, branches on constants (vi_fold.c; VMG_ISA_NO_FOLD=1 turns them off).
 bool vi_fold(vi_shader *s);
+bool vi_fold_disabled(void);
 bool vi_fold_branches(vi_shader *s);
 void vi_drop_self_moves(vi_shader *s);               // after RA
 

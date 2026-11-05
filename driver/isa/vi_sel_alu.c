@@ -7,6 +7,7 @@
 // Valhall has them (add, sub, mul, logic, shifts). Doubles are not supported (fallback).
 #include "vi_sel.h"
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 static uint32_t fbits(float f) { uint32_t u; memcpy(&u, &f, 4); return u; }
@@ -1145,6 +1146,54 @@ static sv *f32_result(S *t, unsigned bits, unsigned n, vi_ref *r)
     return v;
 }
 
+// dot of half vectors in packed f16 (Metal's half dot): products two lanes at a time, then the lanes summed. The
+// result is a scalar half in the low lane (the high lane is undefined, as for every narrow scalar).
+static sv *half_dot(S *t, sv *a, sv *b)
+{
+    if (a->bits != 16 || b->bits != 16 || a->ncomp != b->ncomp || a->ncomp < 2 || a->ncomp > 4 || getenv("VMG_ISA_NO_HALF_NATIVE")) return NULL;
+    sel_use(t, VMG_ISA_E5);
+    vi_ref p = sel_tmp(t);
+    vi_instr *I = E(t, VA_FMUL_V2F16);
+    I->dest = p; I->src[0] = sv_word(t, a, 0); I->src[1] = sv_word(t, b, 0);
+    vi_set(I, VAF_swz0, VA_SWIZ_M_H01); vi_set(I, VAF_swz1, VA_SWIZ_M_H01);
+    vi_ref r = sel_tmp(t);
+    if (a->ncomp == 2) {
+        // x*x' + y*y'
+        I = E(t, VA_FADD_V2F16); I->dest = r; I->src[0] = p; I->src[1] = p;
+        vi_set(I, VAF_swz0, VA_SWIZ_M_H00); vi_set(I, VAF_swz1, VA_SWIZ_M_H11);
+    } else if (a->ncomp == 3) {
+        // (z*z' + y*y', z*z' + x*x') then lane 0 + x*x' : z*z' + y*y' + x*x' (the padding lanes are never read)
+        vi_ref q = sel_tmp(t);
+        I = E(t, VA_FMA_V2F16); I->dest = q; I->src[0] = sv_word(t, a, 1); I->src[1] = sv_word(t, b, 1); I->src[2] = p;
+        vi_set(I, VAF_swz0, VA_SWIZ_M_H00); vi_set(I, VAF_swz1, VA_SWIZ_M_H00); vi_set(I, VAF_swz2, VA_SWIZ_M_H11);
+        I = E(t, VA_FADD_V2F16); I->dest = r; I->src[0] = q; I->src[1] = p;
+        vi_set(I, VAF_swz0, VA_SWIZ_M_H00); vi_set(I, VAF_swz1, VA_SWIZ_M_H00);
+    } else {
+        // (x*x' + z*z', y*y' + w*w'), then the two lanes summed
+        vi_ref q = sel_tmp(t);
+        I = E(t, VA_FMA_V2F16); I->dest = q; I->src[0] = sv_word(t, a, 1); I->src[1] = sv_word(t, b, 1); I->src[2] = p;
+        vi_set(I, VAF_swz0, VA_SWIZ_M_H01); vi_set(I, VAF_swz1, VA_SWIZ_M_H01); vi_set(I, VAF_swz2, VA_SWIZ_M_H01);
+        I = E(t, VA_FADD_V2F16); I->dest = r; I->src[0] = q; I->src[1] = q;
+        vi_set(I, VAF_swz0, VA_SWIZ_M_H00); vi_set(I, VAF_swz1, VA_SWIZ_M_H11);
+    }
+    sv *v = sv_val(t, 16, 1);
+    I = E(t, VA_MOV_I32); I->dest = vi_vreg(v->vreg, 0, 1); I->src[0] = r;
+    return v;
+}
+
+// mix(x, y, a) = x + (y - x) * a on half vectors: packed FADD + FMA.
+static sv *half_mix(S *t, LLVMValueRef inst)
+{
+    sv *a[3];
+    for (unsigned k = 0; k < 3; k++) if (!(a[k] = arg(t, inst, k))) return NULL;
+    if (a[0]->bits != 16 || a[1]->bits != 16 || a[2]->bits != 16 || getenv("VMG_ISA_NO_HALF_NATIVE")) return NULL;
+    sv *p[2] = { a[1], a[0] };
+    sv *dlt = float_op(t, OP_FSUB, 2, p);
+    if (!dlt) return NULL;
+    sv *q[3] = { dlt, a[2], a[0] };
+    return float_op(t, OP_FMA, 3, q);
+}
+
 static sv *geometry(S *t, LLVMValueRef inst, const char *op)
 {
     USE(t, E8);
@@ -1152,7 +1201,14 @@ static sv *geometry(S *t, LLVMValueRef inst, const char *op)
     if (!a) return NULL;
     unsigned bits = a->bits;
     vi_ref r[4];
-    if (fname_is(op, "dot")) { sv *b = arg(t, inst, 1); if (!b) return NULL; r[0] = fdot(t, a, b); return f32_result(t, bits, 1, r); }
+    if (fname_is(op, "dot")) {
+        sv *b = arg(t, inst, 1);
+        if (!b) return NULL;
+        sv *h = half_dot(t, a, b);
+        if (h || t->error) return h;
+        r[0] = fdot(t, a, b);
+        return f32_result(t, bits, 1, r);
+    }
     if (fname_is(op, "length") || fname_is(op, "fast_length") || fname_is(op, "precise_length")) {
         vi_ref d = fdot(t, a, a);
         r[0] = fop(t, OP_SQRT, &d, 1);
@@ -1309,8 +1365,26 @@ sv *sel_math(S *t, LLVMValueRef inst, const char *name)
         for (unsigned c = 0; c < a->ncomp; c++) { vi_ref x[2] = { sv_comp32(t, a, c, X_F32), sv_comp32(t, b, b->ncomp == 1 ? 0 : c, X_SEXT) }; rr[c] = fop(t, OP_LDEXP, x, 2); }
         return f32_result(t, a->bits, a->ncomp, rr);
     }
-    if (fname_is(op, "mix")) { USE(t, E7); return fchain(t, inst, 3, c_mix); }
-    if (fname_is(op, "fclamp") || (fname_is(op, "clamp") && !u && !s)) { USE(t, E7); return fchain(t, inst, 3, c_clamp); }
+    if (fname_is(op, "mix")) {
+        USE(t, E7);
+        sv *h = half_mix(t, inst);
+        if (h || t->error) return h;
+        return fchain(t, inst, 3, c_mix);
+    }
+    if (fname_is(op, "fclamp") || (fname_is(op, "clamp") && !u && !s)) {
+        USE(t, E7);
+        // half: packed FMAX + FMIN (two lanes per instruction) instead of f32 per component
+        sv *a[3];
+        for (unsigned k = 0; k < 3; k++) if (!(a[k] = arg(t, inst, k))) return NULL;
+        if (a[0]->bits == 16 && a[1]->bits == 16 && a[2]->bits == 16 && !getenv("VMG_ISA_NO_HALF_NATIVE")) {
+            sv *p[2] = { a[0], a[1] };
+            sv *m = float_op(t, OP_FMAX, 2, p);
+            if (!m) return NULL;
+            sv *q[2] = { m, a[2] };
+            return float_op(t, OP_FMIN, 2, q);
+        }
+        return fchain(t, inst, 3, c_clamp);
+    }
     if (fname_is(op, "step")) { USE(t, E7); return fchain(t, inst, 2, c_step); }
     if (fname_is(op, "smoothstep")) { USE(t, E7); return fchain(t, inst, 3, c_smoothstep); }
     if (fname_is(op, "radians")) { USE(t, E7); return fchain(t, inst, 1, c_radians); }

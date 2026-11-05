@@ -8,6 +8,7 @@
 // Sizes and level counts are read from the texture descriptor itself (resource table 62). Images (written
 // textures) are table 5: LD_TEX for reads, LEA_TEX + ST_CVT for writes.
 #include "vi_sel.h"
+#include <stdlib.h>
 #include <string.h>
 
 enum { DIM_1D, DIM_2D, DIM_3D, DIM_CUBE };
@@ -547,11 +548,20 @@ sv *sel_texture(S *t, LLVMValueRef inst, const char *name)
     bool implicit = !gather && (lod_mode == VA_TEX_LOD_MODE_M_COMPUTED || lod_mode == VA_TEX_LOD_MODE_M_COMPUTED_BIAS);
     if (gather) implicit = false;
     vi_ref sr = staging(t, w, n);
-    uint32_t d = vi_new_vreg(t->s, 4);
     unsigned wm = (depth && !gather) || cmp ? (gather ? 15 : 1) : 15;
+    // half results (sample_texture_*.v4f16): the texture unit writes them packed two per register (register width
+    // 16, as Mesa does), instead of four f32 registers converted back with V2F32_TO_V2F16
+    bool half_out = false;
+    {
+        LLVMTypeRef vt = ts_LLVMGetTypeKind(rt) == LLVMStructTypeKind ? ts_LLVMStructGetTypeAtIndex(rt, 0) : rt;
+        unsigned rb = 32, rn = 4; bool rf = false;
+        half_out = sel_type_info(vt, &rb, &rn, &rf) && rb == 16 && rf && rn == 4 && !gather && !depth && !cmp &&
+                   !getenv("VMG_ISA_NO_TEX16");
+    }
+    uint32_t d = vi_new_vreg(t->s, half_out ? 2 : 4);
     vi_ref desc = descriptor(t, tv->index, smp->index, narrow);
     vi_instr *I = E(t, gather ? VA_TEX_GATHER : VA_TEX_SINGLE);
-    I->sr = sr; I->sw = vi_vreg(d, 0, util_bitcount(wm));
+    I->sr = sr; I->sw = vi_vreg(d, 0, half_out ? 2 : util_bitcount(wm));
     I->src[0] = desc;
     vi_set(I, VAF_dimensionality, sh.dim);
     vi_set(I, VAF_array_enable, sh.array);
@@ -560,10 +570,21 @@ sv *sel_texture(S *t, LLVMValueRef inst, const char *name)
     if (!gather) vi_set(I, VAF_lod_mode, lod_mode);
     else { vi_set(I, VAF_gather_component, gather_comp & 3); vi_set(I, VAF_coordinate_mode, 0); }
     vi_set(I, VAF_write_mask, wm);
-    vi_set(I, VAF_register_width, 1);
+    vi_set(I, VAF_register_width, half_out ? 0 : 1);
     vi_set(I, VAF_wide_indices, 0);
     vi_set(I, VAF_skip, 0);
     if (implicit && t->stage == MESA_SHADER_FRAGMENT) { I->helpers = true; t->info.helpers = true; }
+    if (half_out) {
+        sv *v = sv_val(t, 16, 4);
+        for (unsigned k = 0; k < 2; k++) { vi_instr *M = E(t, VA_MOV_I32); M->dest = vi_vreg(v->vreg, k, 1); M->src[0] = vi_vreg(d, k, 1); }
+        if (ts_LLVMGetTypeKind(rt) != LLVMStructTypeKind) return v;
+        sv *a = sv_new(t, SV_AGG);
+        unsigned m = ts_LLVMCountStructElementTypes(rt);
+        a->n = m; a->e = ralloc_array(t->mem, sv *, m);
+        a->e[0] = v;
+        for (unsigned i = 1; i < m; i++) { uint32_t one = 1; a->e[i] = sv_const(t, 1, 1, &one); }
+        return a;
+    }
     if (gather) {
         // TEX_GATHER returns the footprint as (h0, h1, h2, h3); Metal's order is (h2, h3, h1, h0) (what Mesa's code for
         // the same shader writes out: the D3 gather had channels 2 and 3 swapped on the phone).

@@ -88,6 +88,7 @@ typedef struct { int start, end; } interval;
 
 typedef struct {
     interval *iv;          // per vreg
+    interval *wiv;         // per word of every vreg (g_base)
     interval fixed[VI_NUM_REGS];
     int pos;
     int clobber_pos[64]; uint64_t clobber_mask[64]; unsigned nclobber;
@@ -109,7 +110,10 @@ static void ra_ref(vi_ref *r, bool write, void *data)
 {
     ra_ctx *c = data;
     int p = c->pos + (write ? 1 : 0);
-    if (r->kind == VI_VREG) extend(&c->iv[r->value], p);
+    if (r->kind == VI_VREG) {
+        extend(&c->iv[r->value], p);
+        for (unsigned w = 0; w < ref_words(r); w++) extend(&c->wiv[g_base[r->value] + r->word + w], p);
+    }
     else if (r->kind == VI_REG)
         for (unsigned w = 0; w < ref_words(r) && r->value + w < VI_NUM_REGS; w++) extend(&c->fixed[r->value + w], p);
 }
@@ -142,6 +146,8 @@ static bool ra_try(vi_shader *s, int *spill)
     ra_ctx c = {0};
     c.iv = calloc(n ? n : 1, sizeof *c.iv);
     for (unsigned v = 0; v < n; v++) c.iv[v].start = c.iv[v].end = -1;
+    c.wiv = malloc((s->live_words ? s->live_words : 1) * sizeof *c.wiv);
+    for (unsigned w = 0; w < s->live_words; w++) c.wiv[w].start = c.wiv[w].end = -1;
     for (unsigned r = 0; r < VI_NUM_REGS; r++) c.fixed[r].start = c.fixed[r].end = -1;
     int pos = 0;
     vi_foreach_block(s, blk) {
@@ -154,17 +160,27 @@ static bool ra_try(vi_shader *s, int *spill)
         }
         int last = pos > first ? pos - 1 : first;
         unsigned w, v = 0;
-        BITSET_FOREACH_SET(w, blk->live_in, s->live_words) { while (g_base[v + 1] <= w) v++; extend(&c.iv[v], first); }
+        BITSET_FOREACH_SET(w, blk->live_in, s->live_words) { while (g_base[v + 1] <= w) v++; extend(&c.iv[v], first); extend(&c.wiv[w], first); }
         v = 0;
-        BITSET_FOREACH_SET(w, blk->live_out, s->live_words) { while (g_base[v + 1] <= w) v++; extend(&c.iv[v], last); }
+        BITSET_FOREACH_SET(w, blk->live_out, s->live_words) { while (g_base[v + 1] <= w) v++; extend(&c.iv[v], last); extend(&c.wiv[w], last); }
     }
     // Coalescing hint: a one-word register copied from a word of another register prefers the same register.
     int *hint_src = malloc((n ? n : 1) * sizeof(int)), *hint_word = malloc((n ? n : 1) * sizeof(int));
     for (unsigned v = 0; v < n; v++) hint_src[v] = -1;
+    // Vector hints (staging vectors built by copies, words of split message results): word q of V copied from word xw
+    // of x. With per-word intervals, V may take x's register for that word when x's word dies at the copy, which
+    // turns the copy into a move onto itself (dropped after RA). VMG_ISA_NO_VHINT=1 turns this off.
+    typedef struct { uint8_t q, xw; uint32_t x; } vhint;
+    enum { VHINTS = 8 };
+    vhint *vh = calloc((n ? n : 1) * VHINTS, sizeof *vh);
+    uint8_t *nvh = calloc(n ? n : 1, 1);
+    static int no_vhint = -1;
+    if (no_vhint < 0) no_vhint = getenv("VMG_ISA_NO_VHINT") != NULL;
     vi_foreach_block(s, blk) vi_foreach_instr(blk, I) {
-        if (I->op == VA_MOV_I32 && I->dest.kind == VI_VREG && I->src[0].kind == VI_VREG && vi_vreg_get(s, I->dest.value)->nwords == 1) {
-            hint_src[I->dest.value] = (int)I->src[0].value; hint_word[I->dest.value] = I->src[0].word;
-        }
+        if (I->op != VA_MOV_I32 || I->dest.kind != VI_VREG || I->src[0].kind != VI_VREG || ref_words(&I->src[0]) != 1 || ref_words(&I->dest) != 1) continue;
+        if (vi_vreg_get(s, I->dest.value)->nwords == 1) { hint_src[I->dest.value] = (int)I->src[0].value; hint_word[I->dest.value] = I->src[0].word; }
+        uint32_t v = I->dest.value;
+        if (nvh[v] < VHINTS && I->src[0].value != v) { vh[v * VHINTS + nvh[v]] = (vhint){ I->dest.word, I->src[0].word, I->src[0].value }; nvh[v]++; }
     }
     // Precoloured registers first: their intervals become fixed ones the others avoid.
     for (unsigned v = 0; v < n; v++) {
@@ -172,7 +188,7 @@ static bool ra_try(vi_shader *s, int *spill)
         if (info->fixed < 0 || c.iv[v].start < 0) continue;
         for (unsigned w = 0; w < info->nwords; w++) {
             interval *f = &c.fixed[info->fixed + w];
-            if (f->start >= 0 && overlaps(*f, c.iv[v])) { free(c.iv); free(s->error); s->error = strdup("register allocation: precoloured registers overlap"); return false; }
+            if (f->start >= 0 && overlaps(*f, c.iv[v])) { free(c.iv); free(c.wiv); free(vh); free(nvh); free(hint_src); free(hint_word); free(s->error); s->error = strdup("register allocation: precoloured registers overlap"); return false; }
             extend(f, c.iv[v].start); extend(f, c.iv[v].end);
         }
         info->phys = info->fixed;
@@ -203,7 +219,34 @@ static bool ra_try(vi_shader *s, int *spill)
         for (unsigned k = 0; k < c.nclobber; k++)
             if (iv.start < c.clobber_pos[k] && c.clobber_pos[k] < iv.end) forbidden |= c.clobber_mask[k];
         int chosen = -1;
-        if (info->fixed < 0 && nw == 1 && hint_src[v] >= 0) {
+        // vector / per-word hints: a base where every word is free, or held by a word of another register that is
+        // dead before this word is first written
+        for (unsigned h = 0; h < nvh[v] && chosen < 0 && info->fixed < 0 && !no_vhint; h++) {
+            vhint hh = vh[v * VHINTS + h];
+            vi_vreg_info *xi = vi_vreg_get(s, hh.x);
+            if (xi->phys < 0) continue;
+            int base = xi->phys + hh.xw - hh.q;
+            if (base < 0 || base % al || base + (int)nw > VI_NUM_REGS) continue;
+            if (!((base + (int)nw <= 16) || (base >= 48))) continue;   // stay in the 32-register set
+            bool ok = true;
+            for (unsigned w = 0; w < nw && ok; w++) {
+                unsigned q = (unsigned)base + w;
+                interval ww = c.wiv[g_base[v] + w];
+                if ((forbidden >> q & 1) || overlaps(c.fixed[q], iv)) { ok = false; break; }
+                int a = active[q];
+                if (a < 0) continue;
+                vi_vreg_info *ai = vi_vreg_get(s, (uint32_t)a);
+                int aw = (int)q - ai->phys;
+                if (a == v || aw < 0 || aw >= ai->nwords) { ok = false; break; }
+                interval aww = c.wiv[g_base[a] + aw];
+                // the other word must end before this word starts (a word never written is not live)
+                if (ww.start < 0 || aww.end >= ww.start) ok = false;
+                // and it must not come back to life later in this one's range (its register is reused for it)
+                if (ok && aww.start > ww.start) ok = false;
+            }
+            if (ok) chosen = base;
+        }
+        if (chosen < 0 && info->fixed < 0 && nw == 1 && hint_src[v] >= 0) {
             vi_vreg_info *hi = vi_vreg_get(s, (uint32_t)hint_src[v]);
             int r = hi->phys >= 0 ? hi->phys + hint_word[v] : -1;
             // (only inside the 32-register set: a hint must not push the program to 64 registers)
@@ -263,7 +306,7 @@ static bool ra_try(vi_shader *s, int *spill)
     }
     free(order);
     free(c.iv);
-    free(hint_src); free(hint_word);
+    free(hint_src); free(hint_word); free(vh); free(nvh); free(c.wiv);
     if (!ok) return false;
     for (unsigned r = 0; r < VI_NUM_REGS; r++) if (c.fixed[r].start >= 0) used |= 1ull << r;
     vi_foreach_block(s, blk) vi_foreach_instr(blk, I) foreach_ref(I, rewrite_ref, s);

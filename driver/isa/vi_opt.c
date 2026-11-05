@@ -255,6 +255,8 @@ static void demote_phis(vi_shader *s)
     free(base); free(wdefs); free(dblk); free(mixed);
 }
 
+static bool dce_words(vi_shader *s);
+
 // Copy propagation, folding and dead code elimination until nothing changes.
 static void simplify(vi_shader *s)
 {
@@ -268,9 +270,111 @@ static void simplify(vi_shader *s)
         p |= vi_fold(s);
         count(s, vi, &wi);
         p |= dce(s, vi);
+        if (!vi_fold_disabled()) p |= dce_words(s);
         if (!p) break;
     }
     free(vi); free(wi.base); free(wi.wdefs); free(wi.wdef);
+}
+
+// Words of multi-word registers that nothing reads (a vector padded with a zero word, a component never used): their
+// single-word definitions without side effects go away (dce works per register).
+static bool dce_words(vi_shader *s)
+{
+    unsigned n = vi_num_vregs(s), words = 0;
+    unsigned *base = malloc((n + 1) * sizeof *base);
+    for (unsigned v = 0; v < n; v++) { base[v] = words; words += vi_vreg_get(s, v)->nwords; }
+    bool *read = calloc(words ? words : 1, sizeof *read);
+    vi_foreach_block(s, blk) vi_foreach_instr(blk, I) {
+        vi_ref *r[5] = { &I->src[0], &I->src[1], &I->src[2], &I->src[3], &I->sr };
+        for (unsigned k = 0; k < 5; k++) {
+            if (r[k]->kind != VI_VREG || r[k]->value >= n) continue;
+            unsigned cnt = r[k]->count ? r[k]->count : 1;
+            for (unsigned q = 0; q < cnt && r[k]->word + q < vi_vreg_get(s, r[k]->value)->nwords; q++) read[base[r[k]->value] + r[k]->word + q] = true;
+        }
+    }
+    bool progress = false;
+    vi_foreach_block(s, blk) vi_foreach_instr_safe(blk, I) {
+        if (side_effects(I) || I->sw.kind || I->dest.kind != VI_VREG || I->dest.value >= n) continue;
+        vi_vreg_info *info = vi_vreg_get(s, I->dest.value);
+        if (info->nwords < 2 || info->fixed >= 0) continue;
+        unsigned cnt = I->dest.count ? I->dest.count : 1;
+        bool any = false;
+        for (unsigned q = 0; q < cnt && !any; q++) any = I->dest.word + q >= info->nwords || read[base[I->dest.value] + I->dest.word + q];
+        if (any) continue;
+        list_del(&I->link);
+        progress = true;
+    }
+    free(base); free(read);
+    return progress;
+}
+
+// Copies into registers that are read in place (staging vectors of messages, multi-word values): `x = D(...);
+// MOV V[q] = x` with x defined once and read only by that copy becomes `V[q] = D(...)`. Same for every word of a
+// message result copied word by word into consecutive words of V. RA then has nothing to coalesce.
+static bool coalesce_copies(vi_shader *s)
+{
+    if (getenv("VMG_ISA_NO_COALESCE")) return false;
+    unsigned n = vi_num_vregs(s), words = 0;
+    unsigned *base = malloc((n + 1) * sizeof *base);
+    for (unsigned v = 0; v < n; v++) { base[v] = words; words += vi_vreg_get(s, v)->nwords; }
+    unsigned *uses = calloc(n ? n : 1, sizeof *uses), *defs = calloc(n ? n : 1, sizeof *defs);
+    unsigned *wdefs = calloc(words ? words : 1, sizeof *wdefs);
+    vi_instr **def = calloc(n ? n : 1, sizeof *def);
+    vi_foreach_block(s, blk) vi_foreach_instr(blk, I) {
+        vi_ref *r[5] = { &I->src[0], &I->src[1], &I->src[2], &I->src[3], &I->sr };
+        for (unsigned k = 0; k < 5; k++) if (r[k]->kind == VI_VREG && r[k]->value < n) uses[r[k]->value]++;
+        vi_ref *w[2] = { &I->dest, &I->sw };
+        for (unsigned k = 0; k < 2; k++) {
+            if (w[k]->kind != VI_VREG || w[k]->value >= n) continue;
+            defs[w[k]->value]++; def[w[k]->value] = I;
+            unsigned cnt = w[k]->count ? w[k]->count : 1;
+            for (unsigned q = 0; q < cnt && w[k]->word + q < vi_vreg_get(s, w[k]->value)->nwords; q++) wdefs[base[w[k]->value] + w[k]->word + q]++;
+        }
+    }
+    bool progress = false;
+    vi_foreach_block(s, blk) vi_foreach_instr_safe(blk, M) {
+        if (M->op != VA_MOV_I32 || M->flow || M->f.set[VAF_dest_width] || M->dest.kind != VI_VREG || M->src[0].kind != VI_VREG) continue;
+        if ((M->dest.count && M->dest.count != 1) || (M->src[0].count && M->src[0].count != 1)) continue;
+        uint32_t V = M->dest.value, x = M->src[0].value;
+        if (V >= n || x >= n || V == x) continue;
+        vi_vreg_info *vi = vi_vreg_get(s, V), *xi = vi_vreg_get(s, x);
+        if (vi->fixed >= 0 || xi->fixed >= 0 || vi->multi_def || xi->multi_def || vi->spill_temp || xi->spill_temp) continue;
+        if (wdefs[base[V] + M->dest.word] != 1 || defs[x] != 1 || uses[x] != xi->nwords) continue;
+        vi_instr *D = def[x];
+        if (!D || D == M || D->flow || D->target) continue;
+        if (xi->nwords == 1) {
+            // a one-word value
+            if (D->dest.kind != VI_VREG || D->dest.value != x || D->sw.kind || D->f.set[VAF_dest_width]) continue;
+            D->dest = vi_vreg(V, M->dest.word, 1);
+            list_del(&M->link);
+            uses[x] = 0; defs[x] = 0;
+            progress = true;
+            continue;
+        }
+        // a message result (staging write) copied word by word: every word of x into V[q0 + k], in order
+        if (D->sw.kind != VI_VREG || D->sw.value != x || D->sw.word != 0 || (D->sw.count ? D->sw.count : 1) != xi->nwords) continue;
+        if (M->src[0].word != 0) continue;
+        unsigned q0 = M->dest.word, nw = xi->nwords;
+        if (q0 % 2 || q0 + nw > vi->nwords) continue;   // staging ranges stay even-aligned
+        vi_instr *copies[VI_MAX_WORDS] = { M };
+        bool ok = true;
+        for (unsigned k = 1; k < nw && ok; k++) {
+            ok = false;
+            vi_foreach_block(s, b2) vi_foreach_instr(b2, J) {
+                if (J->op == VA_MOV_I32 && !J->flow && !J->f.set[VAF_dest_width] && J->src[0].kind == VI_VREG && J->src[0].value == x &&
+                    J->src[0].word == k && (J->src[0].count ? J->src[0].count : 1) == 1 && J->dest.kind == VI_VREG && J->dest.value == V &&
+                    J->dest.word == q0 + k && (J->dest.count ? J->dest.count : 1) == 1 && wdefs[base[V] + q0 + k] == 1) { copies[k] = J; ok = true; }
+            }
+        }
+        if (!ok) continue;
+        D->sw = vi_vreg(V, q0, nw);
+        for (unsigned k = 0; k < nw; k++) list_del(&copies[k]->link);
+        uses[x] = 0; defs[x] = 0;
+        progress = true;
+        break;   // (the list walk lost its next pointer if a later copy was removed)
+    }
+    free(base); free(uses); free(defs); free(wdefs); free(def);
+    return progress;
 }
 
 void vi_optimize(vi_shader *s)
@@ -290,6 +394,7 @@ void vi_optimize(vi_shader *s)
     simplify(s);
     vi_fuse_fma(s);
     vi_remat(s);
+    if (!vi_fold_disabled()) for (unsigned i = 0; i < 64 && coalesce_copies(s); i++) {}
 }
 
 // ---- Pressure scheduling ----------------------------------------------------------------------------------------------
