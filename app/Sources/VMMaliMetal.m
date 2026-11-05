@@ -2,8 +2,10 @@
 // reads it at start (without overriding its own environment): backboardd after a restart, apps when they open.
 #import "VMApp.h"
 
+NSNotificationName const VMFlagsDidChangeNotification = @"VMFlagsDidChangeNotification";
+
 @implementation VMMaliMetalViewController {
-    NSArray<NSDictionary *> *_groups;           // catalog: {group, items: [{key, type, title, desc, ...}]}
+    NSArray<NSDictionary *> *_groups;           // catalog: {group, subpage?, items: [{key, type, title, desc, invert?, ...}]}
     NSSet<NSString *> *_known;
     NSMutableArray<NSString *> *_lines;         // file as read (comments and unknown lines are kept)
     NSMutableDictionary<NSString *, NSString *> *_values;   // active KEY=VALUE
@@ -70,6 +72,18 @@ enum { SecState, SecFirstGroup };
     _extraKeys = extra;
     self.navigationItem.rightBarButtonItem.enabled = _dirty;
     [self.tableView reloadData];
+    [NSNotificationCenter.defaultCenter postNotificationName:VMFlagsDidChangeNotification object:self];
+}
+
+- (BOOL)dirty { return _dirty; }
+- (NSString *)flagValue:(NSString *)key { return _values[key]; }
+
+- (void)setFlagValues:(NSDictionary<NSString *, id> *)values {
+    [values enumerateKeysAndObjectsUsingBlock:^(NSString *k, id v, BOOL *stop) {
+        if ([v isKindOfClass:NSString.class] && [v length]) self->_values[k] = v; else [self->_values removeObjectForKey:k];
+    }];
+    _dirty = YES;
+    [self refreshState];
 }
 
 - (void)setValue:(NSString *)value forFlag:(NSString *)key {
@@ -93,10 +107,10 @@ enum { SecState, SecFirstGroup };
     return [[out componentsJoinedByString:@"\n"] stringByAppendingString:@"\n"];
 }
 
-- (void)writeText:(NSString *)text then:(void (^)(BOOL ok))then {
+- (void)writeText:(NSString *)text from:(UIViewController *)vc then:(void (^)(BOOL ok))then {
     VMRunHelper(@[@"env-write"], text, ^(int status, NSString *output) {
         if (status != 0) {
-            VMAlert(self, @"vmg.env non salvato", output);
+            VMAlert(vc, @"vmg.env non salvato", output);
             then(NO);
             return;
         }
@@ -105,7 +119,9 @@ enum { SecState, SecFirstGroup };
     });
 }
 
-- (void)save {
+- (void)save { [self presentSaveFrom:self item:self.navigationItem.rightBarButtonItem]; }
+
+- (void)presentSaveFrom:(UIViewController *)vc item:(UIBarButtonItem *)item {
     UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Salvare vmg.env?"
         message:@"I flag valgono per i processi che caricano il driver da adesso. Il compositore (backboardd) li legge "
                 @"solo quando riparte: lo schermo resta nero per circa 30 secondi."
@@ -113,19 +129,21 @@ enum { SecState, SecFirstGroup };
     NSString *text = [self serialize];
     [a addAction:[UIAlertAction actionWithTitle:@"Salva e riavvia backboardd" style:UIAlertActionStyleDestructive
                                         handler:^(UIAlertAction *x) {
-        [self writeText:text then:^(BOOL ok) { if (ok) [self restartBackboardd]; }];
+        [self writeText:text from:vc then:^(BOOL ok) { if (ok) [self restartBackboarddFrom:vc]; }];
     }]];
     [a addAction:[UIAlertAction actionWithTitle:@"Salva soltanto" style:UIAlertActionStyleDefault handler:^(UIAlertAction *x) {
-        [self writeText:text then:^(BOOL ok) { if (ok) VMToast(self, @"vmg.env salvato"); }];
+        [self writeText:text from:vc then:^(BOOL ok) { if (ok) VMToast(vc, @"vmg.env salvato"); }];
     }]];
     [a addAction:[UIAlertAction actionWithTitle:@"Annulla" style:UIAlertActionStyleCancel handler:nil]];
-    a.popoverPresentationController.barButtonItem = self.navigationItem.rightBarButtonItem;
-    [self presentViewController:a animated:YES completion:nil];
+    a.popoverPresentationController.barButtonItem = item;
+    [vc presentViewController:a animated:YES completion:nil];
 }
 
-- (void)restartBackboardd {
+- (void)restartBackboardd { [self restartBackboarddFrom:self]; }
+
+- (void)restartBackboarddFrom:(UIViewController *)vc {
     VMRunHelper(@[@"restart", @"backboardd"], nil, ^(int status, NSString *output) {
-        if (status != 0) VMAlert(self, @"backboardd non riavviato", output);
+        if (status != 0) VMAlert(vc, @"backboardd non riavviato", output);
     });
 }
 
@@ -138,6 +156,7 @@ enum { SecState, SecFirstGroup };
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s {
     if (s == SecState) return 4;
     if ([self isExtraSection:s]) return (NSInteger)_extraKeys.count + 1;
+    if (_groups[s - SecFirstGroup][@"subpage"]) return 1;   // one row that opens the group's own screen
     return (NSInteger)[_groups[s - SecFirstGroup][@"items"] count];
 }
 
@@ -200,8 +219,40 @@ enum { SecState, SecFirstGroup };
         c.detailTextLabel.font = VMMono(13);
         return c;
     }
-    NSDictionary *item = _groups[ip.section - SecFirstGroup][@"items"][ip.row];
+    NSDictionary *group = _groups[ip.section - SecFirstGroup];
+    if (group[@"subpage"]) {
+        UITableViewCell *c = [self cellWithStyle:UITableViewCellStyleSubtitle];
+        c.textLabel.text = group[@"group"];
+        c.detailTextLabel.text = [self subpageSummary:group];
+        c.detailTextLabel.textColor = UIColor.secondaryLabelColor;
+        c.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        return c;
+    }
+    return [self cellForFlag:group[@"items"][ip.row] enabled:YES];
+}
+
+// The ISA compiler group: on/off and how many features are excluded.
+- (NSString *)subpageSummary:(NSDictionary *)group {
+    NSUInteger off = 0, set = 0;
+    for (NSDictionary *i in group[@"items"]) {
+        if (!_values[i[@"key"]]) continue;
+        set++;
+        if ([i[@"invert"] boolValue]) off++;
+    }
+    if (![group[@"subpage"] isEqualToString:@"isa"]) return [NSString stringWithFormat:@"%lu impostati", (unsigned long)set];
+    NSString *on = _values[@"VMG_ISA"];
+    if (!on.length || [on isEqualToString:@"0"]) return @"Spento: tutti gli shader passano da AIR → NIR → Panfrost";
+    NSMutableString *t = [NSMutableString stringWithString:@"Acceso"];
+    if (_values[@"VMG_ISA_ONLY"]) [t appendFormat:@" · solo %@", _values[@"VMG_ISA_ONLY"]];
+    if (off) [t appendFormat:@" · %lu funzionalità sul percorso NIR", (unsigned long)off];
+    if (_values[@"VMG_ISA_STRICT"]) [t appendString:@" · rigoroso"];
+    return t;
+}
+
+// A catalog row. "invert": the switch shows the feature, on = variable absent (VMG_ISA_NO_<ID> not set).
+- (UITableViewCell *)cellForFlag:(NSDictionary *)item enabled:(BOOL)enabled {
     NSString *key = item[@"key"], *type = item[@"type"], *value = _values[key];
+    BOOL invert = [item[@"invert"] boolValue];
     UITableViewCell *c = [self cellWithStyle:UITableViewCellStyleSubtitle];
     c.textLabel.text = item[@"title"];
     NSMutableAttributedString *d = [[NSMutableAttributedString alloc] initWithString:key
@@ -214,13 +265,19 @@ enum { SecState, SecFirstGroup };
     c.detailTextLabel.attributedText = d;
     if ([type isEqualToString:@"presence"]) {
         VMSwitch *sw = [VMSwitch new];
-        sw.on = value != nil;
+        sw.on = invert ? value == nil : value != nil;
+        sw.enabled = enabled;
         __weak typeof(self) ws = self;
-        sw.onChange = ^(BOOL on) { [ws setValue:on ? @"1" : nil forFlag:key]; };
+        sw.onChange = ^(BOOL on) { [ws setValue:(on != invert) ? @"1" : nil forFlag:key]; };
         c.accessoryView = sw;
         c.selectionStyle = UITableViewCellSelectionStyleNone;
     } else {
         c.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        if (!enabled) c.selectionStyle = UITableViewCellSelectionStyleNone;
+    }
+    if (!enabled) {
+        c.textLabel.textColor = UIColor.tertiaryLabelColor;
+        c.contentView.alpha = 0.5;
     }
     return c;
 }
@@ -234,7 +291,7 @@ enum { SecState, SecFirstGroup };
                 save:^(NSString *text) {
                     typeof(self) s = ws;
                     if (!s) return;
-                    [s writeText:text then:^(BOOL ok) { if (ok) VMToast(s, @"vmg.env salvato"); }];
+                    [s writeText:text from:s then:^(BOOL ok) { if (ok) VMToast(s, @"vmg.env salvato"); }];
                 }];
             [self.navigationController pushViewController:t animated:YES];
         } else if (ip.row == 2) {
@@ -262,7 +319,15 @@ enum { SecState, SecFirstGroup };
                    ^(NSString *v) { if (v) [self setValue:v forFlag:k]; });
         return;
     }
-    NSDictionary *item = _groups[ip.section - SecFirstGroup][@"items"][ip.row];
+    NSDictionary *group = _groups[ip.section - SecFirstGroup];
+    if (group[@"subpage"]) {
+        [self.navigationController pushViewController:[[VMIsaViewController alloc] initWithGroup:group flags:self] animated:YES];
+        return;
+    }
+    [self editFlag:group[@"items"][ip.row] from:self source:[tv cellForRowAtIndexPath:ip]];
+}
+
+- (void)editFlag:(NSDictionary *)item from:(UIViewController *)vc source:(UIView *)source {
     NSString *key = item[@"key"], *type = item[@"type"];
     if ([type isEqualToString:@"presence"]) return;
     if ([type isEqualToString:@"choice"]) {
@@ -276,13 +341,12 @@ enum { SecState, SecFirstGroup };
         [a addAction:[UIAlertAction actionWithTitle:@"Non impostato" style:UIAlertActionStyleDestructive
                                             handler:^(UIAlertAction *x) { [self setValue:nil forFlag:key]; }]];
         [a addAction:[UIAlertAction actionWithTitle:@"Annulla" style:UIAlertActionStyleCancel handler:nil]];
-        UITableViewCell *cell = [tv cellForRowAtIndexPath:ip];
-        a.popoverPresentationController.sourceView = cell;
-        a.popoverPresentationController.sourceRect = cell.bounds;
-        [self presentViewController:a animated:YES completion:nil];
+        a.popoverPresentationController.sourceView = source;
+        a.popoverPresentationController.sourceRect = source.bounds;
+        [vc presentViewController:a animated:YES completion:nil];
         return;
     }
-    VMEditText(self, item[@"title"], [NSString stringWithFormat:@"%@\n\nVuoto = non impostato.", item[@"desc"]], _values[key],
+    VMEditText(vc, item[@"title"], [NSString stringWithFormat:@"%@\n\nVuoto = non impostato.", item[@"desc"] ?: @""], _values[key],
                item[@"placeholder"], [type isEqualToString:@"int"] ? UIKeyboardTypeNumberPad : UIKeyboardTypeASCIICapable,
                ^(NSString *v) { if (v) [self setValue:v forFlag:key]; });
 }
@@ -290,7 +354,7 @@ enum { SecState, SecFirstGroup };
 - (UISwipeActionsConfiguration *)tableView:(UITableView *)tv trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)ip {
     NSString *key = nil;
     if ([self isExtraSection:ip.section] && ip.row < (NSInteger)_extraKeys.count) key = _extraKeys[ip.row];
-    else if (ip.section >= SecFirstGroup && ![self isExtraSection:ip.section]) {
+    else if (ip.section >= SecFirstGroup && ![self isExtraSection:ip.section] && !_groups[ip.section - SecFirstGroup][@"subpage"]) {
         NSDictionary *item = _groups[ip.section - SecFirstGroup][@"items"][ip.row];
         if (_values[item[@"key"]]) key = item[@"key"];
     }

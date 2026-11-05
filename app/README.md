@@ -4,7 +4,7 @@ App per iOS 16 sul telefono (viva): gestisce il driver Metal, i boot-arg, Spring
 
 | Sezione | Cosa fa | Come |
 |---|---|---|
-| **MaliMetal** | flag del driver (`VMG_*`, `VGPU_*`, …) con descrizioni, modifica a mano, riavvio di backboardd | `VivaMTLDriver.bundle/vmg.env` scritto dall'helper (la prima volta tiene `vmg.env.orig`) |
+| **MaliMetal** | flag del driver (`VMG_*`, `VGPU_*`, …) con descrizioni, modifica a mano, riavvio di backboardd; sottopagina **Compilatore ISA** (solo su Mali-G57: avviso, controllo della GPU, interruttore rapido, `VMG_ISA_NO_<ID>` per funzionalità, **Test ISA** con pannello ISA/NIR/CPU, casi di `../driver/tests/isa_cases.m`) | `VivaMTLDriver.bundle/vmg.env` scritto dall'helper (la prima volta tiene `vmg.env.orig`) |
 | **Boot Args** | riga del prossimo avvio: catalogo per gruppi, argomenti liberi, modifica a mano, riavvio | `kern.viva_nextbootargs` (richiesta KA2); senza, `/private/var/root/viva-next-bootargs` |
 | **SpringBoard** | 259 chiavi di 51 classi di default di SpringBoard (iOS 16.7), valori salvati, chiavi nuove, riavvio di SpringBoard | `CFPreferences` come utente mobile |
 | **Stat** | CPU (per core, processi), RAM (composizione, paginazione, processi), GPU (frequenza, DVFS, job, errori, memoria, display, controlli), MaliMetal (per processo: command buffer, draw, latenze, tempo GPU, chiamate al kernel, cache) | Mach, `vmhelper procs`, `kern.viva_link` (richiesta KA1), pagine `/private/var/tmp/vmg-stats/<pid>` del driver |

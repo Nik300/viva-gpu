@@ -306,6 +306,21 @@ static uint64_t VMNow(void) { return clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
             @"drawable_blocks": @(s.drawable_blocks), @"pipelines": @(s.pipelines), @"fallback_pipelines": @(s.fallback_pipelines),
             @"compute_rejected": @(s.compute_rejected), @"allocated_bytes": @(s.allocated_bytes),
             @"air_cache_hits": @(s.air_cache_hits), @"air_cache_misses": @(s.air_cache_misses), @"jobs": @(s.jobs)};
+        NSString *isaLast = nil;
+        uint32_t gpuProduct = 0;
+#ifdef VMG_SHM_STATS_HAS_ISA
+        // ISA compiler counters (VMG_ISA): pages from version 2 on.
+        if (s.version >= 2) {
+            NSMutableDictionary *t = [totals mutableCopy];
+            t[@"isa_functions"] = @(s.isa_functions);
+            t[@"isa_fallbacks"] = @(s.isa_fallbacks);
+            t[@"isa_compile_us"] = @(s.isa_compile_us);
+            totals = t;
+            s.isa_last_fallback[sizeof s.isa_last_fallback - 1] = 0;
+            if (s.isa_last_fallback[0]) isaLast = @(s.isa_last_fallback);
+            gpuProduct = s.gpu_product_id;
+        }
+#endif
         NSMutableDictionary *calls = [NSMutableDictionary dictionary];
         for (unsigned i = 0; i < kCallCount && i < VMG_SHM_STATS_CALLS; i++) calls[kCallNames[i]] = @(s.calls[i]);
         NSDictionary *prev = _prevPages[@(s.pid)];
@@ -338,6 +353,8 @@ static uint64_t VMNow(void) { return clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
         p.ageSeconds = realNow > s.updated_ns ? (realNow - s.updated_ns) / 1e9 : 0;
         p.totals = totals;
         p.rates = rates;
+        p.isaLastFallback = isaLast;
+        p.gpuProductId = gpuProduct;
         NSMutableArray *cl = [NSMutableArray array];
         for (unsigned i = 0; i < kCallCount; i++) {
             NSString *n = kCallNames[i];

@@ -393,6 +393,21 @@ static UIColor *LoadColor(double f) {
 
 // ---- MaliMetal driver ----------------------------------------------------------------------------------------------------
 
+// ISA counters of one process (driver pages from version 2, vmg_shm_stats.h).
+static NSArray *IsaRows(VMDriverProc *p) {
+    NSDictionary *t = p.totals;
+    if (!t[@"isa_functions"]) return @[Row(@"Contatori ISA", @"driver senza contatori")];
+    double fn = [t[@"isa_functions"] doubleValue], fb = [t[@"isa_fallbacks"] doubleValue], us = [t[@"isa_compile_us"] doubleValue];
+    NSMutableArray *rows = [NSMutableArray arrayWithArray:@[
+        Row(@"Funzioni compilate in ISA", Num(fn)),
+        Row(@"Ripieghi su NIR", Num(fb)),
+        Row(@"Quota ISA", fn + fb > 0 ? Pct(fn / (fn + fb)) : @"—"),
+        Row(@"Tempo di compilazione ISA", fn > 0 ? [NSString stringWithFormat:@"%.1f ms (%.2f ms/funzione)", us / 1e3, us / 1e3 / fn]
+                                                 : [NSString stringWithFormat:@"%.1f ms", us / 1e3])]];
+    if (p.isaLastFallback.length) [rows addObject:@{@"t": @"Ultimo ripiego", @"s": p.isaLastFallback, @"mono": @NO}];
+    return rows;
+}
+
 @interface VMDriverProcTable : VMLiveTable
 @property (nonatomic) int pid;
 @end
@@ -454,6 +469,9 @@ static UIColor *LoadColor(double f) {
             Row(@"Compute senza percorso", Num([t[@"compute_rejected"] doubleValue])),
             Row(@"Cache traduzioni (hit/miss)", [NSString stringWithFormat:@"%@ / %@ (%.0f%%)", Num(hits), Num(miss),
                                                   hits + miss > 0 ? 100 * hits / (hits + miss) : 0])]},
+        @{@"title": @"Compilatore ISA (AIR → Valhall)", @"rows": IsaRows(p),
+          @"footer": @"Funzioni compilate direttamente in ISA Mali e ripieghi sul percorso AIR → NIR → Panfrost, con il motivo "
+                     @"(prima operazione non supportata o funzionalità spenta). MaliMetal › Compilatore ISA."},
         @{@"title": @"Memoria e kernel", @"rows": @[
             Row(@"Risorse Metal allocate", VMBytes([t[@"allocated_bytes"] doubleValue])),
             both(@"Job GPU inviati", @"jobs")]},
@@ -478,8 +496,14 @@ static UIColor *LoadColor(double f) {
 }
 - (NSArray *)buildSections {
     VMStats *s = VMStats.shared;
-    double cb = 0, draws = 0, passes = 0, jobs = 0, mem = 0, calls = 0, lat = 0;
+    double cb = 0, draws = 0, passes = 0, jobs = 0, mem = 0, calls = 0, lat = 0, isaFn = 0, isaFb = 0;
+    BOOL anyIsa = NO;
     for (VMDriverProc *p in s.driverProcs) {
+        if (p.totals[@"isa_functions"]) {
+            anyIsa = YES;
+            isaFn += [p.totals[@"isa_functions"] doubleValue];
+            isaFb += [p.totals[@"isa_fallbacks"] doubleValue];
+        }
         cb += [p.rates[@"command_buffers"] doubleValue];
         draws += [p.rates[@"draws"] doubleValue];
         passes += [p.rates[@"passes"] doubleValue];
@@ -510,6 +534,7 @@ static UIColor *LoadColor(double f) {
             Row(@"Job GPU", Rate(jobs)), Row(@"Chiamate al kernel", Rate(calls)),
             Row(@"Latenza media", cb > 0 ? [NSString stringWithFormat:@"%.2f ms", lat / cb / 1e6] : nil),
             Row(@"Risorse Metal allocate", VMBytes(mem)),
+            Row(@"Funzioni ISA / ripieghi NIR", anyIsa ? [NSString stringWithFormat:@"%@ / %@", Num(isaFn), Num(isaFb)] : nil),
             Row(@"Build del driver", s.driverProcs.firstObject.build.length > 12 ? [s.driverProcs.firstObject.build substringToIndex:12] : s.driverProcs.firstObject.build)]},
         @{@"title": @"Processi", @"footer": @"Ogni processo aggiorna i suoi contatori al massimo una volta al secondo mentre disegna "
               @"(/private/var/tmp/vmg-stats). Richiede il driver con le statistiche per Viva Manager.",

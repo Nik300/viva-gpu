@@ -62,8 +62,24 @@ UIFont *VMMono(CGFloat size);
 
 // ---- Screens ---------------------------------------------------------------------------------------------------------
 
+// vmg.env editor. The model (catalog values, unsaved changes) is shared with subpages such as the ISA compiler's.
+extern NSNotificationName const VMFlagsDidChangeNotification;   // values edited, loaded or saved
 @interface VMMaliMetalViewController : UITableViewController
+@property (nonatomic, readonly) BOOL dirty;
+- (nullable NSString *)flagValue:(NSString *)key;
+- (void)setFlagValues:(NSDictionary<NSString *, id> *)values;     // one change for many keys; NSNull / @"" removes
+- (void)presentSaveFrom:(UIViewController *)vc item:(nullable UIBarButtonItem *)item;   // "Salvare vmg.env?"
+- (UITableViewCell *)cellForFlag:(NSDictionary *)item enabled:(BOOL)enabled;           // a catalog row
+- (void)editFlag:(NSDictionary *)item from:(UIViewController *)vc source:(UIView *)source;
 @end
+
+// ---- ISA compiler (VMIsa.m): settings subpage of MaliMetal, test cases (driver/tests/isa_cases.m) and their panel --------
+
+@interface VMIsaViewController : UITableViewController
+- (instancetype)initWithGroup:(NSDictionary *)group flags:(VMMaliMetalViewController *)flags;
+@end
+// The ISA path generates Mali-G57 (Valhall v9) code only: YES when the GPU in use is that one. *name: what was found.
+BOOL VMIsaCompatible(NSString *_Nullable *_Nullable name);
 @interface VMBootArgsViewController : UITableViewController
 @end
 @interface VMSpringBoardViewController : UITableViewController
@@ -89,6 +105,8 @@ extern NSNotificationName const VMStatsDidUpdateNotification;
 @property (nonatomic, copy) NSDictionary<NSString *, NSNumber *> *totals;   // counters (vmg_shm_stats fields)
 @property (nonatomic, copy) NSDictionary<NSString *, NSNumber *> *rates;    // per second, since the previous sample
 @property (nonatomic, copy) NSArray<NSDictionary *> *calls;                 // {name, total, rate}
+@property (nonatomic, copy, nullable) NSString *isaLastFallback;            // "function: reason" (driver with ISA stats)
+@property (nonatomic) uint32_t gpuProductId;                                // 0: not published
 @end
 
 @interface VMStats : NSObject

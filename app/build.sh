@@ -6,7 +6,7 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 OUT="$HERE/out"
-SRC=("$HERE"/Sources/*.m)
+SRC=("$HERE"/Sources/*.m "$HERE/../driver/tests/isa_cases.m")   # ISA test cases, shared with the isatest CLI
 CFLAGS=(-fobjc-arc -O2 -g -Wall -Wextra -Wno-unused-parameter -I"$HERE/../driver")
 
 if [ "${1:-}" = check ]; then
@@ -27,7 +27,7 @@ T=(-target arm64-apple-ios16.0 -isysroot "$SDK")
 APP="$OUT/VivaManager.app"
 rm -rf "$APP"
 mkdir -p "$APP"
-"$CC" "${T[@]}" "${CFLAGS[@]}" "${SRC[@]}" -framework UIKit -framework Foundation -framework CoreGraphics -o "$APP/VivaManager"
+"$CC" "${T[@]}" "${CFLAGS[@]}" "${SRC[@]}" -framework UIKit -framework Foundation -framework CoreGraphics -framework Metal -o "$APP/VivaManager"
 "$CC" "${T[@]}" -O2 -Wall -Wextra "$HERE/helper/vmhelper.c" -o "$APP/vmhelper"
 cp "$HERE/Info.plist" "$APP/Info.plist"
 plutil -convert binary1 "$APP/Info.plist"
