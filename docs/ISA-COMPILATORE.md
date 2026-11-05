@@ -84,6 +84,45 @@ mancante di atan; cmpxchg che restituisce il valore vecchio; voti e ballot per q
 li legge (`VMG_ISA_CHECK=1` li cerca); sampler constexpr emessi da iOS 16 come semplice i64 (anche NIR); texture su buffer
 come vista sul buffer (anche NIR); gather_compare e voti per quad anche sul percorso NIR.
 
+## Prestazioni (2026-11-05 sera): codice alla pari con Mesa sugli shader di CoreAnimation
+
+Sintomo: con `VMG_ISA=1` le animazioni erano più lente che col percorso NIR. Misura sul telefono (swipe della home,
+6 andate e ritorno, `disp lat`/`gpu status`): GPU occupata al 96%, un frame ogni **36,5 ms (27 fps)**, job medio 1486 µs,
+contro 26,8 ms e 1004 µs del percorso NIR. Il codice ISA degli shader reali di CA era 2,5-3 volte più lungo di quello di
+Mesa: ~40% delle istruzioni erano spostamenti di metà registro a 16 bit (U16_TO_U32, MKVEC, F16_TO_F32 +
+V2F32_TO_V2F16), salti su condizioni costanti (function constant), campionamenti in f32 riconvertiti in f16, MOV per
+costruire i vettori di staging. La GPU è limitata dal calcolo (job 1015 µs a 920-950 MHz, 1530 µs a 588 MHz), quindi la
+lunghezza del codice si traduce direttamente in tempo.
+
+| Modifica | File | Toggle (comportamento vecchio) |
+|---|---|---|
+| Constant folding sull'IR macchina (MKVEC, logica/shift, IADD/ISUB, conversioni 16/32 bit, FADD/FMUL/FMIN/FMAX f32 e v2f16) | `vi_fold.c` | `VMG_ISA_NO_FOLD=1` (spegne tutto il blocco) |
+| Lane a 16 bit: le letture tramite U16_TO_U32/MKVEC leggono la metà originale; V2F32_TO_V2F16(F16_TO_F32 a, F16_TO_F32 b) = MKVEC; MKVEC(x.h0, x.h1) = x; sorgenti v2f16 costruite da MKVEC = parola originale con swizzle | `vi_fold.c` | idem |
+| Salti su costanti → salti incondizionati / rimossi, blocchi irraggiungibili svuotati, phi rimasti con una definizione per parola → valori ordinari | `vi_fold.c`, `vi_opt.c` | idem |
+| Modificatori abs/neg propagati nelle sorgenti float (fabs/fneg spariscono) | `vi_fold.c` | idem |
+| MOV su se stessi rimossi dopo l'allocazione | `vi_fold.c` | idem |
+| DCE per parola dei registri multi-parola | `vi_opt.c` | idem |
+| Copie verso vettori di staging rinominate (il valore nasce già nella parola finale) | `vi_opt.c` | `VMG_ISA_NO_COALESCE=1` |
+| RA: intervalli per parola + suggerimenti di copia per i vettori (la parola prende il registro della sorgente che muore lì) | `vi_ra.c` | `VMG_ISA_NO_VHINT=1` |
+| Campionamenti `.v4f16` con larghezza registro 16 (2 registri, niente conversioni) | `vi_sel_tex.c` | `VMG_ISA_NO_TEX16=1` |
+| clamp/dot/mix su half in v2f16 nativo | `vi_sel_alu.c` | `VMG_ISA_NO_HALF_NATIVE=1` |
+| sqrt = rcp(rsqrt) come Mesa; fwidth senza la correzione di segno delle derivate | `vi_sel_alu.c`, `vi_sel_sg.c` | `VMG_ISA_NO_FOLD=1` |
+
+Risultati:
+- Corpus reale (134 input catturati sul telefono con `VMG_DUMP_AIR`, ricompilati sul Mac): istruzioni ISA/Mesa
+  **1,55 → 1,19**; blur e downsample sotto Mesa (0,82-0,96), `fixed_frag_lph_cph` (66 varianti) 1,18.
+- Telefono, swipe della home: **36,5 → 27,2 ms per frame (27 → 37 fps)**, job medio 1486 → 1015 µs: alla pari col
+  percorso NIR (26,8 ms). Stessi 6 KO noti di `isatest` (identici sul NIR), schermate di home, Impostazioni e App Library
+  (blur) corrette.
+
+Strumenti nuovi: `VMG_DUMP_AIR=DIR` salva ogni input di shader (bitcode AIR specializzato, funzioni collegate, varying,
+formati colore) come `DIR/<hash>.vair`; `airnir FILE.vair...` li ricompila sul Mac (con `VMG_TRACE_ISA=1` disassemblato e
+statistiche, con `VMG_ISA=0 VMG_PRECOMPILE=1 BIFROST_MESA_DEBUG=shaderdb,internal` le statistiche di Mesa per confronto).
+
+Restano sopra Mesa: costanti messe in registri (IADD_IMM) dove Mesa le impacchetta in FAU insieme alle uniform,
+`p3_clamp_lph` (2,2×, non sul percorso delle animazioni), compute di VideoToolbox (`VTMTSComputeFunction`, spill a 64
+registri: è il ripiego GPU delle conversioni IOSurface senza scaler hardware).
+
 Viva Manager, MaliMetal > Compilatore ISA > **Selezione automatica**: accende l'ISA e le funzionalità secondo
 `isa-verified.json` (ok / parity = fallisce uguale sul NIR / regression = spenta); nessun test eseguito sul dispositivo.
 Rigenerare il file dopo un giro di test: `driver/tests/gen_isa_verified.py`.
