@@ -191,6 +191,7 @@ static void air_cache_key(vmg_device *dev, const char *kind, const vmg_air_input
     blob_write_uint8(&b, getenv("VMG_SSBO_BASE") != NULL);
     blob_write_uint8(&b, getenv("VMG_LLVM_LEGACY_PM") != NULL);
     blob_write_uint8(&b, getenv("VMG_NO_PUSH") != NULL);
+    blob_write_uint8(&b, getenv("VMG_ISA_NO_FOLD") != NULL);
     blob_write_uint64(&b, in->bitcode_size);
     blob_write_bytes(&b, in->bitcode, in->bitcode_size);
     blob_write_uint32(&b, in->linked_count);
@@ -1180,8 +1181,96 @@ static void shader_finish_common(vmg_device *dev, vmg_shader *sh, struct util_dy
     for (unsigned i = 0; i < sh->refl.constexpr_samplers; i++) sh->constexpr_samplers[i] = vmg_sampler_create_constexpr(dev, sh->refl.constexpr_words[i]);
 }
 
+// VMG_DUMP_AIR=DIR: every shader input (AIR bitcode, linked functions, varyings, colour formats) is saved as
+// DIR/<hash>.vair, so the exact variants a process compiles on the phone can be compiled again on the Mac
+// (`airnir FILE.vair...`, compiler statistics and A/B of compiler changes).
+#define VMG_VAIR_MAGIC 0x52494156u   // "VAIR"
+
+static void vair_write(struct blob *b, const vmg_air_input *in)
+{
+    blob_write_uint32(b, VMG_VAIR_MAGIC);
+    blob_write_uint8(b, in->half32);
+    blob_write_uint64(b, in->bitcode_size);
+    blob_write_bytes(b, in->bitcode, in->bitcode_size);
+    blob_write_uint32(b, in->linked_count);
+    for (unsigned i = 0; i < in->linked_count; i++) {
+        blob_write_string(b, in->linked_names[i] ? in->linked_names[i] : "");
+        blob_write_uint64(b, in->linked_size[i]);
+        blob_write_bytes(b, in->linked[i], in->linked_size[i]);
+    }
+    blob_write_uint32(b, in->varying_count);
+    for (unsigned i = 0; i < in->varying_count; i++) blob_write_string(b, in->varyings[i]);
+    blob_write_uint8(b, in->color_formats != NULL);
+    if (in->color_formats) blob_write_bytes(b, in->color_formats, VMG_MAX_COLOR * sizeof(uint32_t));
+}
+
+static void vair_dump(const vmg_air_input *in)
+{
+    const char *dir = getenv("VMG_DUMP_AIR");
+    if (!dir || !*dir) return;
+    struct blob b;
+    blob_init(&b);
+    vair_write(&b, in);
+    if (!b.out_of_memory) {
+        uint8_t h[BLAKE3_OUT_LEN];
+        struct mesa_blake3 ctx;
+        _mesa_blake3_init(&ctx);
+        _mesa_blake3_update(&ctx, b.data, b.size);
+        _mesa_blake3_final(&ctx, h);
+        char path[PATH_MAX];
+        int n = snprintf(path, sizeof path, "%s/", dir);
+        for (unsigned i = 0; i < 12 && n < (int)sizeof path - 3; i++) n += snprintf(path + n, sizeof path - n, "%02x", h[i]);
+        snprintf(path + n, sizeof path - n, ".vair");
+        mkdir(dir, 0777);
+        int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0644);
+        if (fd >= 0) { (void)!write(fd, b.data, b.size); close(fd); }
+    }
+    blob_finish(&b);
+}
+
+vmg_air_input *vmg_air_input_load(const char *path)
+{
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return NULL;
+    struct stat st;
+    if (fstat(fd, &st) || st.st_size <= 0) { close(fd); return NULL; }
+    uint8_t *data = malloc(st.st_size);
+    bool ok = data && read(fd, data, st.st_size) == st.st_size;
+    close(fd);
+    if (!ok) { free(data); return NULL; }
+    struct blob_reader r;
+    blob_reader_init(&r, data, st.st_size);
+    vmg_air_input *in = calloc(1, sizeof *in);
+    if (blob_read_uint32(&r) != VMG_VAIR_MAGIC) { free(in); free(data); return NULL; }
+    in->half32 = blob_read_uint8(&r);
+    in->bitcode_size = blob_read_uint64(&r);
+    in->bitcode = blob_read_bytes(&r, in->bitcode_size);
+    in->linked_count = blob_read_uint32(&r);
+    if (in->linked_count && in->linked_count < 4096) {
+        const void **l = calloc(in->linked_count, sizeof *l);
+        size_t *ls = calloc(in->linked_count, sizeof *ls);
+        const char **ln = calloc(in->linked_count, sizeof *ln);
+        for (unsigned i = 0; i < in->linked_count; i++) {
+            ln[i] = blob_read_string(&r);
+            ls[i] = blob_read_uint64(&r);
+            l[i] = blob_read_bytes(&r, ls[i]);
+        }
+        in->linked = l; in->linked_size = ls; in->linked_names = ln;
+    }
+    in->varying_count = blob_read_uint32(&r);
+    if (in->varying_count < 4096) {
+        const char **v = calloc(in->varying_count + 1, sizeof *v);
+        for (unsigned i = 0; i < in->varying_count; i++) v[i] = blob_read_string(&r);
+        in->varyings = v;
+    }
+    if (blob_read_uint8(&r)) in->color_formats = blob_read_bytes(&r, VMG_MAX_COLOR * sizeof(uint32_t));
+    if (r.overrun) { free(in); free(data); return NULL; }
+    return in;   // (owns `data` for the process lifetime: test tools only)
+}
+
 vmg_shader *vmg_shader_create(vmg_device *dev, const vmg_air_input *in, vmg_reflection *refl, char **error)
 {
+    vair_dump(in);
     (void)nir_stage_of;
     if (dev->panfrost) {
         vmg_isa_options iopt;

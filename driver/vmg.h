@@ -147,6 +147,8 @@ typedef struct {
 
 // AIR -> NIR -> driver shader. NULL with *error set when the function cannot be translated.
 vmg_shader *vmg_shader_create(vmg_device *dev, const vmg_air_input *in, vmg_reflection *refl, char **error);
+// A shader input saved with VMG_DUMP_AIR=DIR (test tools; never freed).
+vmg_air_input *vmg_air_input_load(const char *path);
 void vmg_shader_release(vmg_device *dev, vmg_shader *sh);
 // Varying keys a vertex function writes (to build the pipeline's slot table). Free with free(); NULL on error.
 char **vmg_air_vertex_outputs(const void *bitcode, size_t size, unsigned *count, char **error);

@@ -153,5 +153,10 @@ void vi_print(vi_shader *s, FILE *fp);
 void vi_print_instr(const vi_instr *I, FILE *fp);
 bool vi_validate(vi_shader *s);
 
+// Constant folding, 16-bit lane peepholes, branches on constants (vi_fold.c; VMG_ISA_NO_FOLD=1 turns them off).
+bool vi_fold(vi_shader *s);
+bool vi_fold_branches(vi_shader *s);
+void vi_drop_self_moves(vi_shader *s);               // after RA
+
 // Liveness of vregs (vi_ra.c), also used by the flow pass for helper analysis.
 void vi_liveness(vi_shader *s);

@@ -1,6 +1,7 @@
 // airnir: translates every function of a .metal / .metallib with vmg_air (AIR -> NIR) and compiles it with a Gallium
 // driver: llvmpipe (default) or Panfrost's Valhall compiler for the Mali-G57 (VMG_DRIVER=panfrost, on the vgpu mock).
 // Usage: airnir file.metal|file.metallib [-v] [function]     (-v prints the NIR)
+//        airnir FILE.vair...                                  (inputs saved with VMG_DUMP_AIR=DIR)
 // The AIR comes from the system Metal compiler (MTLCreateSystemDefaultDevice). Function constants are specialized to
 // zero (AIR_CONST=<hex bytes> to use other bytes), as in metal-shim's airtrans.
 #import <Foundation/Foundation.h>
@@ -16,6 +17,25 @@ int main(int argc, char **argv) { @autoreleasepool {
     vmg_device *dev = vmg_device_create(NULL, err, sizeof err);
     if (!dev) { fprintf(stderr, "vmg: %s\n", err); return 1; }
     printf("driver: %s\n", vmg_device_get_info(dev)->name);
+    // airnir FILE.vair...: shader inputs saved on a device with VMG_DUMP_AIR=DIR, compiled again here
+    if ([@(argv[1]).pathExtension isEqualToString:@"vair"]) {
+        int ok = 0, total = 0;
+        for (int i = 1; i < argc; i++) {
+            if (argv[i][0] == '-') continue;
+            total++;
+            vmg_air_input *in = vmg_air_input_load(argv[i]);
+            if (!in) { printf("  FAIL  %s: unreadable\n", argv[i]); continue; }
+            vmg_reflection refl;
+            char *error = NULL;
+            vmg_shader *sh = vmg_shader_create(dev, in, &refl, &error);
+            if (!sh) { printf("  FAIL  %s: %s\n", argv[i], error ? error : "?"); free(error); continue; }
+            vmg_shader_release(dev, sh);
+            ok++;
+        }
+        printf("%d/%d compiled\n", ok, total);
+        vmg_device_destroy(dev);
+        return ok == total ? 0 : 1;
+    }
     id<MTLDevice> d = MTLCreateSystemDefaultDevice();
     NSString *path = @(argv[1]);
     NSError *e = nil;

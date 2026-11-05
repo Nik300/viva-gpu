@@ -223,40 +223,73 @@ void vi_merge_blocks(vi_shader *s);
 void vi_fuse_fma(vi_shader *s);
 void vi_remat(vi_shader *s);
 
-void vi_optimize(vi_shader *s)
+// Phi registers left with one definition per word, all in one block (after if-conversion, or once branch folding
+// removed the other paths), are ordinary values.
+static void demote_phis(vi_shader *s)
 {
-    vi_if_convert(s);
-    vi_merge_blocks(s);
-    drop_fallthrough_jumps(s);
-    fix_fallthrough(s);
-    // sizes after if-conversion (it creates registers)
+    unsigned n = vi_num_vregs(s), words = 0;
+    unsigned *base = malloc((n + 1) * sizeof *base);
+    for (unsigned v = 0; v < n; v++) { base[v] = words; words += vi_vreg_get(s, v)->nwords; }
+    unsigned *wdefs = calloc(words ? words : 1, sizeof *wdefs);
+    vi_block **dblk = calloc(n ? n : 1, sizeof *dblk);
+    bool *mixed = calloc(n ? n : 1, sizeof *mixed);
+    vi_foreach_block(s, blk) vi_foreach_instr(blk, I) {
+        vi_ref *w[2] = { &I->dest, &I->sw };
+        for (unsigned k = 0; k < 2; k++) {
+            if (w[k]->kind != VI_VREG) continue;
+            uint32_t v = w[k]->value;
+            unsigned cnt = w[k]->count ? w[k]->count : 1;
+            for (unsigned q = 0; q < cnt && w[k]->word + q < vi_vreg_get(s, v)->nwords; q++) wdefs[base[v] + w[k]->word + q]++;
+            if (dblk[v] && dblk[v] != blk) mixed[v] = true;
+            dblk[v] = blk;
+        }
+    }
+    for (unsigned v = 0; v < n; v++) {
+        vi_vreg_info *info = vi_vreg_get(s, v);
+        if (!info->multi_def || mixed[v]) continue;
+        bool one = true;
+        for (unsigned q = 0; q < info->nwords && one; q++) one = wdefs[base[v] + q] == 1;
+        // (several words: only with folding on; before it, only one-word registers were demoted)
+        if (one && (info->nwords == 1 || !getenv("VMG_ISA_NO_FOLD"))) info->multi_def = false;
+    }
+    free(base); free(wdefs); free(dblk); free(mixed);
+}
+
+// Copy propagation, folding and dead code elimination until nothing changes.
+static void simplify(vi_shader *s)
+{
     unsigned n = vi_num_vregs(s), words = 0;
     for (unsigned v = 0; v < n; v++) words += vi_vreg_get(s, v)->nwords;
-    // phi registers left with one definition (after if-conversion) are ordinary values
-    {
-        unsigned *defs = calloc(n ? n : 1, sizeof *defs);
-        vi_foreach_block(s, blk) vi_foreach_instr(blk, I) {
-            if (I->dest.kind == VI_VREG) defs[I->dest.value]++;
-            if (I->sw.kind == VI_VREG) defs[I->sw.value]++;
-        }
-        for (unsigned v = 0; v < n; v++) {
-            vi_vreg_info *vi2 = vi_vreg_get(s, v);
-            if (vi2->multi_def && defs[v] == 1 && vi2->nwords == 1) vi2->multi_def = false;
-        }
-        free(defs);
-    }
     vinfo *vi = malloc((n ? n : 1) * sizeof *vi);
     winfo wi = { malloc((n ? n : 1) * sizeof(unsigned)), malloc((words ? words : 1) * sizeof(unsigned)), malloc((words ? words : 1) * sizeof(vi_instr *)) };
-    for (unsigned iter = 0; iter < 16; iter++) {
+    for (unsigned iter = 0; iter < 32; iter++) {
         count(s, vi, &wi);
         bool p = copy_prop(s, vi, &wi);
+        p |= vi_fold(s);
         count(s, vi, &wi);
         p |= dce(s, vi);
         if (!p) break;
     }
+    free(vi); free(wi.base); free(wi.wdefs); free(wi.wdef);
+}
+
+void vi_optimize(vi_shader *s)
+{
+    // constants first, so that branches on function-constant conditions fold before if-conversion sees them
+    simplify(s);
+    if (vi_fold_branches(s)) {
+        vi_merge_blocks(s);
+        demote_phis(s);
+        simplify(s);
+    }
+    vi_if_convert(s);
+    vi_merge_blocks(s);
+    drop_fallthrough_jumps(s);
+    fix_fallthrough(s);
+    demote_phis(s);
+    simplify(s);
     vi_fuse_fma(s);
     vi_remat(s);
-    free(vi); free(wi.base); free(wi.wdefs); free(wi.wdef);
 }
 
 // ---- Pressure scheduling ----------------------------------------------------------------------------------------------

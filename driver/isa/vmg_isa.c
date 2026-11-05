@@ -281,6 +281,7 @@ static bool compile_one(const vmg_air_input *in, const vmg_isa_options *opt, LLV
             }
         }
         vi_shader_free(alt);
+        if (ra) vi_drop_self_moves(t->s);
         if (!ra) { ok = false; t->error = t->s->error ? strdup(t->s->error) : strdup("register allocation"); }
         else if (t->s->spills && getenv("VMG_ISA_NO_SPILL")) { ok = false; t->error = strdup("spills (VMG_ISA_NO_SPILL)"); }
     }
