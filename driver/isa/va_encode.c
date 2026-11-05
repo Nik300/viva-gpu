@@ -42,7 +42,8 @@ int va_encode(enum va_op op, const va_vals *x, uint64_t *out, char *err, size_t 
             snprintf(err, errsz, "%s: field %s = %lld not aligned to %u", oi->name, va_field_name[f->field], (long long)val, f->align);
             return -1;
         }
-        if (f->align) val /= f->align;
+        // align(n) is a constraint on the value, not a scale: Mesa packs 64-bit destinations as the plain register
+        // index (va_pack_dest), and halving it wrote IMUL.u64 and other pair results to the wrong registers.
         if (f->shift) {
             if (val & ((1ll << f->shift) - 1)) {
                 snprintf(err, errsz, "%s: field %s = %lld not a multiple of %u", oi->name, va_field_name[f->field], (long long)val, 1u << f->shift);
@@ -90,7 +91,6 @@ int64_t va_field_get(enum va_op op, uint64_t w, enum va_field field, bool *found
         int64_t val = (int64_t)((w >> f->pos) & mask);
         if (f->kind == VA_K_INT && (val >> (f->width - 1)) & 1) val -= (1ll << f->width);
         val <<= f->shift;
-        if (f->align) val *= f->align;
         if (found) *found = true;
         return val;
     }
