@@ -40,7 +40,7 @@ static bool is_ptr_arg(LLVMValueRef inst, unsigned i)
 
 static void use_texture(S *t, int index)
 {
-    // D9: several textures in one shader (each its own message; Valhall's TEX_DUAL pairing is not used)
+    // D9: several textures in one shader (each its own message, as Mesa does on Valhall: TEX_DUAL is unused there)
     if ((t->refl->textures_used & ~(1u << index)) && !(t->refl->textures_used & (1u << index))) sel_use(t, VMG_ISA_D9);
     t->refl->textures_used |= 1u << index;
     if ((unsigned)index + 1 > t->info.texture_count) t->info.texture_count = (unsigned)index + 1;

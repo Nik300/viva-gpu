@@ -123,6 +123,7 @@ typedef struct vi_shader {
 // ---- Construction ---------------------------------------------------------------------------------------------------
 vi_shader *vi_shader_create(int stage);
 void vi_shader_free(vi_shader *s);
+vi_shader *vi_shader_clone(const vi_shader *s);
 vi_block *vi_block_create(vi_shader *s);           // appended at the end of the layout
 void vi_block_add_succ(vi_block *from, vi_block *to);
 uint32_t vi_new_vreg(vi_shader *s, unsigned nwords);
@@ -149,6 +150,7 @@ void vi_insert_flow(vi_shader *s, bool fragment);    // slots, waits, reconverge
 void vi_mark_last(vi_shader *s);                     // last-use bits
 bool vi_pack(vi_shader *s, struct util_dynarray *binary);   // false + s->error on encoding errors
 void vi_print(vi_shader *s, FILE *fp);
+void vi_print_instr(const vi_instr *I, FILE *fp);
 bool vi_validate(vi_shader *s);
 
 // Liveness of vregs (vi_ra.c), also used by the flow pass for helper analysis.

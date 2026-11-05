@@ -22,6 +22,44 @@ void vi_shader_free(vi_shader *s)
     ralloc_free(s->mem);
 }
 
+// Deep copy (blocks, instructions, registers, results so far): the compiler tries a variant and keeps the better one.
+vi_shader *vi_shader_clone(const vi_shader *s)
+{
+    vi_shader *c = vi_shader_create(s->stage);
+    void *mem = c->mem;
+    *c = *s;
+    c->mem = mem;
+    c->error = NULL;
+    list_inithead(&c->blocks);
+    util_dynarray_init(&c->vregs, mem);
+    util_dynarray_append_array(&c->vregs, vi_vreg_info, s->vregs.data, util_dynarray_num_elements(&s->vregs, vi_vreg_info));
+    unsigned maxi = 0;
+    list_for_each_entry(vi_block, b, &s->blocks, link) if (b->index + 1 > maxi) maxi = b->index + 1;
+    vi_block **map = rzalloc_array(mem, vi_block *, maxi ? maxi : 1);
+    list_for_each_entry(vi_block, b, &s->blocks, link) {
+        vi_block *nb = rzalloc(mem, vi_block);
+        *nb = *b;
+        list_inithead(&nb->instrs);
+        util_dynarray_init(&nb->preds, mem);
+        nb->live_in = nb->live_out = NULL;
+        map[b->index] = nb;
+        list_addtail(&nb->link, &c->blocks);
+    }
+    list_for_each_entry(vi_block, b, &s->blocks, link) {
+        vi_block *nb = map[b->index];
+        for (unsigned k = 0; k < 2; k++) nb->succ[k] = b->succ[k] ? map[b->succ[k]->index] : NULL;
+        util_dynarray_foreach(&b->preds, vi_block *, p) util_dynarray_append(&nb->preds, map[(*p)->index]);
+        list_for_each_entry(vi_instr, I, &b->instrs, link) {
+            vi_instr *nI = rzalloc(mem, vi_instr);
+            *nI = *I;
+            nI->target = I->target ? map[I->target->index] : NULL;
+            list_addtail(&nI->link, &nb->instrs);
+        }
+    }
+    c->live_base = NULL; c->live_words = 0;
+    return c;
+}
+
 vi_block *vi_block_create(vi_shader *s)
 {
     vi_block *b = rzalloc(s->mem, vi_block);
@@ -72,15 +110,10 @@ static void print_ref(FILE *fp, vi_ref r)
     if (r.last) fprintf(fp, "^");
 }
 
-void vi_print(vi_shader *s, FILE *fp)
+void vi_print_instr(const vi_instr *I, FILE *fp)
 {
-    vi_foreach_block(s, blk) {
-        fprintf(fp, "block%u", blk->index);
-        if (blk->succ[0] || blk->succ[1]) fprintf(fp, " -> %d %d", blk->succ[0] ? (int)blk->succ[0]->index : -1, blk->succ[1] ? (int)blk->succ[1]->index : -1);
-        fprintf(fp, ":\n");
-        vi_foreach_instr(blk, I) {
             const struct va_op_info *oi = &va_op_info[I->op];
-            fprintf(fp, "    %s%s%s", oi->name, oi->variant ? "." : "", oi->variant ? oi->variant : "");
+            fprintf(fp, "%s%s%s", oi->name, oi->variant ? "." : "", oi->variant ? oi->variant : "");
             if (I->flow) fprintf(fp, ".flow%u", I->flow);
             if (I->slot >= 0) fprintf(fp, ".slot%d", I->slot);
             fprintf(fp, " ");
@@ -91,6 +124,17 @@ void vi_print(vi_shader *s, FILE *fp)
             for (unsigned f = 0; f < VAF_COUNT; f++) if (I->f.set[f]) fprintf(fp, "%s=%lld ", va_field_name[f], (long long)I->f.v[f]);
             if (I->target) fprintf(fp, "-> block%u", I->target->index);
             fprintf(fp, "\n");
+}
+
+void vi_print(vi_shader *s, FILE *fp)
+{
+    vi_foreach_block(s, blk) {
+        fprintf(fp, "block%u", blk->index);
+        if (blk->succ[0] || blk->succ[1]) fprintf(fp, " -> %d %d", blk->succ[0] ? (int)blk->succ[0]->index : -1, blk->succ[1] ? (int)blk->succ[1]->index : -1);
+        fprintf(fp, ":\n");
+        vi_foreach_instr(blk, I) {
+            fprintf(fp, "    ");
+            vi_print_instr(I, fp);
         }
     }
 }

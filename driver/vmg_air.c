@@ -60,6 +60,15 @@ TS_LLVM_FUNCS(TS_LLVM_DEFINE)
 TS_LLVM_OPTIONAL_FUNCS(TS_LLVM_DEFINE)
 #undef TS_LLVM_DEFINE
 
+static bool hidden(const char *list, const char *name)
+{
+    if (!list) return false;
+    size_t n = strlen(name);
+    for (const char *p = list; (p = strstr(p, name)); p += n)
+        if ((p == list || p[-1] == ',') && (p[n] == ',' || !p[n])) return true;
+    return false;
+}
+
 static int g_llvm_loaded;
 static const char *g_llvm_failure;
 static void llvm_load_once(void)
@@ -76,7 +85,10 @@ static void llvm_load_once(void)
     if (!(ts_##name = (ret (*) args)dlsym(h, #name))) { g_llvm_failure = "libLLVM lacks " #name; return; }
     TS_LLVM_FUNCS(TS_LLVM_RESOLVE)
 #undef TS_LLVM_RESOLVE
-#define TS_LLVM_RESOLVE_OPT(ret, name, args) ts_##name = (ret (*) args)dlsym(h, #name);
+    // VMG_LLVM_HIDE=name,...: optional functions treated as missing (on the Mac: behave like iOS 16's older libLLVM)
+    const char *hide = getenv("VMG_LLVM_HIDE");
+#define TS_LLVM_RESOLVE_OPT(ret, name, args) \
+    ts_##name = hidden(hide, #name) ? NULL : (ret (*) args)dlsym(h, #name);
     TS_LLVM_OPTIONAL_FUNCS(TS_LLVM_RESOLVE_OPT)
 #undef TS_LLVM_RESOLVE_OPT
     g_llvm_loaded = 1;

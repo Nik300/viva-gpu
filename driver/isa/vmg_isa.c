@@ -29,6 +29,7 @@ struct panfrost_sysvals {
 void vi_optimize(vi_shader *s);
 void vi_schedule_pressure(vi_shader *s);
 void vi_split_vectors(vi_shader *s);
+void vi_sink(vi_shader *s);
 void sel_vs_layout(S *t, LLVMValueRef outputs_md);
 bool sel_function(S *t, LLVMValueRef outputs_md, LLVMValueRef inputs_md, vi_block **exit_out);
 
@@ -229,10 +230,27 @@ static bool compile_one(const vmg_air_input *in, const vmg_isa_options *opt, LLV
         vi_optimize(t->s);
         if (trace) { fprintf(stderr, "vmg-isa: %s (stage %d, idvs %d) selected:\n", fname ? fname : "?", stage, idvs); vi_print(t->s, stderr); }
         vi_lower_constants(t->s);
+        // Sinking usually lowers register pressure, but a few blurs spill with it: those are compiled again without it
+        // and the better of the two is kept.
+        vi_shader *alt = getenv("VMG_ISA_NO_SINK") ? NULL : vi_shader_clone(t->s);
+        if (alt) vi_sink(t->s);
         vi_split_vectors(t->s);
         vi_schedule_pressure(t->s);
         t->s->tls_size = (t->scratch + 15) & ~15u;
-        if (!vi_register_allocate(t->s)) { ok = false; t->error = t->s->error ? strdup(t->s->error) : strdup("register allocation"); }
+        bool ra = vi_register_allocate(t->s);
+        if (alt && (!ra || t->s->spills)) {
+            vi_split_vectors(alt);
+            vi_schedule_pressure(alt);
+            alt->tls_size = (t->scratch + 15) & ~15u;
+            if (vi_register_allocate(alt) && (!ra || alt->spills < t->s->spills || (alt->spills == t->s->spills && alt->work_regs < t->s->work_regs))) {
+                vi_shader_free(t->s);
+                t->s = alt; t->b.s = alt;
+                alt = NULL;
+                ra = true;
+            }
+        }
+        vi_shader_free(alt);
+        if (!ra) { ok = false; t->error = t->s->error ? strdup(t->s->error) : strdup("register allocation"); }
     }
     if (ok) {
         vi_insert_flow(t->s, stage == MESA_SHADER_FRAGMENT);

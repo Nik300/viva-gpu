@@ -506,6 +506,7 @@ void vmg_buffer_cpu_access(vmg_resource *r)
 void vmg_resource_release(vmg_device *dev, vmg_resource *r)
 {
     if (!r) return;
+    vmg_unbind_object(dev, r);
     if (r->transfer) dev->pipe->buffer_unmap(dev->pipe, r->transfer);
     pipe_resource_reference(&r->res, NULL);
     for (struct vmg_buffer_copy *c = r->copies, *n; c; c = n) {
@@ -797,6 +798,7 @@ vmg_texture *vmg_texture_create_view(vmg_device *dev, vmg_texture *parent, unsig
 void vmg_texture_release(vmg_device *dev, vmg_texture *t)
 {
     if (!t) return;
+    vmg_unbind_object(dev, t);
     vmg_texture_forget(dev, t);
     if (t->view) {
         if (dev->pipe->sampler_view_release) dev->pipe->sampler_view_release(dev->pipe, t->view);
@@ -917,6 +919,7 @@ vmg_sampler *vmg_sampler_create_constexpr(vmg_device *dev, uint64_t w)
 void vmg_sampler_release(vmg_device *dev, vmg_sampler *s)
 {
     if (!s) return;
+    vmg_unbind_object(dev, s);
     dev->pipe->delete_sampler_state(dev->pipe, s->cso);
     free(s);
 }

@@ -182,6 +182,19 @@ void vmg_texture_forget(vmg_device *dev, vmg_texture *t)
         if (dev->copy_out[i] == t) { copy_out_one(dev, i); return; }
 }
 
+void vmg_unbind_object(vmg_device *dev, const void *obj)
+{
+    // Metal keeps no binding across encoders, but these slots survive here: a later draw that does not rebind the slot
+    // (the shader does not read it, or reads a default) must not dereference a freed object.
+    for (unsigned st = 0; st < VMG_STAGES; st++) {
+        struct vmg_stage_bindings *b = &dev->stage[st];
+        for (unsigned i = 0; i < VMG_MAX_BUFFERS; i++)
+            if (b->res[i] == obj) { b->res[i] = NULL; memset(&b->buffers[i], 0, sizeof b->buffers[i]); }
+        for (unsigned i = 0; i < VMG_MAX_TEXTURES; i++) if (b->textures[i] == obj) b->textures[i] = NULL;
+        for (unsigned i = 0; i < VMG_MAX_SAMPLERS; i++) if (b->samplers[i] == obj) b->samplers[i] = NULL;
+    }
+}
+
 // Before a copy-in of t: false when a pending copy-out holds newer contents of the same resource; pending copy-outs
 // of the same surface from other resources are made first.
 static bool copy_in_allowed(vmg_device *dev, vmg_texture *t)

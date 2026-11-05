@@ -867,17 +867,30 @@ sv *sel_insert_element(S *t, LLVMValueRef inst)
     return sv_from_comps32(t, v->bits, v->ncomp, r);
 }
 
+// Element i of a shufflevector mask (-1 undefined). iOS 16's libLLVM (~LLVM 11) may lack LLVMGetMaskValue: the mask is
+// then the third operand, a constant vector.
+static int mask_value(LLVMValueRef inst, unsigned i)
+{
+    if (ts_LLVMGetMaskValue) return ts_LLVMGetMaskValue(inst, i);
+    LLVMValueRef mask = ts_LLVMGetNumOperands(inst) > 2 ? ts_LLVMGetOperand(inst, 2) : NULL;
+    if (!mask || ts_LLVMIsUndef(mask)) return -1;
+    if (ts_LLVMIsAConstantAggregateZero(mask)) return 0;
+    LLVMValueRef e = ts_LLVMIsAConstantDataSequential(mask) ? ts_LLVMGetElementAsConstant(mask, i) : ts_LLVMGetOperand(mask, i);
+    return !e || ts_LLVMIsUndef(e) || !ts_LLVMIsAConstantInt(e) ? -1 : (int)ts_LLVMConstIntGetZExtValue(e);
+}
+
 sv *sel_shuffle(S *t, LLVMValueRef inst)
 {
     USE(t, E4);
     sv *a = sel_ssa(t, ts_LLVMGetOperand(inst, 0)), *b = sel_ssa(t, ts_LLVMGetOperand(inst, 1));
     if (!a || !b) return NULL;
-    unsigned n = ts_LLVMGetNumMaskElements(inst), na = a->ncomp;
+    unsigned n = ts_LLVMGetNumMaskElements ? ts_LLVMGetNumMaskElements(inst) : ts_LLVMGetVectorSize(ts_LLVMTypeOf(inst)), na = a->ncomp;
+    if (!ts_LLVMGetMaskValue && !(ts_LLVMGetNumOperands(inst) > 2)) SFAIL(t, "shuffle mask not readable");
     if (n > 16) SFAIL(t, "shuffle of %u elements", n);
     if (a->bits == 64) {
         vi_ref w[32];
         for (unsigned c = 0; c < n; c++) {
-            int m = ts_LLVMGetMaskValue(inst, c);
+            int m = mask_value(inst, c);
             sv *src = m < (int)na ? a : b;
             unsigned k = m < 0 ? 0 : (unsigned)(m < (int)na ? m : m - (int)na);
             w[2 * c] = m < 0 ? vi_imm(0) : sv_word(t, src, 2 * k);
@@ -888,7 +901,7 @@ sv *sel_shuffle(S *t, LLVMValueRef inst)
     // Whole-word moves when the elements stay word aligned (32-bit, or 16-bit pairs kept together).
     vi_ref r[16];
     for (unsigned c = 0; c < n; c++) {
-        int m = ts_LLVMGetMaskValue(inst, c);
+        int m = mask_value(inst, c);
         if (m < 0) { r[c] = vi_imm(0); continue; }
         r[c] = m < (int)na ? comp_raw(t, a, (unsigned)m) : comp_raw(t, b, (unsigned)m - na);
     }

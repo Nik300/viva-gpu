@@ -178,6 +178,7 @@ static void drop_fallthrough_jumps(vi_shader *s)
 void vi_if_convert(vi_shader *s);
 void vi_merge_blocks(vi_shader *s);
 void vi_fuse_fma(vi_shader *s);
+void vi_remat(vi_shader *s);
 
 void vi_optimize(vi_shader *s)
 {
@@ -210,6 +211,7 @@ void vi_optimize(vi_shader *s)
         if (!p) break;
     }
     vi_fuse_fma(s);
+    vi_remat(s);
     free(vi); free(wi.base); free(wi.wdefs); free(wi.wdef);
 }
 
@@ -309,6 +311,115 @@ static bool control_equivalent(domtree *d, vi_block *a, vi_block *b)
 static bool in_loop(vi_block *b) { (void)b; return false; }
 
 void vi_schedule_blocks(vi_shader *s);
+
+// ---- Sinking ----------------------------------------------------------------------------------------------------------
+// Bottom-up from the end of each block, an instruction moves down to just before the first instruction that reads it,
+// when that does not lengthen the life of its operands (each is read again at or after the new place, or is the
+// single-use result of an instruction that will follow it down). Texture samples and loads move too, but not across
+// stores or other side effects. A blur that samples everything first and accumulates at the end becomes
+// sample-and-accumulate, one texture at a time; the list scheduler then only refines.
+static bool sink_barrier(const vi_instr *I)
+{
+    return side_effects(I) || I->blend || I->clobber || I->varying || (I->memory && side_effects(I)) ||
+           I->op == VA_CLPER || I->op == VA_WMASK || I->is_nop;
+}
+
+static bool sinkable(vi_shader *s, vi_instr *I)
+{
+    if (side_effects(I) || I->varying || I->blend || I->clobber || I->helpers || I->is_nop) return false;
+    if (I->op == VA_CLPER || I->op == VA_WMASK) return false;
+    bool any = false;
+    vi_ref *w[2] = { &I->dest, &I->sw };
+    for (unsigned k = 0; k < 2; k++) {
+        if (w[k]->kind == VI_REG) return false;
+        if (w[k]->kind == VI_VREG) {
+            vi_vreg_info *vi = vi_vreg_get(s, w[k]->value);
+            if (vi->multi_def || vi->fixed >= 0) return false;
+            any = true;
+        }
+    }
+    if (!any) return false;
+    vi_ref *r[5] = { &I->src[0], &I->src[1], &I->src[2], &I->src[3], &I->sr };
+    for (unsigned k = 0; k < 5; k++) {
+        if (r[k]->kind == VI_REG) return false;
+        if (r[k]->kind == VI_VREG && vi_vreg_get(s, r[k]->value)->multi_def) return false;
+    }
+    return true;
+}
+
+static bool reads_v(const vi_instr *J, uint32_t v)
+{
+    const vi_ref *r[5] = { &J->src[0], &J->src[1], &J->src[2], &J->src[3], &J->sr };
+    for (unsigned k = 0; k < 5; k++) if (r[k]->kind == VI_VREG && r[k]->value == v) return true;
+    return false;
+}
+
+void vi_sink(vi_shader *s)
+{
+    if (getenv("VMG_ISA_NO_SINK")) return;
+    vi_liveness(s);
+    unsigned n = vi_num_vregs(s);
+    unsigned *uses = calloc(n ? n : 1, sizeof *uses), *defs = calloc(n ? n : 1, sizeof *defs);
+    vi_instr **def = calloc(n ? n : 1, sizeof *def);
+    vi_foreach_block(s, blk) vi_foreach_instr(blk, I) {
+        vi_ref *r[5] = { &I->src[0], &I->src[1], &I->src[2], &I->src[3], &I->sr };
+        for (unsigned k = 0; k < 5; k++) if (r[k]->kind == VI_VREG) {
+            bool seen = false;   // readers, not reads: x * x is one use
+            for (unsigned k2 = 0; k2 < k; k2++) if (r[k2]->kind == VI_VREG && r[k2]->value == r[k]->value) seen = true;
+            if (!seen) uses[r[k]->value]++;
+        }
+        vi_ref *w[2] = { &I->dest, &I->sw };
+        for (unsigned k = 0; k < 2; k++) if (w[k]->kind == VI_VREG) { defs[w[k]->value]++; def[w[k]->value] = I; }
+    }
+    vi_foreach_block(s, blk) {
+        vi_instr *I = list_is_empty(&blk->instrs) ? NULL : list_last_entry(&blk->instrs, vi_instr, link);
+        while (I) {
+            vi_instr *prev = I->link.prev == &blk->instrs ? NULL : list_entry(I->link.prev, vi_instr, link);
+            if (!sinkable(s, I)) { I = prev; continue; }
+            // first reader in the block, with no barrier for a memory read on the way
+            vi_ref *w[2] = { &I->dest, &I->sw };
+            vi_instr *U = NULL;
+            bool blocked = false;
+            for (struct list_head *l = I->link.next; l != &blk->instrs && !U; l = l->next) {
+                vi_instr *J = list_entry(l, vi_instr, link);
+                for (unsigned k = 0; k < 2; k++) if (w[k]->kind == VI_VREG && reads_v(J, w[k]->value)) U = J;
+                if (!U && (J->target || (I->memory && sink_barrier(J)))) { blocked = true; break; }
+            }
+            if (blocked || !U || I->link.next == &U->link) { I = prev; continue; }
+            // operands must stay alive down there anyway
+            bool ok = true;
+            vi_ref *r[5] = { &I->src[0], &I->src[1], &I->src[2], &I->src[3], &I->sr };
+            for (unsigned k = 0; k < 5 && ok; k++) {
+                if (r[k]->kind != VI_VREG) continue;
+                uint32_t x = r[k]->value;
+                bool later = false;
+                for (unsigned q = 0; q < vi_vreg_get(s, x)->nwords && !later; q++)
+                    if (BITSET_TEST(blk->live_out, s->live_base[x] + q)) later = true;
+                for (struct list_head *l = &U->link; l != &blk->instrs && !later; l = l->next) {
+                    vi_instr *J = list_entry(l, vi_instr, link);
+                    if (J != I && reads_v(J, x)) later = true;
+                }
+                if (later) continue;
+                // read only here, and every definition (a vector may be built word by word) is an instruction of
+                // this block above I that can follow
+                bool follows = uses[x] == 1;
+                unsigned found = 0;
+                for (struct list_head *l = blk->instrs.next; l != &I->link && follows; l = l->next) {
+                    vi_instr *D = list_entry(l, vi_instr, link);
+                    if ((D->dest.kind == VI_VREG && D->dest.value == x) || (D->sw.kind == VI_VREG && D->sw.value == x)) {
+                        found++;
+                        if (!sinkable(s, D)) follows = false;
+                    }
+                }
+                if (!follows || found != defs[x]) ok = false;
+            }
+            if (getenv("VMG_ISA_DEBUG_SINK")) { fprintf(stderr, "sink %s %s: ", ok ? "MOVE" : "keep", va_op_info[I->op].name); vi_print_instr(I, stderr); }
+            if (ok) { list_del(&I->link); list_addtail(&I->link, &U->link); }
+            I = prev;
+        }
+    }
+    free(uses); free(defs); free(def);
+}
 
 void vi_schedule_pressure(vi_shader *s)
 {
@@ -583,6 +694,9 @@ static void schedule_block(vi_shader *s, vi_block *blk, BITSET_WORD *live_out_wo
     int reg_def[VI_NUM_REGS], reg_use[VI_NUM_REGS];
     for (unsigned r = 0; r < VI_NUM_REGS; r++) reg_def[r] = reg_use[r] = -1;
     int last_side = -1, last_vary = -1;
+    unsigned *loads = malloc(n * sizeof *loads), nloads = 0;
+    static int free_loads_off = -1;
+    if (free_loads_off < 0) free_loads_off = getenv("VMG_ISA_SCHED_ORDER_LOADS") != NULL;
     for (i = 0; i < n; i++) {
         vi_instr *I = nodes[i].I;
         vi_ref *r[5] = { &I->src[0], &I->src[1], &I->src[2], &I->src[3], &I->sr };
@@ -604,8 +718,19 @@ static void schedule_block(vi_shader *s, vi_block *blk, BITSET_WORD *live_out_wo
                 if (reg_use[g] >= 0 && (unsigned)reg_use[g] != i) sn_edge(nodes, (unsigned)reg_use[g], i);
             }
         }
+        // Reads of memory (textures, loads) keep their place relative to stores and other side effects, not to each
+        // other: a blur's samples can then move down next to the arithmetic that consumes them.
         bool side = side_effects(I) || I->memory || I->blend || I->is_nop || I->op == VA_CLPER || I->op == VA_WMASK || I->clobber;
-        if (side) { if (last_side >= 0) sn_edge(nodes, (unsigned)last_side, i); last_side = (int)i; }
+        bool load = side && I->memory && !side_effects(I) && !I->blend && !I->clobber && !free_loads_off;
+        if (load) {
+            if (last_side >= 0) sn_edge(nodes, (unsigned)last_side, i);
+            if (nloads < n) loads[nloads++] = i;
+        } else if (side) {
+            if (last_side >= 0) sn_edge(nodes, (unsigned)last_side, i);
+            for (unsigned q = 0; q < nloads; q++) sn_edge(nodes, loads[q], i);
+            nloads = 0;
+            last_side = (int)i;
+        }
         if (I->varying) { if (last_vary >= 0) sn_edge(nodes, (unsigned)last_vary, i); last_vary = (int)i; }
         // everything that clobbers registers (BLEND) stays ordered with all register accesses: conservative
         for (unsigned k = 0; k < 5; k++) {
@@ -617,6 +742,7 @@ static void schedule_block(vi_shader *s, vi_block *blk, BITSET_WORD *live_out_wo
             else if (w[k]->kind == VI_REG) for (unsigned q = 0; q < (w[k]->count ? w[k]->count : 1u); q++) reg_def[w[k]->value + q] = (int)i;
         }
     }
+    free(loads);
     // a branch stays last; side effects stay after values they could clobber (BLEND) — covered by the chains above,
     // plus: every instruction precedes a final branch
     vi_instr *lastI = nodes[n - 1].I;
@@ -755,8 +881,12 @@ void vi_fuse_fma(vi_shader *s)
         if (I->op != VA_FADD_F32 || I->f.set[VAF_clamp] || I->f.set[VAF_round] || I->f.set[VAF_widen0] || I->f.set[VAF_widen1]) continue;
         for (unsigned k = 0; k < 2; k++) {
             vi_ref m = I->src[k];
-            if (m.kind != VI_VREG || uses[m.value] != 1) continue;
+            if (m.kind != VI_VREG || !uses[m.value]) continue;
             vi_instr *M = def[m.value];
+            // A product of uniforms and constants (blur offsets: u * k) is fused into each of its FADDs: the FMUL goes
+            // when its last FADD takes it.
+            bool shared = uses[m.value] != 1;
+            if (shared && M && (vi_is_vreg(M->src[0]) || vi_is_vreg(M->src[1]))) continue;
             if (!M || M->op != VA_FMUL_F32 || M->f.set[VAF_clamp] || M->f.set[VAF_round] || M->f.set[VAF_widen0] || M->f.set[VAF_widen1] ||
                 M->f.set[VAF_abs0] || M->f.set[VAF_abs1]) continue;
             // the FMUL's operands must still hold the same values at the FADD: single-definition registers or uniforms
@@ -780,10 +910,93 @@ void vi_fuse_fma(vi_shader *s)
             if (nego) va_set(&f, VAF_neg2, 1);
             if (abso) va_set(&f, VAF_abs2, 1);
             I->f = f;
-            list_del(&M->link);
-            def[m.value] = NULL;
+            if (--uses[m.value] == 0) { list_del(&M->link); def[m.value] = NULL; }
             break;
         }
     }
     free(uses); free(def);
+}
+
+// ---- Rematerialization --------------------------------------------------------------------------------------------------
+// (VMG_ISA_REMAT=1) A one-word value computed by one ALU instruction whose operands stay alive anyway (uniforms, constants, registers
+// read again later) is computed again just before a use that comes after two or more messages, instead of being kept
+// in a register across them. Blurs compute their sample coordinates (base +- k * step) for the textures and again
+// for the weights after all samples: without this every coordinate lives across every texture result.
+void vi_remat(vi_shader *s)
+{
+    if (!getenv("VMG_ISA_REMAT")) return;   // opt-in: no measurable gain on QuartzCore yet, more code
+    vi_liveness(s);
+    unsigned n = vi_num_vregs(s);
+    unsigned *defs = calloc(n ? n : 1, sizeof *defs);
+    vi_foreach_block(s, blk) vi_foreach_instr(blk, I) {
+        if (I->dest.kind == VI_VREG) defs[I->dest.value]++;
+        if (I->sw.kind == VI_VREG) defs[I->sw.value]++;
+    }
+    int *last = malloc((n ? n : 1) * sizeof *last), *defpos = malloc((n ? n : 1) * sizeof *defpos);
+    bool *simple = malloc(n ? n : 1);
+    vi_foreach_block(s, blk) {
+        unsigned ni = 0;
+        vi_foreach_instr(blk, I) ni++;
+        if (ni < 4) continue;
+        vi_instr **ins = malloc(ni * sizeof *ins);
+        unsigned *msgs = malloc((ni + 1) * sizeof *msgs);
+        for (unsigned v = 0; v < n; v++) { last[v] = -1; defpos[v] = -1; simple[v] = true; }
+        unsigned i = 0;
+        msgs[0] = 0;
+        vi_foreach_instr(blk, I) {
+            ins[i] = I;
+            msgs[i + 1] = msgs[i] + (vi_is_msg(I) ? 1 : 0);
+            vi_ref *r[5] = { &I->src[0], &I->src[1], &I->src[2], &I->src[3], &I->sr };
+            for (unsigned k = 0; k < 5; k++) {
+                if (r[k]->kind != VI_VREG) continue;
+                last[r[k]->value] = (int)i;
+                if (k == 4 || (r[k]->count ? r[k]->count : 1) != 1) simple[r[k]->value] = false;
+            }
+            if (I->dest.kind == VI_VREG) defpos[I->dest.value] = (int)i;
+            if (I->sw.kind == VI_VREG) { defpos[I->sw.value] = (int)i; simple[I->sw.value] = false; }
+            i++;
+        }
+        for (unsigned d = 0; d < ni; d++) {
+            vi_instr *D = ins[d];
+            if (D->dest.kind != VI_VREG || D->sw.kind != VI_NONE || vi_is_msg(D) || D->clobber || D->helpers || !movable(s, D)) continue;
+            uint32_t v = D->dest.value;
+            vi_vreg_info *info = vi_vreg_get(s, v);
+            if (defs[v] != 1 || info->nwords != 1 || info->fixed >= 0 || !simple[v] || defpos[v] != (int)d) continue;
+            if (BITSET_TEST(blk->live_out, s->live_base[v])) continue;
+            if (last[v] < 0 || msgs[last[v]] - msgs[d + 1] < 2) continue;
+            uint32_t provider = v;
+            int prev = (int)d, last_v = -1;
+            for (unsigned p = d + 1; p < ni && (int)p <= last[v]; p++) {
+                vi_instr *U = ins[p];
+                bool reads = false;
+                for (unsigned k = 0; k < 4; k++) if (U->src[k].kind == VI_VREG && U->src[k].value == v) reads = true;
+                if (!reads) continue;
+                if (msgs[p] - msgs[prev + 1] >= 2) {
+                    bool ok = true;
+                    for (unsigned k = 0; k < 4 && ok; k++) {
+                        vi_ref x = D->src[k];
+                        if (x.kind != VI_VREG) continue;
+                        if (defs[x.value] != 1 || vi_vreg_get(s, x.value)->multi_def) ok = false;
+                        else if (last[x.value] < (int)p && !BITSET_TEST(blk->live_out, s->live_base[x.value] + x.word)) ok = false;
+                    }
+                    if (ok) {
+                        uint32_t nv = vi_new_vreg(s, 1);
+                        vi_builder b = { s, blk, U };
+                        vi_instr *C = vi_emit(&b, D->op);
+                        struct list_head link = C->link;
+                        *C = *D;
+                        C->link = link;
+                        C->dest = vi_vreg(nv, 0, 1);
+                        provider = nv;
+                    }
+                }
+                for (unsigned k = 0; k < 4; k++) if (U->src[k].kind == VI_VREG && U->src[k].value == v) U->src[k].value = provider;
+                if (provider == v) last_v = (int)p;
+                prev = (int)p;
+            }
+            last[v] = last_v;
+        }
+        free(ins); free(msgs);
+    }
+    free(defs); free(last); free(defpos); free(simple);
 }

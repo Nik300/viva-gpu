@@ -57,9 +57,21 @@ Soluzioni scelte per le lacune:
   l'indice della funzione collegata + 1; la chiamata indiretta diventa una scelta tra le funzioni collegate
   (inlined), che l'if-conversion trasforma spesso in codice lineare.
 
-Limiti noti: allocatore lineare (alcuni shader a 64 registri dove Mesa ne usa 25-32; il blur `asg_frag_lpf` ha
-1 spill); D9 senza fusione TEX_DUAL; nessuna misura di prestazioni.
+Limiti noti: allocatore lineare (alcuni shader a 64 registri dove Mesa ne usa 25-32; i blur `asg_frag_lpf` e
+`asg_50_frag_lph` hanno 1 e 2 spill: il list scheduler è goloso e non sposta insieme i più consumatori di uno stesso
+campione). Pass di pressione: sink (ogni istruzione, anche TEX/LOAD se non attraversa store, scende al primo uso
+senza allungare la vita degli operandi; se il risultato ha spill si ricompila senza e si tiene il migliore,
+`VMG_ISA_NO_SINK=1` lo spegne): 165 programmi di QuartzCore su 180 a 32 registri (prima 154). Rematerializzazione
+opt-in (`VMG_ISA_REMAT=1`, nessun guadagno misurato). `VMG_LLVM_HIDE=nome,...` simula sul Mac il libLLVM più vecchio
+di iOS 16 (funzioni opzionali assenti).
+
+Telefono (CI 42060938269, `isatest` caso per caso): NIR 69/89 ok; ISA 17 ok, 33 casi in crash per
+`LLVMGetNumMaskElements` assente nel libLLVM di iOS 16 (shufflevector: corretto, si legge la maschera dall'operando come
+fa il percorso NIR), gli altri da ripetere dopo la correzione. nessuna misura di prestazioni. D9: ogni
+texture è un messaggio TEX a sé, come fa Mesa su Valhall (la fusione `bi_opt_fuse_dual_texture` agisce solo sui
+TEXS_2D di Bifrost; `TEX_DUAL` è marcato `unused` nell'ISA.xml di Mesa e la codifica dei due handle nel src0 non è
+documentata), quindi nessuna perdita rispetto al percorso NIR.
 
 Bug del driver esistente trovati lungo la strada: texture buffer dimensionati in texel invece che in byte (overflow
-dell'heap a ogni copia: corretto in `texture_template`); puntatori di sampler non più validi rimasti legati tra un
-command buffer e l'altro (`bind_stage`, non corretto); `phase3`/`translate` crashano già a HEAD con llvmpipe sul Mac.
+dell'heap a ogni copia: corretto in `texture_template`); puntatori a sampler/texture/buffer liberati rimasti legati tra un
+command buffer e l'altro (corretto: `vmg_unbind_object` al rilascio); `phase3`/`translate` crashano già a HEAD con llvmpipe sul Mac.

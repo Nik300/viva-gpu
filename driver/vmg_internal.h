@@ -77,6 +77,8 @@ void vmg_texture_sync(vmg_device *dev, vmg_texture *t, bool to_texture);
 void vmg_texture_written(vmg_device *dev, vmg_texture *t);
 // A texture going away: its pending copy-out is made now.
 void vmg_texture_forget(vmg_device *dev, vmg_texture *t);
+// Drops every binding slot that still points at an object being freed (buffer, texture or sampler).
+void vmg_unbind_object(vmg_device *dev, const void *obj);
 
 struct vmg_sampler { void *cso; struct pipe_sampler_state state; };
 struct vmg_dsa { void *cso; };
