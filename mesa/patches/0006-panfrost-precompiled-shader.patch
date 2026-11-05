@@ -1,0 +1,166 @@
+Viva: precompiled shaders (AIR -> Valhall ISA compiler in the driver): hooks that own shell NIR shaders and supply binary + pan_shader_info + varying layout.
+diff --git a/src/gallium/drivers/panfrost/pan_shader.c b/src/gallium/drivers/panfrost/pan_shader.c
+index 920be21..7e51ba5 100644
+--- a/src/gallium/drivers/panfrost/pan_shader.c
++++ b/src/gallium/drivers/panfrost/pan_shader.c
+@@ -18,9 +18,13 @@
+ #include "pan_compiler.h"
+ #include "pan_nir.h"
+ #include "pan_trace.h"
++#include "pan_isa_hooks.h"
+ #include "compiler/bifrost/bifrost_compile.h"
+ #include "shader_enums.h"
+ 
++/* Viva: precompiled shaders (pan_isa_hooks.h) */
++const struct pan_isa_hooks *pan_isa_hooks;
++
+ static struct panfrost_uncompiled_shader *
+ panfrost_alloc_shader(const nir_shader *nir)
+ {
+@@ -102,7 +106,38 @@ panfrost_shader_compile(struct panfrost_screen *screen, const nir_shader *ir,
+ 
+    struct panfrost_device *dev = pan_device(&screen->base);
+ 
+-   nir_shader *s = nir_shader_clone(NULL, ir);
++   nir_shader *s = NULL;
++   if (pan_isa_owns(ir)) {
++      /* Viva: compiled to Valhall machine code by the embedding driver; a NIR
++       * shader comes back when the precompiled path cannot do this variant. */
++      struct pan_isa_key ikey = {
++         .stage = ir->info.stage,
++         .gpu_id = panfrost_device_gpu_id(dev),
++         .varying_layout = varying_layout,
++         .req_local_mem = req_local_mem,
++      };
++      if (ir->info.stage == MESA_SHADER_VERTEX) {
++         ikey.vs_noperspective_varyings = key->vs.noperspective_varyings;
++      } else if (ir->info.stage == MESA_SHADER_FRAGMENT) {
++         ikey.fs_nr_cbufs_for_fragcolor = key->fs.nr_cbufs_for_fragcolor;
++         ikey.fs_sprite_coord_enable = key->fs.sprite_coord_enable;
++         ikey.fs_clip_plane_enable = key->fs.clip_plane_enable;
++         ikey.fs_line_smooth = key->fs.line_smooth;
++      }
++      out->binary = UTIL_DYNARRAY_INIT;
++      memset(&out->info, 0, sizeof(out->info));
++      memset(&out->sysvals, 0, sizeof(out->sysvals));
++      s = pan_isa_hooks->compile(ir, &ikey, &out->binary, &out->info,
++                                 &out->sysvals);
++      if (!s) {
++         assert(req_local_mem >= out->info.wls_size);
++         out->info.wls_size = MAX2(req_local_mem, out->info.wls_size);
++         return;
++      }
++      util_dynarray_fini(&out->binary);
++   } else {
++      s = nir_shader_clone(NULL, ir);
++   }
+ 
+    /* While graphics shaders are preprocessed at CSO create time, compute
+     * kernels are not preprocessed until they're cloned since the driver does
+@@ -255,8 +290,9 @@ panfrost_shader_get(struct pipe_screen *pscreen,
+    /* Try to retrieve the variant from the disk cache. If that fails,
+     * compile a new variant and store in the disk cache for later reuse.
+     */
+-   if (!panfrost_disk_cache_retrieve(screen->disk_cache, uncompiled,
+-                                     &state->key, &res)) {
++   bool isa = pan_isa_owns(uncompiled->nir);
++   if (isa || !panfrost_disk_cache_retrieve(screen->disk_cache, uncompiled,
++                                            &state->key, &res)) {
+ 
+       /* Only use the varying_layout for FS if the key agrees */
+       bool use_layout = uncompiled->nir->info.stage != MESA_SHADER_FRAGMENT ||
+@@ -266,8 +302,9 @@ panfrost_shader_get(struct pipe_screen *pscreen,
+       panfrost_shader_compile(screen, uncompiled->nir, dbg, varying_layout,
+                               &state->key, req_local_mem, &res);
+ 
+-      panfrost_disk_cache_store(screen->disk_cache, uncompiled, &state->key,
+-                                &res);
++      if (!isa)
++         panfrost_disk_cache_store(screen->disk_cache, uncompiled, &state->key,
++                                   &res);
+    }
+ 
+    state->info = res.info;
+@@ -516,6 +553,20 @@ panfrost_create_shader_state(struct pipe_context *pctx,
+    so->stream_output = cso->stream_output;
+    so->nir = nir;
+ 
++   if (pan_isa_owns(nir)) {
++      /* Viva: precompiled shader, the NIR is a shell without code */
++      struct panfrost_device *idev = pan_device(pctx->screen);
++      pan_isa_hooks->create_layout(nir, panfrost_device_gpu_id(idev),
++                                   &so->vs_varying_layout,
++                                   &so->noperspective_varyings);
++      if (nir->info.stage == MESA_SHADER_FRAGMENT && !nir->info.separate_shader)
++         return so;
++      struct panfrost_context *ictx = pan_context(pctx);
++      struct panfrost_shader_key ikey = panfrost_default_shader_key(so);
++      panfrost_new_variant_locked(ictx, so, &ikey);
++      return so;
++   }
++
+    /* PLS lowering is not taken care of by glsl_to_nir(), so do it here. */
+    if (nir->info.stage == MESA_SHADER_FRAGMENT &&
+        nir->info.fs.accesses_pixel_local_storage) {
+diff --git a/src/panfrost/compiler/pan_isa_hooks.h b/src/panfrost/compiler/pan_isa_hooks.h
+new file mode 100644
+index 0000000..6430511
+--- /dev/null
++++ b/src/panfrost/compiler/pan_isa_hooks.h
+@@ -0,0 +1,56 @@
++/*
++ * Viva: precompiled shaders. An embedding driver that compiles its shaders to
++ * Valhall machine code itself (Viva's AIR -> ISA compiler) hands Gallium a
++ * "shell" nir_shader (stage and I/O info, no code) and these hooks supply the
++ * binary, the shader info and the vertex varying layout instead of the NIR
++ * compiler. A shader the hooks do not own is compiled by Mesa as usual.
++ * SPDX-License-Identifier: MIT
++ */
++#ifndef PAN_ISA_HOOKS_H
++#define PAN_ISA_HOOKS_H
++
++#include "util/u_dynarray.h"
++#include "pan_compiler.h"
++
++struct panfrost_sysvals;
++
++struct pan_isa_key {
++   mesa_shader_stage stage;
++   uint64_t gpu_id;
++   /* Vertex varying layout (vertex shaders: the one built by create_layout;
++    * fragment shaders: the linked vertex shader's, or NULL if unknown). */
++   const struct pan_varying_layout *varying_layout;
++   uint32_t vs_noperspective_varyings;
++   uint32_t fs_nr_cbufs_for_fragcolor;
++   uint32_t fs_sprite_coord_enable;
++   uint32_t fs_clip_plane_enable;
++   bool fs_line_smooth;
++   unsigned req_local_mem;
++};
++
++struct pan_isa_hooks {
++   /* Whether this (shell) shader is compiled by the hooks. */
++   bool (*owns)(const nir_shader *nir);
++   /* At CSO creation: the vertex shader's varying layout, and the fragment
++    * shader's noperspective varyings (bit i = VARYING_SLOT_VAR0 + i). */
++   void (*create_layout)(const nir_shader *nir, uint64_t gpu_id,
++                         struct pan_varying_layout *vs_layout,
++                         uint32_t *fs_noperspective);
++   /* Compiles a variant. Returns NULL with binary/info/sysvals filled, or a
++    * nir_shader (ralloc'd, owned by the caller) to compile with Mesa instead. */
++   nir_shader *(*compile)(const nir_shader *nir, const struct pan_isa_key *key,
++                          struct util_dynarray *binary,
++                          struct pan_shader_info *info,
++                          struct panfrost_sysvals *sysvals);
++};
++
++/* Set once by the embedding driver; NULL = no precompiled shaders. */
++extern const struct pan_isa_hooks *pan_isa_hooks;
++
++static inline bool
++pan_isa_owns(const nir_shader *nir)
++{
++   return pan_isa_hooks && nir && pan_isa_hooks->owns(nir);
++}
++
++#endif
