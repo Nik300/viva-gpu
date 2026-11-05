@@ -1606,7 +1606,8 @@ static void env_push(env_save *s, const isa_case *c, int mode) {
     if (mode == ISA_MODE_ISA) {
         char only[256];
         setenv("VMG_ISA", "1", 1);
-        setenv("VMG_ISA_STRICT", "1", 1);
+        // ISA_NO_STRICT=1: a function may fall back to the NIR path (bisection with VMG_ISA_NO_<ID>)
+        if (getenv("ISA_NO_STRICT")) unsetenv("VMG_ISA_STRICT"); else setenv("VMG_ISA_STRICT", "1", 1);
         // Every feature on the ISA path (strict: a fallback fails the case). ISA_TEST_ONLY=1 narrows the ISA path to
         // the case's feature and its plumbing (VMG_ISA_ONLY), for bisection.
         const char *narrow = getenv("ISA_TEST_ONLY");

@@ -175,6 +175,49 @@ static void drop_fallthrough_jumps(vi_shader *s)
     }
 }
 
+// A block that falls through must be followed in the layout by its fallthrough successor (later block creation can
+// push that successor further down: a zero-trip loop guard then fell into the next block, A2 on the phone). Where it is
+// not, a block holding only a jump to it is inserted right after.
+static void replace_pred(vi_block *b, vi_block *from, vi_block *to);
+static void fix_fallthrough(vi_shader *s)
+{
+    vi_foreach_block(s, blk) {
+        vi_instr *L = list_is_empty(&blk->instrs) ? NULL : list_last_entry(&blk->instrs, vi_instr, link);
+        vi_block *F = NULL;
+        if (L && L->target) {
+            bool uncond = L->src[0].kind == VI_IMM && L->src[0].value == 0 && L->f.set[VAF_not] && L->f.v[VAF_not];
+            if (uncond) continue;
+            for (unsigned k = 0; k < 2; k++) if (blk->succ[k] && blk->succ[k] != L->target) F = blk->succ[k];
+            if (!F) F = L->target;   // both edges to the same block
+        } else F = blk->succ[0];
+        if (!F) continue;
+        // empty blocks in between add no code: the first block with instructions (or F) is where execution goes
+        bool reaches = false;
+        for (struct list_head *l = blk->link.next; l != &s->blocks; l = l->next) {
+            vi_block *b = list_entry(l, vi_block, link);
+            if (b == F) { reaches = true; break; }
+            if (!list_is_empty(&b->instrs)) break;
+        }
+        if (reaches) continue;
+        vi_block *J = vi_block_create(s);
+        list_del(&J->link);
+        list_add(&J->link, &blk->link);   // right after blk
+        vi_builder b = { s, J, NULL };
+        vi_instr *I = vi_emit(&b, VA_BRANCH);
+        I->src[0] = vi_imm(0); va_set(&I->f, VAF_not, 1); I->target = F;
+        util_dynarray_append(&J->preds, blk);
+        J->succ[0] = F;
+        if (L && L->target == F) {
+            // the branch still goes to F; the fallthrough edge is new
+            if (!blk->succ[0]) blk->succ[0] = J; else blk->succ[1] = J;
+            util_dynarray_append(&F->preds, J);
+        } else {
+            for (unsigned k = 0; k < 2; k++) if (blk->succ[k] == F) { blk->succ[k] = J; break; }
+            replace_pred(F, blk, J);
+        }
+    }
+}
+
 void vi_if_convert(vi_shader *s);
 void vi_merge_blocks(vi_shader *s);
 void vi_fuse_fma(vi_shader *s);
@@ -185,6 +228,7 @@ void vi_optimize(vi_shader *s)
     vi_if_convert(s);
     vi_merge_blocks(s);
     drop_fallthrough_jumps(s);
+    fix_fallthrough(s);
     // sizes after if-conversion (it creates registers)
     unsigned n = vi_num_vregs(s), words = 0;
     for (unsigned v = 0; v < n; v++) words += vi_vreg_get(s, v)->nwords;
