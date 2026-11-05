@@ -16,7 +16,11 @@ NSData *VMBitcodeOfFunction(id<MTLFunction> function) {
 // function's position in this list + 1 (driver/isa, G4).
 static NSArray<NSArray *> *VMLinkedBitcode(MTLLinkedFunctions *lf) {
     NSMutableArray<NSArray *> *a = [NSMutableArray array];
-    for (id<MTLFunction> f in lf.functions) {
+    // privateFunctions (iOS 15+): statically linked only; MPS / MPSGraph pass their stitched prefix/postfix functions
+    // there (prefixPrimary_f, postfixPrimary_f...), never in `functions`.
+    NSMutableArray<id<MTLFunction>> *all = [NSMutableArray arrayWithArray:lf.functions ?: @[]];
+    if ([lf respondsToSelector:@selector(privateFunctions)]) [all addObjectsFromArray:lf.privateFunctions ?: @[]];
+    for (id<MTLFunction> f in all) {
         NSData *bc = VMBitcodeOfFunction(f);
         if (bc && f.name) [a addObject:@[f.name, bc]];
     }
