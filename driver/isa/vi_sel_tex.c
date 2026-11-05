@@ -438,12 +438,15 @@ sv *sel_texture(S *t, LLVMValueRef inst, const char *name)
         sv *l = arg(t, inst, i++);
         if (!l) return NULL;
         LLVMTypeRef lt = ts_LLVMTypeOf(ts_LLVMGetOperand(inst, i - 1));
-        if (sel_is_float(lt)) {
-            vi_ref f = sv_comp32(t, l, 0, X_F32);
-            vi_ref rr = sel_tmp(t);
-            vi_instr *I = E(t, VA_F32_TO_U32); I->dest = rr; I->src[0] = f; vi_set(I, VAF_round, VA_ROUND_INTEGER_M_NONE);
-            layer = rr;
-        } else layer = sv_comp32(t, l, 0, X_ZEXT);
+        // TEX_SINGLE/TEX_GATHER take the array index as a float (Mesa passes GL's float layer coordinate as is); an
+        // integer 1 read as a float is a denormal, i.e. always layer 0 on the phone (D1 2D array)
+        if (sel_is_float(lt)) layer = sv_comp32(t, l, 0, X_F32);
+        else {
+            vi_ref u = sv_comp32(t, l, 0, X_ZEXT);
+            vi_ref f = sel_tmp(t);
+            vi_instr *I = E(t, VA_U32_TO_F32); I->dest = f; I->src[0] = u.kind == VI_IMM ? sel_mov32(t, u) : u;
+            layer = f;
+        }
     }
     if (cmp) { sv *r = arg(t, inst, i++); if (!r) return NULL; ref = sv_comp32(t, r, 0, X_F32); }
     vi_ref w[8];
