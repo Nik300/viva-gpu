@@ -743,9 +743,16 @@ sv *sel_atomic(S *t, LLVMValueRef inst, const char *name)
         I->sr = vi_vreg(st, 0, 2); I->sw = old; I->src[0] = addr; vi_set(I, VAF_offset, 0);
         I->memory = true;
         if (expp->kind == SV_PTR) store_words(t, expp, old, 1, 0);
-        vi_ref eq = sel_alu2(t, VA_ICMP_U32, old, expected);
-        I = list_last_entry(&t->b.block->instrs, vi_instr, link); vi_set(I, VAF_cmpf, VA_CMPF_M_EQ); vi_set(I, VAF_result_type, VA_CMP_RESULT_TYPE_M_I1);
-        return sv_from_comps32(t, 1, 1, &eq);
+        // air.atomic.*.cmpxchg returns the old value (i32); Metal's frontend compares it with the expected value. As a
+        // boolean the loop of atomic_compare_exchange_weak never ended on the phone (C9). An i1 result is the success.
+        LLVMTypeRef rt = ts_LLVMTypeOf(inst);
+        if (ts_LLVMGetTypeKind(rt) == LLVMIntegerTypeKind && ts_LLVMGetIntTypeWidth(rt) == 1) {
+            vi_ref eq = sel_tmp(t);
+            vi_instr *C = E(t, VA_ICMP_U32); C->dest = eq; C->src[0] = old; C->src[1] = expected;
+            vi_set(C, VAF_cmpf, VA_CMPF_M_EQ); vi_set(C, VAF_result_type, VA_CMP_RESULT_TYPE_M_I1);
+            return sv_from_comps32(t, 1, 1, &eq);
+        }
+        return sv_from_comps32(t, 32, 1, &old);
     }
     vi_ref arg = sv_word(t, data, 0);
     if (neg) arg = sel_alu2(t, VA_ISUB_S32, vi_imm(0), arg);

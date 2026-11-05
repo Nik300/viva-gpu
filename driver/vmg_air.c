@@ -1771,7 +1771,9 @@ static val *atomic(T *t, LLVMValueRef inst, const char *name)
         r = ptr->sp == SP_SSBO ? nir_ssbo_atomic_swap(b, 32, ptr->slot, ssbo_offset(t, ptr), expected, desired, .atomic_op = aop)
                                : nir_shared_atomic_swap(b, 32, ptr->off, expected, desired, .atomic_op = aop);
         if (expp->kind == V_PTR) mem_store(t, expp, r, 4);
-        return vssa(t, nir_ieq(b, r, expected));
+        // air.atomic.*.cmpxchg.weak.i32 returns the old value (the frontend compares it); an i1 result is the success
+        bool bool_result = ts_LLVMGetTypeKind(ts_LLVMTypeOf(inst)) == LLVMIntegerTypeKind && ts_LLVMGetIntTypeWidth(ts_LLVMTypeOf(inst)) == 1;
+        return vssa(t, bool_result ? nir_ieq(b, r, expected) : r);
     }
     r = ptr->sp == SP_SSBO ? nir_ssbo_atomic(b, 32, ptr->slot, ssbo_offset(t, ptr), data, .atomic_op = aop)
                            : nir_shared_atomic(b, 32, ptr->off, data, .atomic_op = aop);
