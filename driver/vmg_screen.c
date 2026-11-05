@@ -693,6 +693,20 @@ vmg_texture *vmg_texture_create_buffer(vmg_device *dev, const vmg_texture_desc *
     struct pipe_resource templ;
     texture_template(dev, d, &templ);
     if (templ.format == PIPE_FORMAT_NONE) return NULL;
+    if (templ.target == PIPE_BUFFER && buffer->res && buffer->res->target == PIPE_BUFFER &&
+        offset + templ.width0 <= buffer->res->width0 && !getenv("VMG_BUFTEX_COPY")) {
+        // texture_buffer: a view on the buffer itself, as GL buffer textures are (Gallium sizes it in bytes). The
+        // separate copy read back zeros on the phone (D4); VMG_BUFTEX_COPY=1 restores it.
+        struct pipe_resource *r = NULL;
+        pipe_resource_reference(&r, buffer->res);
+        vmg_texture *t = texture_wrap(r, d);
+        t->format = templ.format;
+        t->target = PIPE_BUFFER;
+        t->last_level = 0; t->last_layer = 0;
+        t->buf_view_offset = (uint32_t)offset;
+        t->buf_view_size = templ.width0;
+        return t;
+    }
     templ.bind |= PIPE_BIND_LINEAR;
     struct pipe_resource *res = NULL;
     if (buffer->map && dev->screen->resource_from_user_memory && !getenv("VMG_NO_ALIAS")) {   // VMG_NO_ALIAS: the copy path

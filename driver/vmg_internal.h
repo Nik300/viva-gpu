@@ -63,6 +63,7 @@ struct vmg_texture {
     bool surface_seed_valid;
     // Linear textures over a buffer the driver cannot alias (Panfrost: no user memory): same, from/to the buffer.
     vmg_resource *buffer; size_t buffer_offset, buffer_bpr;
+    uint32_t buf_view_offset, buf_view_size;   // PIPE_BUFFER view straight on a buffer's resource (bytes; size 0 = whole)
     uint64_t buffer_hash;             // XXH3 of the buffer bytes at the last copy-in: unchanged = no copy-in
     uint64_t buffer_gen;              // buffer->gpu_writes at the last copy-in (user_copy buffers: no hashing)
     struct vmg_buffer_copy *bcopy;    // user_copy buffers: the shared copy this texture samples (else NULL)

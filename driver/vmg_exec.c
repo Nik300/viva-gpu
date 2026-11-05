@@ -636,8 +636,8 @@ static void bind_stage(vmg_device *dev, enum vmg_stage stage, vmg_shader *sh, co
             tmpl.target = t->target;
             tmpl.swizzle_r = t->swizzle[0]; tmpl.swizzle_g = t->swizzle[1]; tmpl.swizzle_b = t->swizzle[2]; tmpl.swizzle_a = t->swizzle[3];
             if (t->target == PIPE_BUFFER) {
-                tmpl.u.buf.offset = 0;
-                tmpl.u.buf.size = t->res->width0;
+                tmpl.u.buf.offset = t->buf_view_offset;
+                tmpl.u.buf.size = t->buf_view_size ? t->buf_view_size : t->res->width0;
             } else {
                 tmpl.u.tex.first_level = t->first_level; tmpl.u.tex.last_level = t->last_level;
                 tmpl.u.tex.first_layer = t->first_layer; tmpl.u.tex.last_layer = t->last_layer;
@@ -659,7 +659,7 @@ static void bind_stage(vmg_device *dev, enum vmg_stage stage, vmg_shader *sh, co
             img[i].resource = t->res;
             img[i].format = t->format;
             img[i].access = img[i].shader_access = PIPE_IMAGE_ACCESS_READ_WRITE;
-            if (t->target == PIPE_BUFFER) { img[i].u.buf.offset = 0; img[i].u.buf.size = t->res->width0; }
+            if (t->target == PIPE_BUFFER) { img[i].u.buf.offset = t->buf_view_offset; img[i].u.buf.size = t->buf_view_size ? t->buf_view_size : t->res->width0; }
             else {
                 img[i].u.tex.level = t->first_level;
                 img[i].u.tex.first_layer = t->first_layer;
