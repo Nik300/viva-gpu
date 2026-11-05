@@ -398,7 +398,30 @@ static UIImageView *VMPixelView(void) {
     NSArray<NSString *> *_featureTitles;
 }
 
-enum { SecWarning, SecMaster, SecGeneral, SecTests, SecFirstFeature };
+enum { SecWarning, SecMaster, SecAuto, SecGeneral, SecTests, SecFirstFeature };
+
+// ---- Automatic selection --------------------------------------------------------------------------------------------------
+// isa-verified.json (app resources): the result of the ISA tests run by the driver's developer on the reference phone,
+// per feature: ok, parity (fails the same way on the NIR path: the ISA path is no worse) or regression (the ISA path
+// fails where the NIR path passes). The automatic selection turns on the ISA compiler and every feature except the
+// regressions. Nothing is tested on this device: results on the device itself can vary from run to run.
+static NSDictionary *VMIsaVerified(void) {
+    static NSDictionary *v;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSString *path = [NSBundle.mainBundle pathForResource:@"isa-verified" ofType:@"json"];
+        NSData *data = path ? [NSData dataWithContentsOfFile:path] : nil;
+        id j = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+        v = [j isKindOfClass:NSDictionary.class] ? j : @{};
+    });
+    return v;
+}
+
+static NSString *VMIsaFeatureStatus(NSString *flagKey) {
+    NSString *fid = [flagKey hasPrefix:@"VMG_ISA_NO_"] ? [flagKey substringFromIndex:11] : flagKey;
+    NSDictionary *f = VMIsaVerified()[@"features"][fid];
+    return [f isKindOfClass:NSDictionary.class] ? f[@"status"] : nil;
+}
 
 - (instancetype)initWithGroup:(NSDictionary *)group flags:(VMMaliMetalViewController *)flags {
     if ((self = [super initWithStyle:UITableViewStyleInsetGrouped])) {
@@ -452,6 +475,37 @@ enum { SecWarning, SecMaster, SecGeneral, SecTests, SecFirstFeature };
     return YES;
 }
 
+// The flags of the automatic selection: ISA on, no VMG_ISA_ONLY, VMG_ISA_NO_<ID>=1 only for regressions and for features
+// the tests do not cover (unknown status).
+- (NSDictionary *)autoValues {
+    NSMutableDictionary *v = [NSMutableDictionary dictionary];
+    v[@"VMG_ISA"] = @"1";
+    v[@"VMG_ISA_ONLY"] = NSNull.null;
+    for (NSArray *s in _features) for (NSDictionary *i in s) {
+        NSString *st = VMIsaFeatureStatus(i[@"key"]);
+        BOOL on = [st isEqualToString:@"ok"] || [st isEqualToString:@"parity"];
+        v[i[@"key"]] = on ? NSNull.null : @"1";
+    }
+    return v;
+}
+
+- (BOOL)autoOn {
+    if (!self.isaOn || !VMIsaVerified().count) return NO;
+    NSDictionary *a = self.autoValues;
+    for (NSString *k in a) {
+        if ([k isEqualToString:@"VMG_ISA"]) continue;
+        BOOL want = a[k] != NSNull.null, have = [_flags flagValue:k] != nil;
+        if (want != have) return NO;
+    }
+    return YES;
+}
+
+- (void)setAuto:(BOOL)on {
+    if (on) [_flags setFlagValues:self.autoValues];
+    else [_flags setFlagValues:@{ @"VMG_ISA": NSNull.null }];   // back to the NIR path; the per-feature choices stay
+    [_flags presentSaveFrom:self item:self.navigationItem.rightBarButtonItem];
+}
+
 - (void)setAll:(BOOL)on {
     NSMutableDictionary *v = [NSMutableDictionary dictionary];
     if (on) {
@@ -471,6 +525,7 @@ enum { SecWarning, SecMaster, SecGeneral, SecTests, SecFirstFeature };
     switch (s) {
     case SecWarning: return 2;
     case SecMaster: return 1;
+    case SecAuto: return 1;
     case SecGeneral: return (NSInteger)_general.count;
     case SecTests: return 1;
     }
@@ -481,6 +536,7 @@ enum { SecWarning, SecMaster, SecGeneral, SecTests, SecFirstFeature };
     switch (s) {
     case SecWarning: return @"Avviso";
     case SecMaster: return @"Interruttore rapido";
+    case SecAuto: return @"Selezione automatica";
     case SecGeneral: return @"Generale e debug";
     case SecTests: return @"Verifica";
     }
@@ -492,6 +548,27 @@ enum { SecWarning, SecMaster, SecGeneral, SecTests, SecFirstFeature };
         return @"Acceso: VMG_ISA=1 e tutte le funzionalità sul percorso ISA. Spento: tutto torna al percorso AIR → NIR → "
                @"Panfrost. Non tocca la modalità rigorosa né la traccia. Come gli altri flag vale per i processi che partono "
                @"dopo il salvataggio (backboardd: riavvio).";
+    if (s == SecAuto) {
+        NSDictionary *v = VMIsaVerified();
+        if (!v.count) return @"Risultati dei test non presenti in questa versione dell'app.";
+        NSMutableArray *parity = [NSMutableArray array], *off = [NSMutableArray array];
+        NSDictionary *feats = v[@"features"];
+        for (NSString *k in [feats.allKeys sortedArrayUsingSelector:@selector(compare:)]) {
+            NSString *st = feats[k][@"status"];
+            if ([st isEqualToString:@"parity"]) [parity addObject:k];
+            else if (![st isEqualToString:@"ok"]) [off addObject:k];
+        }
+        return [NSString stringWithFormat:
+            @"Sceglie le funzionalità in base ai test del compilatore eseguiti dallo sviluppatore sul telefono di riferimento "
+            @"(driver %@, %@: %@ casi su %@ passano sul percorso ISA, %@ sul percorso NIR), non a test eseguiti su questo "
+            @"dispositivo, che possono dare risultati variabili. Accende l'ISA e ogni funzionalità verificata; spegne solo "
+            @"quelle che sul percorso ISA falliscono dove il percorso NIR passa%@.%@ L'interruttore generale resta: spegnerlo "
+            @"riporta tutto al percorso NIR.",
+            v[@"driver"], v[@"date"], v[@"isa_ok"], v[@"cases"], v[@"nir_ok"],
+            off.count ? [NSString stringWithFormat:@" (%@)", [off componentsJoinedByString:@", "]] : @" (nessuna, oggi)",
+            parity.count ? [NSString stringWithFormat:@" Restano accese, perché falliscono allo stesso modo anche sul percorso "
+                                                       @"NIR: %@.", [parity componentsJoinedByString:@", "]] : @""];
+    }
     if (s == SecFirstFeature)
         return @"Acceso = la funzionalità passa dal percorso ISA. Spento (VMG_ISA_NO_<ID>=1) = ogni funzione che la usa torna "
                @"al percorso NIR. Le funzionalità valgono solo con l'interruttore generale acceso.";
@@ -500,7 +577,7 @@ enum { SecWarning, SecMaster, SecGeneral, SecTests, SecFirstFeature };
 
 - (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
     NSString *gpu;
-    BOOL ok = VMIsaCompatible(&gpu);
+    BOOL ok = VMIsaCompatible(&gpu), gpuOk = ok;
     UITableViewCell *c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
     c.textLabel.numberOfLines = 0;
     c.detailTextLabel.numberOfLines = 0;
@@ -539,6 +616,31 @@ enum { SecWarning, SecMaster, SecGeneral, SecTests, SecFirstFeature };
         sw.onChange = ^(BOOL on) { [ws setAll:on]; };
         c.accessoryView = sw;
         if (!ok) c.contentView.alpha = 0.5;
+        return c;
+    }
+    if (ip.section == SecAuto) {
+        NSDictionary *v = VMIsaVerified();
+        BOOL on = self.autoOn;
+        c.textLabel.text = @"Selezione automatica dai test verificati";
+        c.textLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
+        NSUInteger n = 0, ok = 0;
+        for (NSArray *s in _features) for (NSDictionary *i in s) {
+            n++;
+            NSString *st = VMIsaFeatureStatus(i[@"key"]);
+            if ([st isEqualToString:@"ok"] || [st isEqualToString:@"parity"]) ok++;
+        }
+        c.detailTextLabel.text = !v.count ? @"Non disponibile"
+            : on ? [NSString stringWithFormat:@"Attiva: %lu funzionalità su %lu sul percorso ISA", (unsigned long)ok, (unsigned long)n]
+                 : [NSString stringWithFormat:@"Disattiva (accenderebbe %lu funzionalità su %lu)", (unsigned long)ok, (unsigned long)n];
+        c.detailTextLabel.textColor = UIColor.secondaryLabelColor;
+        c.imageView.image = [UIImage systemImageNamed:@"wand.and.stars"];
+        VMSwitch *sw = [VMSwitch new];
+        sw.on = on;
+        sw.enabled = gpuOk && v.count;
+        __weak typeof(self) ws = self;
+        sw.onChange = ^(BOOL x) { [ws setAuto:x]; };
+        c.accessoryView = sw;
+        if (!gpuOk) c.contentView.alpha = 0.5;
         return c;
     }
     if (ip.section == SecTests) {

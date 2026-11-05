@@ -65,12 +65,28 @@ senza allungare la vita degli operandi; se il risultato ha spill si ricompila se
 opt-in (`VMG_ISA_REMAT=1`, nessun guadagno misurato). `VMG_LLVM_HIDE=nome,...` simula sul Mac il libLLVM più vecchio
 di iOS 16 (funzioni opzionali assenti).
 
-Telefono (CI 42060938269, `isatest` caso per caso): NIR 69/89 ok; ISA 17 ok, 33 casi in crash per
-`LLVMGetNumMaskElements` assente nel libLLVM di iOS 16 (shufflevector: corretto, si legge la maschera dall'operando come
-fa il percorso NIR), gli altri da ripetere dopo la correzione. nessuna misura di prestazioni. D9: ogni
-texture è un messaggio TEX a sé, come fa Mesa su Valhall (la fusione `bi_opt_fuse_dual_texture` agisce solo sui
-TEXS_2D di Bifrost; `TEX_DUAL` è marcato `unused` nell'ISA.xml di Mesa e la codifica dei due handle nel src0 non è
-documentata), quindi nessuna perdita rispetto al percorso NIR.
+Telefono (2026-11-05, `isatest` un caso per processo, driver come da `app/Resources/isa-verified.json`): **percorso ISA
+83/89, percorso NIR 74/89, nessun crash**. I 6 KO rimasti sull'ISA falliscono identici anche sul percorso NIR (bug del
+driver o dell'hardware, non del compilatore): B3 clip_distance (Valhall non ha piani di clip: andrebbe emulato con un
+discard nel fragment shader), D1 min_lod_clamp (il clamp nel registro di bias viene ignorato), D4 read di cube come array,
+di texture su buffer e di depth2d, G2 (il tile kernel gira ma le sue scritture non arrivano al pass che riprende). Sul
+percorso NIR in più: B5/B6 (frag coord e sample_mask con shading per campione), B10, C9 cmpxchg, D1 lineare e 3D/cube, G3,
+G4 (limiti del traduttore NIR, che il percorso ISA colma).
+
+Bug trovati sul telefono e corretti in questa sessione: crash con `LLVMGetNumMaskElements` assente in iOS 16; campo
+`align(n)` dell'XML trattato come scala (registri delle destinazioni a 64 bit dimezzati: IADD.u64 dei puntatori, IMUL.u64,
+shift a 64 bit); IMUL.u64 con widen fuori specifica (l'encoder ora rifiuta i valori non ammessi dal `restrict` dell'XML);
+indice di lane di CLPER che deve essere uniforme (shuffle con indice per thread); handle dei buffer di LEA_PKA/LD_PKA
+uniforme (puntatore che sceglie il buffer per thread: anche sul percorso NIR, con `nir_lower_non_uniform_access`); regola
+FAU dei 64 bit (al più due parole distinte tra uniform e costanti per istruzione); salto di fallthrough mancante dopo
+l'inserimento di blocchi; ordine del risultato di TEX_GATHER; indice di layer come float per TEX_SINGLE/GATHER; coefficiente
+mancante di atan; cmpxchg che restituisce il valore vecchio; voti e ballot per quad; operandi emessi dopo l'istruzione che
+li legge (`VMG_ISA_CHECK=1` li cerca); sampler constexpr emessi da iOS 16 come semplice i64 (anche NIR); texture su buffer
+come vista sul buffer (anche NIR); gather_compare e voti per quad anche sul percorso NIR.
+
+Viva Manager, MaliMetal > Compilatore ISA > **Selezione automatica**: accende l'ISA e le funzionalità secondo
+`isa-verified.json` (ok / parity = fallisce uguale sul NIR / regression = spenta); nessun test eseguito sul dispositivo.
+Rigenerare il file dopo un giro di test: `driver/tests/gen_isa_verified.py`.
 
 Bug del driver esistente trovati lungo la strada: texture buffer dimensionati in texel invece che in byte (overflow
 dell'heap a ogni copia: corretto in `texture_template`); puntatori a sampler/texture/buffer liberati rimasti legati tra un

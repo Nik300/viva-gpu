@@ -1,0 +1,328 @@
+{
+ "source": "isatest sul telefono di riferimento (Mali-G57 MC2), un caso per processo",
+ "driver": "c2e0352",
+ "date": "2026-11-05",
+ "isa_ok": 83,
+ "nir_ok": 74,
+ "cases": 89,
+ "rule": "ok: tutti i casi passano sul percorso ISA; parity: fallisce anche sul percorso NIR, allo stesso modo (ISA non peggiora); regression: l'ISA fallisce dove NIR passa (la selezione automatica la spegne)",
+ "features": {
+  "A1": {
+   "status": "ok",
+   "note": "infrastruttura: esercitata da tutti i casi"
+  },
+  "A2": {
+   "status": "ok",
+   "cases": 1,
+   "ok": 1
+  },
+  "A3": {
+   "status": "ok",
+   "cases": 1,
+   "ok": 1
+  },
+  "A4": {
+   "status": "ok",
+   "note": "infrastruttura: esercitata da tutti i casi"
+  },
+  "A5": {
+   "status": "ok",
+   "note": "infrastruttura: esercitata da tutti i casi"
+  },
+  "A6": {
+   "status": "ok",
+   "cases": 1,
+   "ok": 1
+  },
+  "A7": {
+   "status": "ok",
+   "note": "infrastruttura: esercitata da tutti i casi"
+  },
+  "A8": {
+   "status": "ok",
+   "note": "infrastruttura: esercitata da tutti i casi"
+  },
+  "A9": {
+   "status": "ok",
+   "note": "infrastruttura: esercitata da tutti i casi"
+  },
+  "A10": {
+   "status": "ok",
+   "note": "infrastruttura: esercitata da tutti i casi"
+  },
+  "A11": {
+   "status": "ok",
+   "cases": 1,
+   "ok": 1
+  },
+  "B1": {
+   "status": "ok",
+   "cases": 1,
+   "ok": 1
+  },
+  "B2": {
+   "status": "ok",
+   "cases": 1,
+   "ok": 1
+  },
+  "B3": {
+   "status": "parity",
+   "cases": 2,
+   "ok": 1,
+   "failing": [
+    "clip_distance (triangolo tagliato a x = 40)"
+   ]
+  },
+  "B4": {
+   "status": "ok",
+   "cases": 3,
+   "ok": 3
+  },
+  "B5": {
+   "status": "ok",
+   "cases": 3,
+   "ok": 3
+  },
+  "B6": {
+   "status": "ok",
+   "cases": 3,
+   "ok": 3
+  },
+  "B7": {
+   "status": "ok",
+   "cases": 1,
+   "ok": 1
+  },
+  "B8": {
+   "status": "ok",
+   "cases": 1,
+   "ok": 1
+  },
+  "B9": {
+   "status": "ok",
+   "cases": 1,
+   "ok": 1
+  },
+  "B10": {
+   "status": "ok",
+   "cases": 1,
+   "ok": 1
+  },
+  "B11": {
+   "status": "ok",
+   "cases": 1,
+   "ok": 1
+  },
+  "C1": {
+   "status": "ok",
+   "cases": 1,
+   "ok": 1
+  },
+  "C2": {
+   "status": "ok",
+   "cases": 1,
+   "ok": 1
+  },
+  "C3": {
+   "status": "ok",
+   "cases": 1,
+   "ok": 1
+  },
+  "C4": {
+   "status": "ok",
+   "cases": 1,
+   "ok": 1
+  },
+  "C5": {
+   "status": "ok",
+   "cases": 1,
+   "ok": 1
+  },
+  "C6": {
+   "status": "ok",
+   "cases": 1,
+   "ok": 1
+  },
+  "C7": {
+   "status": "ok",
+   "cases": 1,
+   "ok": 1
+  },
+  "C8": {
+   "status": "ok",
+   "cases": 1,
+   "ok": 1
+  },
+  "C9": {
+   "status": "ok",
+   "cases": 3,
+   "ok": 3
+  },
+  "C10": {
+   "status": "ok",
+   "cases": 1,
+   "ok": 1
+  },
+  "D1": {
+   "status": "parity",
+   "cases": 5,
+   "ok": 4,
+   "failing": [
+    "sample con min_lod_clamp"
+   ]
+  },
+  "D2": {
+   "status": "ok",
+   "cases": 1,
+   "ok": 1
+  },
+  "D3": {
+   "status": "ok",
+   "cases": 2,
+   "ok": 2
+  },
+  "D4": {
+   "status": "parity",
+   "cases": 3,
+   "ok": 0,
+   "failing": [
+    "read: 2D (anche mip 1), cube come array",
+    "read di texture buffer",
+    "read di depth2d"
+   ]
+  },
+  "D5": {
+   "status": "ok",
+   "cases": 1,
+   "ok": 1
+  },
+  "D6": {
+   "status": "ok",
+   "cases": 1,
+   "ok": 1
+  },
+  "D7": {
+   "status": "ok",
+   "cases": 1,
+   "ok": 1
+  },
+  "D8": {
+   "status": "ok",
+   "cases": 1,
+   "ok": 1
+  },
+  "D9": {
+   "status": "ok",
+   "cases": 1,
+   "ok": 1
+  },
+  "E1": {
+   "status": "ok",
+   "cases": 2,
+   "ok": 2
+  },
+  "E2": {
+   "status": "ok",
+   "cases": 1,
+   "ok": 1
+  },
+  "E3": {
+   "status": "ok",
+   "cases": 1,
+   "ok": 1
+  },
+  "E4": {
+   "status": "ok",
+   "cases": 1,
+   "ok": 1
+  },
+  "E5": {
+   "status": "ok",
+   "cases": 1,
+   "ok": 1
+  },
+  "E6": {
+   "status": "ok",
+   "cases": 6,
+   "ok": 6
+  },
+  "E7": {
+   "status": "ok",
+   "cases": 5,
+   "ok": 5
+  },
+  "E8": {
+   "status": "ok",
+   "cases": 2,
+   "ok": 2
+  },
+  "E9": {
+   "status": "ok",
+   "cases": 5,
+   "ok": 5
+  },
+  "E10": {
+   "status": "ok",
+   "cases": 1,
+   "ok": 1
+  },
+  "E11": {
+   "status": "ok",
+   "cases": 1,
+   "ok": 1
+  },
+  "E12": {
+   "status": "ok",
+   "cases": 1,
+   "ok": 1
+  },
+  "E13": {
+   "status": "ok",
+   "cases": 1,
+   "ok": 1
+  },
+  "F1": {
+   "status": "ok",
+   "cases": 2,
+   "ok": 2
+  },
+  "F2": {
+   "status": "ok",
+   "cases": 2,
+   "ok": 2
+  },
+  "F3": {
+   "status": "ok",
+   "cases": 2,
+   "ok": 2
+  },
+  "F4": {
+   "status": "ok",
+   "cases": 1,
+   "ok": 1
+  },
+  "G1": {
+   "status": "ok",
+   "cases": 1,
+   "ok": 1
+  },
+  "G2": {
+   "status": "parity",
+   "cases": 1,
+   "ok": 0,
+   "failing": [
+    "Tile shading: imageblock letto e riscritto da un tile kernel"
+   ]
+  },
+  "G3": {
+   "status": "ok",
+   "cases": 1,
+   "ok": 1
+  },
+  "G4": {
+   "status": "ok",
+   "cases": 1,
+   "ok": 1
+  }
+ }
+}
