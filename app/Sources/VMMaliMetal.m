@@ -320,6 +320,10 @@ enum { SecState, SecFirstGroup };
         return;
     }
     NSDictionary *group = _groups[ip.section - SecFirstGroup];
+    if ([group[@"subpage"] isEqualToString:@"accel"]) {
+        [self.navigationController pushViewController:[VMAccelViewController new] animated:YES];
+        return;
+    }
     if (group[@"subpage"]) {
         [self.navigationController pushViewController:[[VMIsaViewController alloc] initWithGroup:group flags:self] animated:YES];
         return;

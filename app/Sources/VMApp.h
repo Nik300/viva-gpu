@@ -80,6 +80,9 @@ extern NSNotificationName const VMFlagsDidChangeNotification;   // values edited
 @end
 // The ISA path generates Mali-G57 (Valhall v9) code only: YES when the GPU in use is that one. *name: what was found.
 BOOL VMIsaCompatible(NSString *_Nullable *_Nullable name);
+// Acceleratori (VMAccel.m): MaliMetal subpage for the scaler / JPEG / MPS / video services and their tests.
+@interface VMAccelViewController : UITableViewController
+@end
 @interface VMBootArgsViewController : UITableViewController
 @end
 @interface VMSpringBoardViewController : UITableViewController

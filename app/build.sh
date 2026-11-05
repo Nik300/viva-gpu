@@ -27,7 +27,7 @@ T=(-target arm64-apple-ios16.0 -isysroot "$SDK")
 APP="$OUT/VivaManager.app"
 rm -rf "$APP"
 mkdir -p "$APP"
-"$CC" "${T[@]}" "${CFLAGS[@]}" "${SRC[@]}" -framework UIKit -framework Foundation -framework CoreGraphics -framework Metal -framework QuartzCore -o "$APP/VivaManager"
+"$CC" "${T[@]}" "${CFLAGS[@]}" "${SRC[@]}" -framework UIKit -framework Foundation -framework CoreGraphics -framework Metal -framework QuartzCore -framework IOSurface -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework ImageIO -o "$APP/VivaManager"
 "$CC" "${T[@]}" -O2 -Wall -Wextra "$HERE/helper/vmhelper.c" -o "$APP/vmhelper"
 cp "$HERE/Info.plist" "$APP/Info.plist"
 plutil -convert binary1 "$APP/Info.plist"

@@ -59,6 +59,7 @@
     {"key": "CA_FORCE_GENERIC_SHADERS", "type": "presence", "title": "CoreAnimation: solo shader generici",
      "desc": "Chiede a CoreAnimation di usare sempre gli shader generici."}
   ]},
+  {"group": "Acceleratori (scaler, JPEG, MPS, video)", "subpage": "accel", "items": []},
   {"group": "Compilatore ISA (AIR → Valhall)", "subpage": "isa", "items": [
     {"key": "VMG_ISA", "type": "presence", "title": "Compilatore ISA (interruttore generale)",
      "desc": "Le funzioni Metal vengono compilate direttamente da AIR in ISA Mali-G57 (Valhall v9). Spento = tutto come oggi (AIR → NIR → Panfrost). Ogni funzione con una funzionalità non supportata o spenta torna al percorso NIR."},

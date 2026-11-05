@@ -194,7 +194,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     if (setuid(0) != 0 || setgid(0) != 0) return fail("setuid (vmhelper must be owned by root with mode 4755)");
-    if (argc < 2) { fprintf(stderr, "usage: vmhelper env-write|restart|link|bootargs-get|bootargs-set|reboot|procs\n"); return 2; }
+    if (argc < 2) { fprintf(stderr, "usage: vmhelper env-write|restart|link|bootargs-get|bootargs-set|reboot|procs|mpstest\n"); return 2; }
     const char *c = argv[1];
     if (!strcmp(c, "env-write")) return env_write();
     if (!strcmp(c, "restart") && argc == 3 && (!strcmp(argv[2], "SpringBoard") || !strcmp(argv[2], "backboardd")))
@@ -203,6 +203,12 @@ int main(int argc, char **argv) {
     if (!strcmp(c, "bootargs-get")) return bootargs_get();
     if (!strcmp(c, "bootargs-set")) return bootargs_set();
     if (!strcmp(c, "procs")) return procs();
+    if (!strcmp(c, "mpstest")) {   // the MetalPerformanceShaders test (Acceleratori), its output on stdout
+        char *const a[] = { "/private/var/root/viva-tests/mpstest", NULL };
+        dup2(1, 2);
+        execv(a[0], a);
+        return fail("mpstest (/private/var/root/viva-tests/mpstest)");
+    }
     if (!strcmp(c, "reboot")) {
         sync();
         sleep(1);
