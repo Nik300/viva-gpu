@@ -439,6 +439,10 @@ vmg_isa_program *vmg_isa_compile(const vmg_air_input *in, const vmg_isa_options 
                         ok = false; *error = strdup("IDVS parts disagree on sysvals");
                     }
                 *parts[k].offset = start;
+                // the part's reflection starts from the previous one and only adds: buffers, textures, samplers and
+                // pushed constants read by the varyings alone must be bound too (the blur's texture-coordinate
+                // constants were not: CoreAnimation's blurs came out black on the phone)
+                *refl = rk;
                 if (parts[k].mode == 3) {
                     p->info.vs.secondary_enable = p->binary.size > start;
                     p->info.vs.secondary_preload = preload_mask(u.s);

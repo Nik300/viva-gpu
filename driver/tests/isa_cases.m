@@ -246,6 +246,21 @@ static const char kB3[] =
     "  o.a = float4(x / 64.0, y / 64.0, 0.25, 1); o.b = float(x * y) / 4096.0; o.ps = 1; return o; }\n"
     "fragment float4 fp(FI3 v [[stage_in]]) { return float4(v.a.xy, v.b, v.a.w); }\n";
 static void ref_B3(const isa_case *c, const double *g, double *out) { PIX(c) set4(OUT(x, y), x / 64.0, y / 64.0, x * y / 4096.0, 1); }
+// Varyings that read a buffer the position does not (IDVS: only the varying program uses it; CoreAnimation's blur
+// vertex shaders, whose texture-coordinate constants were not bound: blurs came out black).
+static const char kB3k[] =
+    "struct VO3 { float4 p [[position]]; float4 a [[user(alpha)]] [[flat]]; float b [[user(beta)]] [[flat]]; float ps [[point_size]]; };\n"
+    "struct FI3 { float4 p [[position]]; float4 a [[user(alpha)]] [[flat]]; float b [[user(beta)]] [[flat]]; };\n"
+    "vertex VO3 vs(uint vid [[vertex_id]], constant float4 *k [[buffer(1)]]) {\n"
+    "  uint x = vid % 64, y = vid / 64; VO3 o; float4 s = k[vid & 1];\n"
+    "  o.p = float4((float(x) + 0.5) / 32.0 - 1.0, 1.0 - (float(y) + 0.5) / 32.0, 0, 1);\n"
+    "  o.a = float4(x / 64.0 * s.x, y / 64.0 * s.y, s.z, 1); o.b = s.w; o.ps = 1; return o; }\n"
+    "fragment float4 fp(FI3 v [[stage_in]]) { return float4(v.a.xy, v.b, v.a.w); }\n";
+static void setup_B3k(ISAInputs *in) {
+    float k[8] = {1, 0.5f, 0.25f, 0.75f, 1, 0.5f, 0.25f, 0.75f};
+    in.buffers[@1] = buf(in, k, sizeof k);
+}
+static void ref_B3k(const isa_case *c, const double *g, double *out) { PIX(c) set4(OUT(x, y), x / 64.0, y / 128.0, 0.75, 1); }
 
 // Clip distance 0.25 - x (NDC) on the full-screen triangle: pixels from x = 40 on are clipped.
 static const char kB3c[] =
@@ -1469,6 +1484,7 @@ const isa_case isa_cases[] = {
     {VT(B1), .title = "Ingressi vertice (vertex descriptor: float2, uchar4 norm, float)", .setup = setup_B1, .pipe = pipe_B1, .vis_hi = 1},
     {VT(B2), .title = "vertex_id, instance_id, base_vertex, base_instance", .draw = draw_B2, .setup = setup_B2},
     {VT(B3), .title = "Uscite vertice: varying con chiave, point_size"},
+    {VT(B3k), .id = "B3", .title = "Varying che leggono un buffer non usato dalla posizione", .setup = setup_B3k},
     {FR(B3c), .id = "B3", .title = "clip_distance (triangolo tagliato a x = 40)", CLEAR,
      .mac_note = "percorso NIR su llvmpipe: clip_distance non applicata (anche sui punti)"},
     {FR(B4), .title = "Varying: prospettico (w 1, 2, 4), flat, centroid", .tol = 2e-4, .rel = 2e-4, .vis_hi = 1.5},
