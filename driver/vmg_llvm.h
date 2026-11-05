@@ -18,6 +18,7 @@ typedef struct LLVMOpaqueTargetData *LLVMTargetDataRef;
 typedef struct LLVMOpaqueError *LLVMErrorRef;
 typedef struct LLVMOpaquePassBuilderOptions *LLVMPassBuilderOptionsRef;
 typedef struct LLVMOpaquePassManager *LLVMPassManagerRef;
+typedef struct LLVMOpaqueBuilder *LLVMBuilderRef;
 typedef int LLVMBool;
 
 typedef enum {
@@ -177,7 +178,27 @@ typedef struct LLVMOpaqueAttributeRef *LLVMAttributeRef;
     X(void, LLVMAddInstructionCombiningPass, (LLVMPassManagerRef)) \
     X(void, LLVMAddDeadStoreEliminationPass, (LLVMPassManagerRef)) \
     X(void, LLVMAddAggressiveDCEPass, (LLVMPassManagerRef)) \
-    X(void, LLVMAddCFGSimplificationPass, (LLVMPassManagerRef))
+    X(void, LLVMAddCFGSimplificationPass, (LLVMPassManagerRef)) \
+    /* IR builder (split_resource_allocas); iOS 16 has LLVMBuildLoad but not LLVMBuildLoad2, newer LLVMs the opposite */ \
+    X(LLVMBuilderRef, LLVMCreateBuilderInContext, (LLVMContextRef)) \
+    X(void, LLVMDisposeBuilder, (LLVMBuilderRef)) \
+    X(void, LLVMPositionBuilderBefore, (LLVMBuilderRef, LLVMValueRef)) \
+    X(LLVMValueRef, LLVMBuildAlloca, (LLVMBuilderRef, LLVMTypeRef, const char *)) \
+    X(LLVMValueRef, LLVMBuildLoad, (LLVMBuilderRef, LLVMValueRef, const char *)) \
+    X(LLVMValueRef, LLVMBuildLoad2, (LLVMBuilderRef, LLVMTypeRef, LLVMValueRef, const char *)) \
+    X(LLVMValueRef, LLVMBuildStore, (LLVMBuilderRef, LLVMValueRef, LLVMValueRef)) \
+    X(LLVMValueRef, LLVMBuildSelect, (LLVMBuilderRef, LLVMValueRef, LLVMValueRef, LLVMValueRef, const char *)) \
+    X(LLVMValueRef, LLVMBuildICmp, (LLVMBuilderRef, LLVMIntPredicate, LLVMValueRef, LLVMValueRef, const char *)) \
+    X(LLVMValueRef, LLVMBuildAdd, (LLVMBuilderRef, LLVMValueRef, LLVMValueRef, const char *)) \
+    X(LLVMValueRef, LLVMBuildMul, (LLVMBuilderRef, LLVMValueRef, LLVMValueRef, const char *)) \
+    X(LLVMValueRef, LLVMBuildSExt, (LLVMBuilderRef, LLVMValueRef, LLVMTypeRef, const char *)) \
+    X(LLVMValueRef, LLVMBuildPointerCast, (LLVMBuilderRef, LLVMValueRef, LLVMTypeRef, const char *)) \
+    X(LLVMValueRef, LLVMBuildBitCast, (LLVMBuilderRef, LLVMValueRef, LLVMTypeRef, const char *)) \
+    X(LLVMValueRef, LLVMConstInt, (LLVMTypeRef, unsigned long long, LLVMBool)) \
+    X(LLVMTypeRef, LLVMInt64TypeInContext, (LLVMContextRef)) \
+    X(void, LLVMInstructionEraseFromParent, (LLVMValueRef)) \
+    X(LLVMBasicBlockRef, LLVMGetEntryBasicBlock, (LLVMValueRef)) \
+    X(LLVMValueRef, LLVMGetUndef, (LLVMTypeRef))
 
 #define TS_LLVM_DECLARE(ret, name, args) extern ret (*ts_##name) args;
 TS_LLVM_FUNCS(TS_LLVM_DECLARE)

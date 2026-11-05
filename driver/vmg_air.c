@@ -1913,7 +1913,14 @@ static bool edge_copies(T *t, LLVMBasicBlockRef from, LLVMBasicBlockRef to)
             if (ts_LLVMGetIncomingBlock(i, k) != from) continue;
             val *v = value(t, ts_LLVMGetIncomingValue(i, k));
             if (!v) return false;
-            nir_def *d = v->kind == V_SSA ? v->def : v->kind == V_PTR ? v->off : NULL;
+            nir_def *d = v->kind == V_SSA ? v->def : NULL;
+            if (v->kind == V_PTR) {
+                // the slot travels with the offset (a pointer phi can pick a buffer per thread); the memory cannot
+                struct hash_entry *he = _mesa_hash_table_search(t->vals, i);
+                val *pv = he ? he->data : NULL;
+                if (pv && pv->kind == V_PTR && pv->sp != v->sp) FAILB(t, "pointer phi between memories");
+                d = glsl_get_vector_elements(var->type) == 2 ? nir_vec2(&t->b, v->off, v->slot ? v->slot : nir_imm_int(&t->b, 0)) : v->off;
+            }
             if (!d) FAILB(t, "phi of a resource");
             if (n >= 64) FAILB(t, "too many phis");
             copies[n].var = var; copies[n].d = d; n++;
@@ -2081,7 +2088,14 @@ static bool instruction(T *t, LLVMValueRef inst)
                 else if (ts_LLVMIsAConstant(iv) || ts_LLVMIsAArgument(iv)) first = value(t, iv);
             }
             if (!first || first->kind != V_PTR) FAILB(t, "pointer phi with no known incoming pointer");
-            r = vptr(t, first->sp, first->slot, d);
+            for (unsigned k = 0; k < ts_LLVMCountIncoming(inst); k++) {
+                struct hash_entry *he = _mesa_hash_table_search(t->vals, ts_LLVMGetIncomingValue(inst, k));
+                val *iv = he ? he->data : NULL;
+                if (iv && iv->kind == V_PTR && iv->sp != first->sp) FAILB(t, "pointer phi between memories");
+            }
+            if (d->num_components == 2)
+                r = vptr(t, first->sp, first->sp == SP_SSBO ? nir_channel(&t->b, d, 1) : first->slot, nir_channel(&t->b, d, 0));
+            else r = vptr(t, first->sp, first->slot, d);
         } else r = vssa(t, d);
         break;
     }
@@ -2093,13 +2107,52 @@ static bool instruction(T *t, LLVMValueRef inst)
     return true;
 }
 
+// The pointer a value derives from (argument, load, call...): NULL for null/undef, *mixed when two differ. Pointer phis
+// whose incoming pointers have one root keep its binding; others carry the SSBO slot in the phi.
+static LLVMValueRef ptr_root(LLVMValueRef v, struct hash_table *seen, bool *mixed, unsigned depth)
+{
+    if (*mixed || depth > 64) { *mixed = true; return NULL; }
+    if (is_undef(v) || ts_LLVMIsAConstantPointerNull(v)) return NULL;
+    if (ts_LLVMIsAConstantExpr(v)) {
+        LLVMOpcode op = ts_LLVMGetConstOpcode(v);
+        return op == LLVMBitCast || op == LLVMAddrSpaceCast || op == LLVMGetElementPtr ? ptr_root(ts_LLVMGetOperand(v, 0), seen, mixed, depth + 1) : v;
+    }
+    if (!ts_LLVMIsAInstruction(v)) return v;
+    LLVMValueRef a = NULL;
+    unsigned first = 0, count = 0;
+    switch (ts_LLVMGetInstructionOpcode(v)) {
+    case LLVMBitCast: case LLVMAddrSpaceCast: case LLVMGetElementPtr: return ptr_root(ts_LLVMGetOperand(v, 0), seen, mixed, depth + 1);
+    case LLVMSelect: first = 1; count = 2; break;
+    case LLVMPHI:
+        if (_mesa_hash_table_search(seen, v)) return NULL;
+        _mesa_hash_table_insert(seen, v, v);
+        count = ts_LLVMCountIncoming(v);
+        break;
+    default: return v;
+    }
+    for (unsigned k = 0; k < count; k++) {
+        LLVMValueRef in = ts_LLVMGetOperand(v, first + k);   // a phi's operands are its incoming values
+        LLVMValueRef r = ptr_root(in, seen, mixed, depth + 1);
+        if (!r) continue;
+        if (a && r != a) { *mixed = true; return NULL; }
+        a = r;
+    }
+    return a;
+}
+
 static bool declare_phis(T *t)
 {
     for (LLVMBasicBlockRef bb = ts_LLVMGetFirstBasicBlock(t->fn); bb; bb = ts_LLVMGetNextBasicBlock(bb)) {
         for (LLVMValueRef i = ts_LLVMGetFirstInstruction(bb); i && ts_LLVMGetInstructionOpcode(i) == LLVMPHI; i = ts_LLVMGetNextInstruction(i)) {
             LLVMTypeRef ty = ts_LLVMTypeOf(i);
             const struct glsl_type *gt;
-            if (is_ptr(ty)) gt = glsl_uint_type();
+            if (is_ptr(ty)) {
+                bool mixed = false;
+                struct hash_table *seen = _mesa_pointer_hash_table_create(NULL);
+                ptr_root(i, seen, &mixed, 0);
+                _mesa_hash_table_destroy(seen, NULL);
+                gt = mixed ? glsl_vector_type(GLSL_TYPE_UINT, 2) : glsl_uint_type();   // offset[, SSBO slot]
+            }
             else {
                 unsigned bits, comps; bool flt;
                 if (!type_info(ty, &bits, &comps, &flt)) FAILB(t, "phi of an aggregate");
@@ -2276,6 +2329,334 @@ static char *link_visible(LLVMContextRef ctx, LLVMModuleRef mod, const vmg_air_i
     return NULL;
 }
 
+// ---- Resources in private memory ------------------------------------------------------------------------------------
+//
+// Private memory is scratch, which holds bytes: a buffer pointer (memory + binding + offset) or a texture (a binding)
+// has no byte form there. SROA turns most allocas into SSA values, but not those indexed dynamically or whose address
+// escapes through an addrspacecast. MPS/MPSGraph kernels (ndArray*) do both: `device void *buffers[N] [[buffer(k)]]`
+// becomes an alloca of N pointers (`%arg.array`), cast to address space 8 and kept, with null textures and the
+// parameters pointer, in a struct (_MPSNDArrays) that the stitched functions index by array number.
+// Such an alloca is split into one alloca per leaf field; a dynamically indexed access becomes a select over the leaves
+// it can reach (load) or a conditional write of each of them (store). The clean-up passes then promote the leaves to
+// SSA values (phis where stores are conditional), so pointers and textures never reach memory. Allocas without a
+// stored pointer, or with an access that does not match a leaf (type punning, memcpy, escaping address), are left to
+// the scratch path. VMG_NO_SPLIT_RESOURCES=1 turns it off.
+
+typedef struct { uint64_t off; LLVMTypeRef ty; LLVMValueRef slot; } res_leaf;
+typedef struct { LLVMValueRef inst; bool store; LLVMTypeRef ty; uint64_t cst; LLVMValueRef dyn; } res_access;
+typedef struct {
+    LLVMTargetDataRef td;
+    LLVMBuilderRef bld;
+    LLVMTypeRef i64;
+    res_leaf leaf[256]; unsigned nleaf;
+    res_access acc[512]; unsigned nacc;
+    LLVMValueRef derived[512]; unsigned nderived;   // GEPs and casts of the alloca (erased afterwards)
+    LLVMValueRef lifetime[64]; unsigned nlifetime;
+    bool trace;                                     // VMG_TRACE_SPLIT=1: why an alloca stays in scratch
+    LLVMValueRef reject;                            // the use that stopped the split
+    uint64_t size;                                  // of the alloca
+} res_split;
+
+static bool res_reject(res_split *r, LLVMValueRef user) { if (!r->reject) r->reject = user; return false; }
+
+static void res_trace(LLVMValueRef alloca, const char *why, LLVMValueRef at)
+{
+    char *a = ts_LLVMPrintValueToString(alloca), *u = at ? ts_LLVMPrintValueToString(at) : NULL;
+    fprintf(stderr, "vmg split: %s\n  %s: %s\n", a, why, u ? u : "?");
+    ts_LLVMDisposeMessage(a);
+    if (u) ts_LLVMDisposeMessage(u);
+}
+
+static bool res_flatten(res_split *r, LLVMTypeRef ty, uint64_t off)
+{
+    LLVMTypeKind k = ts_LLVMGetTypeKind(ty);
+    if (k == LLVMStructTypeKind) {
+        for (unsigned i = 0; i < ts_LLVMCountStructElementTypes(ty); i++)
+            if (!res_flatten(r, ts_LLVMStructGetTypeAtIndex(ty, i), off + ts_LLVMOffsetOfElement(r->td, ty, i))) return false;
+        return true;
+    }
+    if (k == LLVMArrayTypeKind) {
+        LLVMTypeRef et = ts_LLVMGetElementType(ty);
+        uint64_t es = ts_LLVMABISizeOfType(r->td, et);
+        for (unsigned i = 0; i < ts_LLVMGetArrayLength(ty); i++)
+            if (!res_flatten(r, et, off + i * es)) return false;
+        return true;
+    }
+    if (r->nleaf == 256) return false;
+    r->leaf[r->nleaf++] = (res_leaf){ off, ty, NULL };
+    return true;
+}
+
+static bool is_ptr_type(LLVMTypeRef t) { return ts_LLVMGetTypeKind(t) == LLVMPointerTypeKind; }
+
+// Value of type `from` usable as `to` without changing bits (pointers: any pointee, address space by cast).
+static bool res_compatible(res_split *r, LLVMTypeRef from, LLVMTypeRef to)
+{
+    if (from == to) return true;
+    if (is_ptr_type(from) || is_ptr_type(to)) return is_ptr_type(from) && is_ptr_type(to);
+    LLVMTypeKind kf = ts_LLVMGetTypeKind(from), kt = ts_LLVMGetTypeKind(to);
+    if (kf == LLVMStructTypeKind || kf == LLVMArrayTypeKind || kt == LLVMStructTypeKind || kt == LLVMArrayTypeKind) return false;
+    return ts_LLVMStoreSizeOfType(r->td, from) == ts_LLVMStoreSizeOfType(r->td, to) &&
+           ts_LLVMABISizeOfType(r->td, from) == ts_LLVMABISizeOfType(r->td, to);
+}
+
+static LLVMValueRef res_cast(res_split *r, LLVMValueRef v, LLVMTypeRef to)
+{
+    LLVMTypeRef from = ts_LLVMTypeOf(v);
+    if (from == to) return v;
+    return is_ptr_type(to) ? ts_LLVMBuildPointerCast(r->bld, v, to, "") : ts_LLVMBuildBitCast(r->bld, v, to, "");
+}
+
+static LLVMValueRef res_load(res_split *r, res_leaf *l)
+{
+    return ts_LLVMBuildLoad2 ? ts_LLVMBuildLoad2(r->bld, l->ty, l->slot, "") : ts_LLVMBuildLoad(r->bld, l->slot, "");
+}
+
+static bool res_is_lifetime(LLVMValueRef call)
+{
+    LLVMValueRef callee = ts_LLVMGetCalledValue(call);
+    size_t len = 0;
+    const char *n = callee && ts_LLVMIsAFunction(callee) ? ts_LLVMGetValueName2(callee, &len) : NULL;
+    return n && len > 14 && !strncmp(n, "llvm.lifetime.", 14);
+}
+
+// Every use of `p` (the alloca + cst + dyn bytes): loads, stores, GEPs, casts and lifetime markers. False on any other.
+static bool res_collect(res_split *r, LLVMValueRef p, uint64_t cst, LLVMValueRef dyn)
+{
+    for (void *u = ts_LLVMGetFirstUse(p); u; u = ts_LLVMGetNextUse(u)) {
+        LLVMValueRef user = ts_LLVMGetUser(u);
+        bool seen = false;
+        for (unsigned i = 0; i < r->nderived && !seen; i++) seen = r->derived[i] == user;
+        for (unsigned i = 0; i < r->nacc && !seen; i++) seen = r->acc[i].inst == user;
+        for (unsigned i = 0; i < r->nlifetime && !seen; i++) seen = r->lifetime[i] == user;
+        if (seen) continue;
+        if (!ts_LLVMIsAInstruction(user)) return res_reject(r, user);
+        switch (ts_LLVMGetInstructionOpcode(user)) {
+        case LLVMLoad:
+            if (r->nacc == 512) return res_reject(r, user);
+            r->acc[r->nacc++] = (res_access){ user, false, ts_LLVMTypeOf(user), cst, dyn };
+            break;
+        case LLVMStore: {
+            LLVMValueRef v = ts_LLVMGetOperand(user, 0);
+            if (v == p || ts_LLVMGetOperand(user, 1) != p || r->nacc == 512) return res_reject(r, user);   // the address escapes
+            r->acc[r->nacc++] = (res_access){ user, true, ts_LLVMTypeOf(v), cst, dyn };
+            break;
+        }
+        case LLVMBitCast: case LLVMAddrSpaceCast: case LLVMIntToPtr:
+            if (r->nderived == 512) return res_reject(r, user);
+            r->derived[r->nderived++] = user;
+            if (!res_collect(r, user, cst, dyn)) return false;
+            break;
+        case LLVMPtrToInt:
+            // instcombine's round trip between address spaces (ptrtoint + inttoptr): a cast when it is all there is
+            for (void *iu = ts_LLVMGetFirstUse(user); iu; iu = ts_LLVMGetNextUse(iu)) {
+                LLVMValueRef ip = ts_LLVMGetUser(iu);
+                if (!ts_LLVMIsAInstruction(ip) || ts_LLVMGetInstructionOpcode(ip) != LLVMIntToPtr) return res_reject(r, user);
+            }
+            if (r->nderived == 512) return res_reject(r, user);
+            r->derived[r->nderived++] = user;
+            if (!res_collect(r, user, cst, dyn)) return false;
+            break;
+        case LLVMGetElementPtr: {
+            if (ts_LLVMGetOperand(user, 0) != p || r->nderived == 512) return res_reject(r, user);
+            r->derived[r->nderived++] = user;
+            LLVMTypeRef ty = ts_LLVMGetGEPSourceElementType ? ts_LLVMGetGEPSourceElementType(user)
+                                                            : ts_LLVMGetElementType(ts_LLVMTypeOf(p));
+            uint64_t c = cst;
+            LLVMValueRef d = dyn;
+            unsigned nops = (unsigned)ts_LLVMGetNumOperands(user);
+            for (unsigned i = 1; i < nops; i++) {
+                LLVMValueRef idx = ts_LLVMGetOperand(user, i);
+                if (idx == p) return res_reject(r, user);
+                uint64_t es;
+                if (i == 1) es = ts_LLVMABISizeOfType(r->td, ty);
+                else {
+                    LLVMTypeKind k = ts_LLVMGetTypeKind(ty);
+                    if (k == LLVMStructTypeKind) {
+                        unsigned m = (unsigned)ts_LLVMConstIntGetZExtValue(idx);
+                        c += ts_LLVMOffsetOfElement(r->td, ty, m);
+                        ty = ts_LLVMStructGetTypeAtIndex(ty, m);
+                        continue;
+                    }
+                    if (k != LLVMArrayTypeKind) return res_reject(r, user);   // vector element addresses: leave to scratch
+                    ty = ts_LLVMGetElementType(ty);
+                    es = ts_LLVMABISizeOfType(r->td, ty);
+                }
+                if (ts_LLVMIsAConstantInt(idx)) { c += (uint64_t)ts_LLVMConstIntGetSExtValue(idx) * es; continue; }
+                if (ts_LLVMGetTypeKind(ts_LLVMTypeOf(idx)) != LLVMIntegerTypeKind) return res_reject(r, user);
+                ts_LLVMPositionBuilderBefore(r->bld, user);
+                LLVMValueRef x = idx;
+                if (ts_LLVMGetIntTypeWidth(ts_LLVMTypeOf(x)) < 64) x = ts_LLVMBuildSExt(r->bld, x, r->i64, "");
+                else if (ts_LLVMGetIntTypeWidth(ts_LLVMTypeOf(x)) > 64) return res_reject(r, user);
+                x = ts_LLVMBuildMul(r->bld, x, ts_LLVMConstInt(r->i64, es, 0), "");
+                d = d ? ts_LLVMBuildAdd(r->bld, d, x, "") : x;
+            }
+            if (!res_collect(r, user, c, d)) return false;
+            break;
+        }
+        case LLVMCall:
+            if (!res_is_lifetime(user) || r->nlifetime == 64) return res_reject(r, user);
+            r->lifetime[r->nlifetime++] = user;
+            break;
+        default:
+            return res_reject(r, user);
+        }
+    }
+    return true;
+}
+
+// Leaves an access can reach: the one at its constant offset, or for a dynamic offset every leaf of a compatible type
+// (the exact type if some leaf has it: a buffer pointer is not selected among textures).
+static unsigned res_candidates(res_split *r, const res_access *a, unsigned *out)
+{
+    unsigned n = 0;
+    uint64_t size = ts_LLVMStoreSizeOfType(r->td, a->ty);
+    if (!a->dyn) {
+        for (unsigned i = 0; i < r->nleaf; i++)
+            if (r->leaf[i].off == a->cst && res_compatible(r, a->ty, r->leaf[i].ty)) { out[n++] = i; break; }
+        return n;
+    }
+    for (int pass = 0; pass < 2 && !n; pass++)
+        for (unsigned i = 0; i < r->nleaf; i++) {
+            if (ts_LLVMStoreSizeOfType(r->td, r->leaf[i].ty) != size) continue;
+            if (pass == 0 ? r->leaf[i].ty == a->ty : res_compatible(r, a->ty, r->leaf[i].ty)) out[n++] = i;
+        }
+    return n;
+}
+
+// A constant access outside the alloca (dead code for another array count): undefined in the source; the load reads
+// undef, the store is dropped.
+static bool res_out_of_bounds(res_split *r, const res_access *a)
+{
+    return !a->dyn && ((int64_t)a->cst < 0 || a->cst + ts_LLVMStoreSizeOfType(r->td, a->ty) > r->size);
+}
+
+static bool split_one_alloca(res_split *r, LLVMValueRef fn, LLVMValueRef alloca)
+{
+    r->nleaf = r->nacc = r->nderived = r->nlifetime = 0;
+    r->reject = NULL;
+    r->size = ts_LLVMABISizeOfType(r->td, ts_LLVMGetAllocatedType(alloca));
+    if (!res_flatten(r, ts_LLVMGetAllocatedType(alloca), 0) || !r->nleaf) return false;
+    if (!res_collect(r, alloca, 0, NULL)) {
+        if (r->trace) res_trace(alloca, "kept in scratch, use", r->reject);
+        return false;
+    }
+    bool stores_pointer = false;
+    for (unsigned i = 0; i < r->nacc; i++) stores_pointer |= r->acc[i].store && is_ptr_type(r->acc[i].ty);
+    if (!stores_pointer) return false;
+    // Every access must reach at least one leaf before anything is rewritten.
+    unsigned cand[256];
+    for (unsigned i = 0; i < r->nacc; i++)
+        if (!res_candidates(r, &r->acc[i], cand) && !res_out_of_bounds(r, &r->acc[i])) {
+            if (r->trace) res_trace(alloca, "kept in scratch, access matches no field", r->acc[i].inst);
+            return false;
+        }
+
+    LLVMValueRef first = ts_LLVMGetFirstInstruction(ts_LLVMGetEntryBasicBlock(fn));
+    for (unsigned i = 0; i < r->nleaf; i++) {
+        ts_LLVMPositionBuilderBefore(r->bld, first);
+        r->leaf[i].slot = ts_LLVMBuildAlloca(r->bld, r->leaf[i].ty, "res");
+    }
+    for (unsigned i = 0; i < r->nacc; i++) {
+        res_access *a = &r->acc[i];
+        unsigned n = res_candidates(r, a, cand);
+        ts_LLVMPositionBuilderBefore(r->bld, a->inst);
+        LLVMValueRef off = NULL;
+        if (a->dyn) off = a->cst ? ts_LLVMBuildAdd(r->bld, a->dyn, ts_LLVMConstInt(r->i64, a->cst, 0), "") : a->dyn;
+        if (!n) {   // out of bounds
+            if (!a->store) ts_LLVMReplaceAllUsesWith(a->inst, ts_LLVMGetUndef(ts_LLVMTypeOf(a->inst)));
+        } else if (a->store) {
+            LLVMValueRef v = ts_LLVMGetOperand(a->inst, 0);
+            for (unsigned k = 0; k < n; k++) {
+                res_leaf *l = &r->leaf[cand[k]];
+                LLVMValueRef nv = res_cast(r, v, l->ty);
+                if (off) {
+                    LLVMValueRef hit = ts_LLVMBuildICmp(r->bld, LLVMIntEQ, off, ts_LLVMConstInt(r->i64, l->off, 0), "");
+                    nv = ts_LLVMBuildSelect(r->bld, hit, nv, res_load(r, l), "");
+                }
+                ts_LLVMBuildStore(r->bld, nv, l->slot);
+            }
+        } else {
+            LLVMValueRef v = res_cast(r, res_load(r, &r->leaf[cand[0]]), a->ty);
+            for (unsigned k = 1; k < n; k++) {
+                res_leaf *l = &r->leaf[cand[k]];
+                LLVMValueRef hit = ts_LLVMBuildICmp(r->bld, LLVMIntEQ, off, ts_LLVMConstInt(r->i64, l->off, 0), "");
+                v = ts_LLVMBuildSelect(r->bld, hit, res_cast(r, res_load(r, l), a->ty), v, "");
+            }
+            ts_LLVMReplaceAllUsesWith(a->inst, v);
+        }
+        ts_LLVMInstructionEraseFromParent(a->inst);
+    }
+    for (unsigned i = 0; i < r->nlifetime; i++) ts_LLVMInstructionEraseFromParent(r->lifetime[i]);
+    // Derived pointers were recorded before their users: erase from the last.
+    for (unsigned i = r->nderived; i-- > 0;) ts_LLVMInstructionEraseFromParent(r->derived[i]);
+    ts_LLVMInstructionEraseFromParent(alloca);
+    return true;
+}
+
+static bool split_resource_allocas(LLVMModuleRef mod, LLVMValueRef fn)
+{
+    if (!fn || getenv("VMG_NO_SPLIT_RESOURCES")) return false;
+    if (!ts_LLVMCreateBuilderInContext || !ts_LLVMDisposeBuilder || !ts_LLVMPositionBuilderBefore || !ts_LLVMBuildAlloca ||
+        !(ts_LLVMBuildLoad2 || ts_LLVMBuildLoad) || !ts_LLVMBuildStore || !ts_LLVMBuildSelect || !ts_LLVMBuildICmp ||
+        !ts_LLVMBuildAdd || !ts_LLVMBuildMul || !ts_LLVMBuildSExt || !ts_LLVMBuildPointerCast || !ts_LLVMBuildBitCast ||
+        !ts_LLVMConstInt || !ts_LLVMInt64TypeInContext || !ts_LLVMInstructionEraseFromParent || !ts_LLVMGetEntryBasicBlock ||
+        !ts_LLVMGetModuleContext || !ts_LLVMGetUndef)
+        return false;
+    res_split *r = calloc(1, sizeof *r);
+    if (!r) return false;
+    LLVMContextRef ctx = ts_LLVMGetModuleContext(mod);
+    r->td = ts_LLVMCreateTargetData(ts_LLVMGetDataLayoutStr(mod));
+    r->bld = ts_LLVMCreateBuilderInContext(ctx);
+    r->i64 = ts_LLVMInt64TypeInContext(ctx);
+    r->trace = getenv("VMG_TRACE_SPLIT") != NULL;
+    LLVMValueRef allocas[128];
+    unsigned na = 0;
+    for (LLVMBasicBlockRef bb = ts_LLVMGetFirstBasicBlock(fn); bb; bb = ts_LLVMGetNextBasicBlock(bb))
+        for (LLVMValueRef i = ts_LLVMGetFirstInstruction(bb); i && na < 128; i = ts_LLVMGetNextInstruction(i))
+            if (ts_LLVMGetInstructionOpcode(i) == LLVMAlloca) allocas[na++] = i;
+    bool changed = false;
+    for (unsigned i = 0; i < na; i++) changed |= split_one_alloca(r, fn, allocas[i]);
+    ts_LLVMDisposeBuilder(r->bld);
+    ts_LLVMDisposeTargetData(r->td);
+    free(r);
+    return changed;
+}
+
+// Null textures (`texture2d<T>()`, air.get_null_texture_*): is_null_texture of one is true; any other use becomes an
+// undef texture, which both translators already treat as unbound (reads and queries 0, writes dropped).
+static bool fold_null_textures(LLVMModuleRef mod)
+{
+    if (!ts_LLVMGetUndef || !ts_LLVMConstInt || !ts_LLVMInstructionEraseFromParent) return false;
+    bool changed = false;
+    for (LLVMValueRef f = ts_LLVMGetFirstFunction(mod); f; f = ts_LLVMGetNextFunction(f)) {
+        size_t len = 0;
+        const char *n = ts_LLVMGetValueName2(f, &len);
+        if (!n || len < 21 || strncmp(n, "air.get_null_texture", 20)) continue;
+        void *u = ts_LLVMGetFirstUse(f);
+        while (u) {
+            LLVMValueRef call = ts_LLVMGetUser(u);
+            u = ts_LLVMGetNextUse(u);
+            if (!ts_LLVMIsAInstruction(call) || ts_LLVMGetInstructionOpcode(call) != LLVMCall || ts_LLVMGetCalledValue(call) != f) continue;
+            void *cu = ts_LLVMGetFirstUse(call);
+            while (cu) {
+                LLVMValueRef q = ts_LLVMGetUser(cu);
+                cu = ts_LLVMGetNextUse(cu);
+                LLVMValueRef qf = ts_LLVMIsAInstruction(q) && ts_LLVMGetInstructionOpcode(q) == LLVMCall ? ts_LLVMGetCalledValue(q) : NULL;
+                size_t ql = 0;
+                const char *qn = qf && ts_LLVMIsAFunction(qf) ? ts_LLVMGetValueName2(qf, &ql) : NULL;
+                if (!qn || ql < 19 || strncmp(qn, "air.is_null_texture", 19) || ts_LLVMGetOperand(q, 0) != call) continue;
+                ts_LLVMReplaceAllUsesWith(q, ts_LLVMConstInt(ts_LLVMTypeOf(q), 1, 0));
+                ts_LLVMInstructionEraseFromParent(q);
+            }
+            ts_LLVMReplaceAllUsesWith(call, ts_LLVMGetUndef(ts_LLVMTypeOf(call)));
+            ts_LLVMInstructionEraseFromParent(call);
+            changed = true;
+        }
+    }
+    return changed;
+}
+
 static nir_shader *translate_module(const nir_shader_compiler_options *options, LLVMModuleRef mod, const vmg_air_input *in,
                                     vmg_reflection *refl, struct util_dynarray *pool, bool push, char **error)
 {
@@ -2447,6 +2828,17 @@ bool vmg_air_module_load(const vmg_air_input *in, LLVMContextRef *ctx_out, LLVMM
         err = run_passes(mod, "always-inline");
     }
     if (!err) err = run_passes(mod, kCleanupPasses);
+    // A linked function whose signature differs from its reference (address spaces of pointer parameters) is called
+    // through a bitcast, which the inliner skips; instcombine has made those calls direct by now: inline again.
+    if (!err && in->linked_count) {
+        force_inlining(mod, entry_function(mod));
+        err = run_passes(mod, "always-inline");
+        if (!err) err = run_passes(mod, kCleanupPasses);
+    }
+    // Again while it splits something: once a struct is split, an array whose address was stored in it can be too.
+    for (int round = 0; round < 4 && !err && split_resource_allocas(mod, entry_function(mod)); round++)
+        err = run_passes(mod, kCleanupPasses);
+    if (!err && fold_null_textures(mod)) err = run_passes(mod, kCleanupPasses);
     if (err) {
         *error = err;
         ts_LLVMDisposeModule(mod);

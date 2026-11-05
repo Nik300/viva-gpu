@@ -1466,6 +1466,68 @@ static void ref_G4(const isa_case *c, const double *g, double *out) {
     }
 }
 
+// Buffer pointers and a null texture in private memory, indexed dynamically (shape of MPS's ndArray kernels: an
+// array of [[buffer(n)]] pointers in a struct passed by reference). Split into SSA values in A1 (vmg_air.c).
+static const char kC6p[] =
+    "struct Arr { device const float * thread *bufs; ulong n; texture2d<float> tex; };\n"
+    "__attribute__((noinline)) static float rd(thread Arr &a, uint w, uint i) { return a.bufs[w][i] + (is_null_texture(a.tex) ? 0.0 : 100.0); }\n"
+    "kernel void k(device float4 *o [[buffer(0)]], device const float *a [[buffer(1)]], device const float *b [[buffer(2)]], uint2 p [[thread_position_in_grid]]) {\n"
+    "  device const float *bufs[2] = { a, b };\n"
+    "  Arr r; r.bufs = bufs; r.n = 2; r.tex = texture2d<float>();\n"
+    "  device const float *q[2] = { a, a };\n"
+    "  q[p.y & 1] = b;\n"
+    "  if (p.x & 2) q[0] = b;\n"
+    "  device const float *s[2] = { a, b };\n"
+    "  for (uint i = 0; i < (p.y & 3); i++) { device const float *t = s[0]; s[0] = s[1]; s[1] = t; }\n"
+    "  o[p.y * 64 + p.x] = float4(rd(r, p.x & 1, p.y), rd(r, (p.x >> 2) & 1, p.x + 64), q[(p.x >> 3) & 1][p.y + 1], s[p.x & 1][p.x]); }\n";
+static void ref_C6p(const isa_case *c, const double *g, double *out) {
+    PIX(c) {
+        float (*q[2])(int) = { c1a, c1a };
+        q[y & 1] = c1b;
+        if (x & 2) q[0] = c1b;
+        bool swapped = (y & 3) & 1;   // s[] after (y & 3) swaps: pointer phis between two buffers
+        set4(OUT(x, y), ((x & 1) ? c1b : c1a)(y), (((x >> 2) & 1) ? c1b : c1a)(x + 64), q[(x >> 3) & 1](y + 1),
+             (((x & 1) ^ swapped) ? c1b : c1a)(x));
+    }
+}
+
+// MPSGraph's stitching: the struct of buffer pointers and a null texture goes by reference to visible functions linked
+// at pipeline creation (MTLLinkedFunctions), which read and write the buffers by array number.
+static const char kG4s[] =
+    "struct Arr { device float * thread *bufs; ulong n; texture2d<float> tex; };\n"
+    "[[visible]] float pre(thread Arr &a, uint w, uint i);\n"
+    "[[visible]] void post(thread Arr &a, uint w, uint i, float v);\n"
+    "kernel void k(device float4 *o [[buffer(0)]], device float *a [[buffer(1)]], device float *b [[buffer(2)]], device float *s [[buffer(3)]],\n"
+    "              uint2 p [[thread_position_in_grid]]) {\n"
+    "  device float *bufs[3] = { a, b, s };\n"
+    "  Arr r; r.bufs = bufs; r.n = 3; r.tex = texture2d<float>();\n"
+    "  uint i = p.y * 64 + p.x;\n"
+    "  float v = pre(r, p.x & 1, p.y);\n"
+    "  post(r, 2, i, v * 2.0);\n"
+    "  o[i] = float4(v, s[i], float(p.y), float(p.x)); }\n"
+    "[[visible]] float pre(thread Arr &a, uint w, uint i) { return a.bufs[w][i] + (is_null_texture(a.tex) ? 0.0 : 100.0); }\n"
+    "[[visible]] void post(thread Arr &a, uint w, uint i, float v) { a.bufs[w][i] = v + float(a.n); }\n";
+static void setup_G4s(ISAInputs *in) {
+    setup_C1(in);
+    static float s[64 * 64];
+    in.buffers[@3] = buf(in, s, sizeof s);
+}
+static id<MTLComputePipelineState> cpipe_G4s(ISAInputs *in, id<MTLFunction> fn, NSError **err) {
+    id<MTLFunction> f0 = [in.library newFunctionWithName:@"pre"], f1 = [in.library newFunctionWithName:@"post"];
+    MTLComputePipelineDescriptor *d = [MTLComputePipelineDescriptor new];
+    d.computeFunction = fn;
+    MTLLinkedFunctions *lf = [MTLLinkedFunctions linkedFunctions];
+    lf.functions = f0 && f1 ? @[f0, f1] : @[];
+    d.linkedFunctions = lf;
+    return [in.device newComputePipelineStateWithDescriptor:d options:MTLPipelineOptionNone reflection:nil error:err];
+}
+static void ref_G4s(const isa_case *c, const double *g, double *out) {
+    PIX(c) {
+        double v = ((x & 1) ? c1b : c1a)(y);
+        set4(OUT(x, y), v, v * 2 + 3, y, x);
+    }
+}
+
 // ==== The table =============================================================================================================
 
 #define FR(ID) .id = #ID, .kind = ISA_FRAG, .out = ISA_OUT_RGBA32F, .w = 64, .h = 64, .msl = k##ID, .ref = ref_##ID
@@ -1517,6 +1579,8 @@ const isa_case isa_cases[] = {
     {CS(C4, ISA_OUT_F32), .title = "Constant pool: tabelle globali costanti", .vis_lo = -10, .vis_hi = 40},
     {CS(C5, ISA_OUT_F32), .title = "Memoria threadgroup + barriera", .tw = 64, .th = 1, .feats = "C10", .vis_hi = 256},
     {CS(C6, ISA_OUT_F32), .title = "Memoria privata con indice dinamico", .vis_hi = 512},
+    {.id = "C6", .title = "Puntatori a buffer e texture nulla in memoria privata (ndArray di MPS)", .kind = ISA_COMPUTE,
+     .out = ISA_OUT_F32, .w = 64, .h = 64, .msl = kC6p, .ref = ref_C6p, .setup = setup_C1, .feats = "C1,D6", .vis_hi = 1000},
     {CS(C7, ISA_OUT_F32), .title = "Struct: load/store di aggregati, packed_float3", .setup = setup_C7, .feats = "C8", .vis_lo = -64, .vis_hi = 200},
     {CS(C8, ISA_OUT_F32), .title = "memcpy device→device, memset privato", .setup = setup_C8, .feats = "C6,C7", .vis_hi = 256},
     {.id = "C9", .title = "Atomiche device: add, max, or, xor, and, sub", .kind = ISA_COMPUTE, .out = ISA_OUT_U32,
@@ -1599,6 +1663,9 @@ const isa_case isa_cases[] = {
      .mac_note = "argument buffer con puntatori: non tradotti dal percorso NIR (G3)"},
     {CS(G4, ISA_OUT_F32), .title = "Chiamate indirette a visible function (function table)", .cpipe = cpipe_G4, .cbind = cbind_G4,
      .vis_hi = 8000, .mac_note = "visible function table: il percorso NIR fa solo inlining (G4)"},
+    {.id = "G4", .title = "Visible function collegate con struct di puntatori (stitching di MPSGraph)", .kind = ISA_COMPUTE,
+     .out = ISA_OUT_F32, .w = 64, .h = 64, .msl = kG4s, .ref = ref_G4s, .setup = setup_G4s, .cpipe = cpipe_G4s,
+     .feats = "C1,C6,D6", .vis_hi = 2000},
 };
 const int isa_case_count = (int)(sizeof isa_cases / sizeof isa_cases[0]);
 

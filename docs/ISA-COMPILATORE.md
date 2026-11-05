@@ -84,6 +84,46 @@ mancante di atan; cmpxchg che restituisce il valore vecchio; voti e ballot per q
 li legge (`VMG_ISA_CHECK=1` li cerca); sampler constexpr emessi da iOS 16 come semplice i64 (anche NIR); texture su buffer
 come vista sul buffer (anche NIR); gather_compare e voti per quad anche sul percorso NIR.
 
+## Puntatori e texture in memoria privata (MPS / MPSGraph, 2026-11-05 notte)
+
+Sintomo: MPSGraph falliva su entrambi i percorsi ("store of a pointer or texture into memory" sul NIR, "pointer stored
+into memory" sull'ISA). I kernel `ndArray*` di MPSNDArray mettono `device void *buffers[N] [[buffer(k)]]` in un alloca
+(`%arg.array`), lo convertono in address space 8 e lo tengono, con texture nulle e il puntatore ai parametri, nella
+struct `_MPSNDArrays` passata per riferimento alle visible function collegate (`prefixPrimary_*`, `postfixPrimary_*`,
+stitching), che indicizzano i buffer per numero di array. La memoria privata è scratch (byte): un puntatore (memoria +
+binding + offset) o una texture non ci stanno, e SROA non scompone alloca indicizzati dinamicamente o il cui indirizzo
+passa per un addrspacecast.
+
+Correzione in A1 (`vmg_air_module_load`, quindi per NIR e ISA insieme), `vmg_air.c`:
+- `split_resource_allocas`: un alloca in cui si scrive un puntatore viene diviso in un alloca per campo foglia; un
+  accesso con indice dinamico diventa una catena di `select` sui campi raggiungibili (load) o una scrittura condizionale
+  di ciascuno (store); attraversa GEP, bitcast, addrspacecast e il giro ptrtoint/inttoptr di instcombine; accessi
+  costanti fuori dall'alloca (codice morto per un altro numero di array) leggono undef / spariscono. Poi i pass di
+  pulizia promuovono i campi a SSA (phi dove gli store sono condizionali). Si ripete finché scompone qualcosa (una
+  struct scomposta libera l'array il cui indirizzo conteneva). Type punning, memcpy o indirizzo che sfugge: l'alloca
+  resta in scratch come prima. `VMG_NO_SPLIT_RESOURCES=1` lo spegne (anche nella chiave della cache),
+  `VMG_TRACE_SPLIT=1` dice perché un alloca resta in scratch.
+- `fold_null_textures`: `is_null_texture(get_null_texture_*())` = true, ogni altra texture nulla diventa undef (già
+  trattata da entrambi i traduttori come non collegata).
+- Visible function con firma diversa dal riferimento (address space dei parametri): chiamate attraverso un bitcast che
+  l'inliner salta; con funzioni collegate si rifà inline + pulizia dopo il primo giro.
+- Percorso NIR: un phi di puntatori tra buffer diversi (radici diverse) porta lo slot SSBO nel phi (come già l'ISA);
+  phi tra memorie diverse = errore esplicito invece dello slot del primo ingresso.
+- API builder di LLVM opzionali in `vmg_llvm.h` (iOS 16 ha `LLVMBuildLoad`, non `LLVMBuildLoad2`; verificato nella
+  shared cache 20H392).
+
+Verifica sul Mac: nuovi casi `isatest` C6 "Puntatori a buffer e texture nulla in memoria privata" e G4 "Visible function
+collegate con struct di puntatori" (llvmpipe: KO senza la correzione, ok esatti con; anche con `VMG_LLVM_HIDE=
+LLVMBuildLoad2,LLVMRunPasses,LLVMGetGEPSourceElementType`, cioè come il libLLVM di iOS 16). Kernel di MPSNDArray
+(macOS) con stub delle visible function di MPS (ABI dai metadati `air.stitching_info`): NIR 129 → 179, ISA 128 → 174
+tradotti su 396; i 96 ancora "puntatore in memoria" sono quasi tutti visible function non stubbate (`*_4xf`, complessi
+`_cf`), che MPSGraph collega. Nessuna regressione: isatest 92 casi NIR, QuartzCore 137/141 NIR e 141/141 ISA, RenderBox
+47/47, test_vmg.
+
+Limiti rimasti: select/phi tra texture diverse (un array privato di texture indicizzato dinamicamente) non tradotto;
+confronti tra indirizzi di alloca; altri intrinseci di MPSNDArray (`air.is_uniform`, `get_simdgroup_size`,
+`get_descriptor_size_tensor`, ptrtoint/inttoptr generici). Da verificare sul telefono con `mpstest graph`.
+
 ## Prestazioni (2026-11-05 sera): codice alla pari con Mesa sugli shader di CoreAnimation
 
 Sintomo: con `VMG_ISA=1` le animazioni erano più lente che col percorso NIR. Misura sul telefono (swipe della home,
