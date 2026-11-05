@@ -122,7 +122,14 @@ tradotti su 396; i 96 ancora "puntatore in memoria" sono quasi tutti visible fun
 
 Limiti rimasti: select/phi tra texture diverse (un array privato di texture indicizzato dinamicamente) non tradotto;
 confronti tra indirizzi di alloca; altri intrinseci di MPSNDArray (`air.is_uniform`, `get_simdgroup_size`,
-`get_descriptor_size_tensor`, ptrtoint/inttoptr generici). Da verificare sul telefono con `mpstest graph`.
+`get_descriptor_size_tensor`, ptrtoint/inttoptr generici).
+
+Sul telefono la causa decisiva era un'altra: MPSGraph passa le funzioni collegate (`prefixPrimary_f`, `postfixPrimary_f`,
+`middlefixPrimary_f`..., visible function con bitcode AIR) in `MTLLinkedFunctions.privateFunctions`, mentre
+`VMPipeline.m` leggeva solo `functions`: ogni pipeline ndArray arrivava con `linked_count` 0 (visto con `VMG_DUMP_AIR`).
+Con 74960ae (`privateFunctions` letto) `mpstest` è tutto ok sul telefono, `graph` err 2.4e-7 (prima 2.324), anche con
+`VMG_NO_SPLIT_RESOURCES=1`: una volta inlinate le funzioni, sui kernel di questo test basta SROA. Lo split resta per i
+kernel che indicizzano gli array di buffer in modo dinamico (MPSNDArray su macOS: +50 kernel).
 
 ## Prestazioni (2026-11-05 sera): codice alla pari con Mesa sugli shader di CoreAnimation
 
