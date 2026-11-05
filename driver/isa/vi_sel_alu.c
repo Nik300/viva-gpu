@@ -331,23 +331,29 @@ static vi_ref icmp32(S *t, enum va_op op, int cmpf, vi_ref a, vi_ref b)
     return d;
 }
 
-// 64-bit product of two 32-bit values (unsigned or signed), high word.
-static vi_ref mulhi(S *t, vi_ref a, vi_ref b, bool sgn)
+// 32 x 32 -> 64-bit product (IMUL.u64/s64: the multiplier takes 32-bit operands, the low word of each 64-bit source
+// with widen w0, the only full-word widen the hardware accepts; it writes the whole 64-bit product).
+static vi_ref mul_wide(S *t, vi_ref a, vi_ref b, bool sgn)
 {
     uint32_t pa = vi_new_vreg(t->s, 2), pb = vi_new_vreg(t->s, 2), pr = vi_new_vreg(t->s, 2);
-    vi_ref ha = sgn ? shift(t, VA_ARSHIFT_OR_I32, a, vi_imm(31)) : vi_imm(0);
-    vi_ref hb = sgn ? shift(t, VA_ARSHIFT_OR_I32, b, vi_imm(31)) : vi_imm(0);
-    vi_ref parts[4] = { a, ha, b, hb };
+    vi_ref parts[4] = { a, vi_imm(0), b, vi_imm(0) };
     uint32_t regs[2] = { pa, pb };
     for (unsigned k = 0; k < 4; k++) {
         vi_instr *I = parts[k].kind == VI_IMM ? E(t, VA_MOV_IMM_I32) : E(t, VA_MOV_I32);
         if (parts[k].kind == VI_IMM) vi_set(I, VAF_imm1w, parts[k].value); else I->src[0] = parts[k];
         I->dest = vi_vreg(regs[k / 2], k % 2, 1);
     }
-    vi_instr *I = E(t, VA_IMUL_U64);
+    vi_instr *I = E(t, sgn ? VA_IMUL_S64 : VA_IMUL_U64);
     I->dest = vi_vreg(pr, 0, 2); I->src[0] = vi_vreg(pa, 0, 2); I->src[1] = vi_vreg(pb, 0, 2);
-    vi_set(I, VAF_widen0, 0); vi_set(I, VAF_widen1, 0);
-    return sel_mov32(t, vi_vreg(pr, 1, 1));
+    vi_set(I, VAF_widen0, VA_WIDEN_INT_M_W0); vi_set(I, VAF_widen1, VA_WIDEN_INT_M_W0);
+    return vi_vreg(pr, 0, 2);
+}
+
+// 64-bit product of two 32-bit values (unsigned or signed), high word.
+static vi_ref mulhi(S *t, vi_ref a, vi_ref b, bool sgn)
+{
+    vi_ref p = mul_wide(t, a, b, sgn);
+    return sel_mov32(t, vi_vreg(p.value, 1, 1));
 }
 
 static vi_ref udiv(S *t, vi_ref n, vi_ref d, bool mod)
@@ -472,7 +478,23 @@ static sv *int64_op(S *t, int op, sv **args)
     switch (op) {
     case OP_ADD: o = VA_IADD_U64; break;
     case OP_SUB: o = VA_ISUB_U64; break;
-    case OP_MUL: o = VA_IMUL_U64; break;
+    case OP_MUL: {
+        // lo(a) * lo(b) as a 64-bit product, plus the cross terms in the high word
+        sel_use(t, VMG_ISA_E9);
+        unsigned n = args[0]->ncomp;
+        sv *r = sv_val(t, 64, n);
+        sv *a = sv_materialize(t, args[0]), *b = sv_materialize(t, args[1]);
+        for (unsigned c = 0; c < n; c++) {
+            vi_ref al = vi_vreg(a->vreg, 2 * c, 1), ah = vi_vreg(a->vreg, 2 * c + 1, 1);
+            vi_ref bl = vi_vreg(b->vreg, 2 * c, 1), bh = vi_vreg(b->vreg, 2 * c + 1, 1);
+            vi_ref p = mul_wide(t, al, bl, false);
+            vi_ref cross = sel_alu2(t, VA_IADD_U32, sel_alu2(t, VA_IMUL_U32, al, bh), sel_alu2(t, VA_IMUL_U32, ah, bl));
+            vi_instr *I = E(t, VA_MOV_I32); I->dest = vi_vreg(r->vreg, 2 * c, 1); I->src[0] = vi_vreg(p.value, 0, 1);
+            vi_ref hi = sel_alu2(t, VA_IADD_U32, vi_vreg(p.value, 1, 1), cross);
+            I = E(t, VA_MOV_I32); I->dest = vi_vreg(r->vreg, 2 * c + 1, 1); I->src[0] = hi;
+        }
+        return r;
+    }
     case OP_AND: o = VA_AND_I64; break;
     case OP_OR: o = VA_OR_I64; break;
     case OP_XOR: o = VA_XOR_I64; break;

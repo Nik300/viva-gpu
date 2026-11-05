@@ -1284,7 +1284,7 @@ enum va_field {
 #define VA_Z_M_Z 1
 enum va_kind { VA_K_UINT, VA_K_INT, VA_K_SRC, VA_K_SRC64, VA_K_ENUM, VA_K_ZERO, VA_K_IGNORE };
 enum va_unit { VA_UNIT_FMA, VA_UNIT_CVT, VA_UNIT_SFU, VA_UNIT_MSG, VA_UNIT_NONE };
-struct va_field_info { uint16_t field; uint8_t pos, width, kind, shift, align; uint8_t has_exact, has_default, computed; int64_t exact, def; };
+struct va_field_info { uint16_t field; uint8_t pos, width, kind, shift, align; uint8_t has_exact, has_default, computed; int64_t exact, def; uint64_t allowed; };
 struct va_op_info { const char *name, *variant; uint8_t unit; uint8_t nsrc; uint8_t has_dest, sr_read, sr_write;
     uint16_t nfields; const struct va_field_info *fields; int64_t (*compute)(unsigned field, const int64_t *v); };
 extern const struct va_op_info va_op_info[VA_OP_COUNT];

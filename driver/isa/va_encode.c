@@ -33,6 +33,11 @@ int va_encode(enum va_op op, const va_vals *x, uint64_t *out, char *err, size_t 
                      va_field_name[f->field]);
             return -1;
         }
+        if (f->allowed && (val < 0 || val > 63 || !((f->allowed >> val) & 1))) {
+            snprintf(err, errsz, "%s%s%s: field %s = %lld not allowed", oi->name, oi->variant ? "." : "", oi->variant ? oi->variant : "",
+                     va_field_name[f->field], (long long)val);
+            return -1;
+        }
         if (f->align && (val % f->align)) {
             snprintf(err, errsz, "%s: field %s = %lld not aligned to %u", oi->name, va_field_name[f->field], (long long)val, f->align);
             return -1;

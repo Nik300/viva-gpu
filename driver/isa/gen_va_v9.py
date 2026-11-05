@@ -111,7 +111,7 @@ def main(xml, out):
             h.append(f'#define {p}_{ident(n).upper()} {v}')
     h.append('enum va_kind { VA_K_UINT, VA_K_INT, VA_K_SRC, VA_K_SRC64, VA_K_ENUM, VA_K_ZERO, VA_K_IGNORE };')
     h.append('enum va_unit { VA_UNIT_FMA, VA_UNIT_CVT, VA_UNIT_SFU, VA_UNIT_MSG, VA_UNIT_NONE };')
-    h.append('struct va_field_info { uint16_t field; uint8_t pos, width, kind, shift, align; uint8_t has_exact, has_default, computed; int64_t exact, def; };')
+    h.append('struct va_field_info { uint16_t field; uint8_t pos, width, kind, shift, align; uint8_t has_exact, has_default, computed; int64_t exact, def; uint64_t allowed; };')
     h.append('struct va_op_info { const char *name, *variant; uint8_t unit; uint8_t nsrc; uint8_t has_dest, sr_read, sr_write;')
     h.append('    uint16_t nfields; const struct va_field_info *fields; int64_t (*compute)(unsigned field, const int64_t *v); };')
     h.append('extern const struct va_op_info va_op_info[VA_OP_COUNT];')
@@ -131,7 +131,7 @@ def main(xml, out):
             pos, width = int(f.get('pos')), int(f.get('width'))
             if f.tag == 'reserved':
                 k = 'VA_K_ZERO' if f.get('type') == 'zero' else 'VA_K_IGNORE'
-                fl.append(f'{{ VAF_COUNT, {pos}, {width}, {k}, 0, 0, 1, 0, 0, 0, 0 }}')
+                fl.append(f'{{ VAF_COUNT, {pos}, {width}, {k}, 0, 0, 1, 0, 0, 0, 0, 0 }}')
                 continue
             name = f.get('name')
             ftype = f.get('type')
@@ -154,11 +154,18 @@ def main(xml, out):
                 has_def = 1
                 x = f.get('default')
                 dflt = enum_value(ftype, x) if ftype in enums else int(x, 0)
+            # restrict="a b c": the only values the hardware accepts (enum fields), as a bit mask (0 = any)
+            allowed = 0
+            if f.get('restrict') and ftype in enums:
+                for x in f.get('restrict').split():
+                    val = enum_value(ftype, x)
+                    if val < 64:
+                        allowed |= 1 << val
             ex = f.find('expression')
             if ex is not None:
                 computed = 1
                 comp.append((fid(name), expr(ex, ftype)))
-            fl.append(f'{{ VAF_{ident(name)}, {pos}, {width}, {kind}, {shift}, {align}, {has_exact}, {has_def}, {computed}, {exact}, {dflt} }}')
+            fl.append(f'{{ VAF_{ident(name)}, {pos}, {width}, {kind}, {shift}, {align}, {has_exact}, {has_def}, {computed}, {exact}, {dflt}, {hex(allowed)}ull }}')
         c.append(f'static const struct va_field_info f_{n}[] = {{ {", ".join(fl)} }};')
         cf = 'NULL'
         if comp:
