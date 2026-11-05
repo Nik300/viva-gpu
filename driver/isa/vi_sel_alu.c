@@ -216,7 +216,8 @@ static vi_ref fop(S *t, int op, vi_ref *a, unsigned nargs)
     case OP_RSQRT: return f1(t, VA_FRSQ_F32, a[0]);
     case OP_RCP: return f1(t, VA_FRCP_F32, a[0]);
     case OP_SQRT: {
-        // x * rsqrt(x), 0 for x = 0
+        // 1 / rsqrt(x), as Mesa does (rsqrt(0) = inf, 1 / inf = 0); VMG_ISA_NO_FOLD: x * rsqrt(x), 0 for x = 0
+        if (!getenv("VMG_ISA_NO_FOLD")) return f1(t, VA_FRCP_F32, f1(t, VA_FRSQ_F32, a[0]));
         vi_ref m = fmul(t, a[0], f1(t, VA_FRSQ_F32, a[0]));
         return sel_csel(t, VA_CMPF_M_EQ, VA_CSEL_F32, a[0], vi_imm(0), vi_imm(0), m);
     }

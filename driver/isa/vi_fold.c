@@ -366,6 +366,39 @@ static bool peephole(vi_shader *s, defmap *m, vi_instr *I)
     return false;
 }
 
+// fabs / fneg feeding a float instruction that has abs/neg modifiers on that source: the modifier instead (Mesa's
+// bi_opt_mod_prop). Valhall applies abs before neg.
+static bool mod_consumer(enum va_op op)
+{
+    return op == VA_FADD_F32 || op == VA_FMUL_F32 || op == VA_FMA_F32 || op == VA_FMIN_F32 || op == VA_FMAX_F32 ||
+           op == VA_FCMP_F32 || op == VA_FCMP_OR_F32;
+}
+
+static bool mod_prop(vi_shader *s, defmap *m, vi_instr *I)
+{
+    if (!mod_consumer(I->op)) return false;
+    static const enum va_field absf[3] = { VAF_abs0, VAF_abs1, VAF_abs2 }, negf[3] = { VAF_neg0, VAF_neg1, VAF_neg2 };
+    static const enum va_field widen[3] = { VAF_widen0, VAF_widen1, VAF_widen2 };
+    bool progress = false;
+    for (unsigned k = 0; k < 3; k++) {
+        if (I->src[k].kind != VI_VREG || !va_has_field(I->op, absf[k]) || !va_has_field(I->op, negf[k])) continue;
+        if (fval(I, widen[k], 0)) continue;
+        vi_instr *D = def_of(s, m, I->src[k]);
+        if (!D || (D->op != VA_FABS_F32 && D->op != VA_FNEG_F32)) continue;
+        static const enum va_field none[] = { VAF_COUNT };
+        if (!only_fields(D, none) || !stable(s, m, D->src[0]) || D->src[0].kind == VI_SPECIAL) continue;
+        if (D->src[0].kind == VI_VREG && D->src[0].count > 1) continue;
+        vi_ref x = D->src[0];
+        x.last = false;
+        if (x.kind == VI_VREG) x.count = 1;
+        if (D->op == VA_FABS_F32) va_set(&I->f, absf[k], 1);
+        else if (!fval(I, absf[k], 0)) va_set(&I->f, negf[k], !fval(I, negf[k], 0));
+        I->src[k] = x;
+        progress = true;
+    }
+    return progress;
+}
+
 // One round of folding + peepholes over the whole shader; true on progress. Copy propagation and dead code
 // elimination (vi_opt.c) clean up after it.
 bool vi_fold(vi_shader *s)
@@ -382,6 +415,7 @@ bool vi_fold(vi_shader *s)
         if (fold_value(s, &m, I, &v)) { make_mov(I, vi_imm(v)); progress = true; continue; }
         // (the def map stays valid: peepholes only change sources and opcodes, never which words are written)
         if (peephole(s, &m, I)) progress = true;
+        if (mod_prop(s, &m, I)) progress = true;
     }
     defmap_free(&m);
     return progress;

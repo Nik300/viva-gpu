@@ -6,6 +6,7 @@
 // operation's identity for inactive lanes. Derivatives are differences with the neighbour in the 2x2 quad
 // (CLPER.xor 1 / 2 in groups of 4), sign-corrected for odd lanes, as the hardware's quad layout requires.
 #include "vi_sel.h"
+#include <stdlib.h>
 #include <string.h>
 
 static vi_ref lane_id(S *t) { return sel_mov32(t, vi_special(3, 2)); }
@@ -247,7 +248,8 @@ sv *sel_subgroup(S *t, LLVMValueRef inst, const char *name)
 
 // ---- Derivatives (E12) ------------------------------------------------------------------------------------------------
 
-static vi_ref derivative(S *t, vi_ref x, unsigned axis, bool coarse)
+// signed = false: the caller only uses the magnitude (fwidth), so the per-lane sign fix-up is left out
+static vi_ref derivative(S *t, vi_ref x, unsigned axis, bool coarse, bool sign)
 {
     vi_ref left, right;
     int g = VA_CLPER_SUBGROUP_SIZE_M_SUBGROUP4;
@@ -260,6 +262,7 @@ static vi_ref derivative(S *t, vi_ref x, unsigned axis, bool coarse)
     right = clper(t, x, vi_imm(axis), VA_CLPER_LANE_OP_M_XOR, g, VA_CLPER_INACTIVE_RESULT_M_ZERO);
     vi_ref d = sel_tmp(t);
     vi_instr *I = E(t, VA_FADD_F32); I->dest = d; I->src[0] = right; I->src[1] = left; vi_set(I, VAF_neg1, 1);
+    if (!sign) return d;
     // flip the sign on the lanes where the neighbour is on the other side: bit (axis) of the lane id
     vi_ref lane = lane_id(t);
     if (axis == 2) { vi_ref m = sel_tmp(t); I = E(t, VA_AND_I32); I->dest = m; I->src[0] = lane; I->src[2] = vi_imm(2); lane = m; }
@@ -282,11 +285,12 @@ sv *sel_derivative(S *t, LLVMValueRef inst, const char *name)
         vi_ref v = sv_comp32(t, x, c, X_F32);
         vi_ref d;
         if (fw) {
-            vi_ref dx = derivative(t, v, 1, coarse), dy = derivative(t, v, 2, coarse);
+            bool sign = getenv("VMG_ISA_NO_FOLD") != NULL;   // |ddx| + |ddy| does not need the signs
+            vi_ref dx = derivative(t, v, 1, coarse, sign), dy = derivative(t, v, 2, coarse, sign);
             vi_ref e = sel_tmp(t);
             vi_instr *I = E(t, VA_FADD_F32); I->dest = e; I->src[0] = dx; I->src[1] = dy; vi_set(I, VAF_abs0, 1); vi_set(I, VAF_abs1, 1);
             d = e;
-        } else d = derivative(t, v, axis, coarse);
+        } else d = derivative(t, v, axis, coarse, true);
         r[c] = d;
     }
     // every CLPER above needs the helper lanes of the quad
