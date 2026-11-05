@@ -280,17 +280,35 @@ static vi_ref local_address(S *t, sv *p, int *imm)
 vi_ref sel_ssbo_handle(S *t, const sv *p) { (void)t; return p->slot >= 0 ? vi_imm((6u << 24) | (unsigned)p->slot) : p->dyn_handle; }
 #define ssbo_handle(t, slot_unused) sel_ssbo_handle(t, p)
 
-// Address of an SSBO byte offset (stores, atomics).
+// Address of an SSBO byte offset (stores, atomics, loads through a pointer chosen at run time).
+// The buffer handle of LEA_PKA/LD_PKA is read from one lane for the whole warp: a pointer whose buffer differs between
+// threads (select/phi of [[buffer(a)]] and [[buffer(b)]]) took one lane's buffer everywhere on the phone (C1). Such a
+// pointer gets the address in every candidate buffer (uniform handles) and each thread selects its own.
 static vi_ref ssbo_address(S *t, sv *p)
 {
-    uint32_t a = vi_new_vreg(t->s, 2);
     vi_ref o = sv_word(t, p->off, 0);
     if (o.kind == VI_IMM) o = sel_mov32(t, o);
-    vi_instr *I = E(t, VA_LEA_PKA);
-    I->sw = vi_vreg(a, 0, 2);
-    I->src[0] = o;
-    I->src[1] = ssbo_handle(t, p->slot);
-    return vi_vreg(a, 0, 2);
+    if (p->slot >= 0 || !p->slot_mask) {
+        uint32_t a = vi_new_vreg(t->s, 2);
+        vi_instr *I = E(t, VA_LEA_PKA);
+        I->sw = vi_vreg(a, 0, 2);
+        I->src[0] = o;
+        I->src[1] = ssbo_handle(t, p->slot);
+        return vi_vreg(a, 0, 2);
+    }
+    vi_ref lo = vi_imm(0), hi = vi_imm(0);
+    for (uint32_t m = p->slot_mask; m; m &= m - 1) {
+        unsigned slot = (unsigned)__builtin_ctz(m);
+        uint32_t a = vi_new_vreg(t->s, 2);
+        vi_instr *I = E(t, VA_LEA_PKA);
+        I->sw = vi_vreg(a, 0, 2);
+        I->src[0] = o;
+        I->src[1] = vi_imm((6u << 24) | slot);
+        vi_ref h = vi_imm((6u << 24) | slot);
+        lo = sel_csel(t, VA_CMPF_M_EQ, VA_CSEL_U32, p->dyn_handle, h, vi_vreg(a, 0, 1), lo);
+        hi = sel_csel(t, VA_CMPF_M_EQ, VA_CSEL_U32, p->dyn_handle, h, vi_vreg(a, 1, 1), hi);
+    }
+    return sel_pair(t, lo, hi);
 }
 
 // 64-bit address of a global pointer + byte offset; *imm takes a small constant offset when possible.
@@ -317,6 +335,20 @@ static vi_ref load_words(S *t, sv *p, unsigned words, unsigned extra)
     if (extra) off = off.kind == VI_IMM ? vi_imm(off.value + extra) : sel_iadd_imm(t, off, (int32_t)extra);
     switch (p->space) {
     case SP_SSBO: case SP_POOL: {
+        if (p->space == SP_SSBO && p->slot < 0 && p->slot_mask) {
+            // buffer chosen per thread: a global load at its address (see ssbo_address)
+            sv q = *p;
+            sv o2 = { .kind = SV_VAL, .bits = 32, .ncomp = 1 };
+            if (off.kind == VI_IMM) { o2.is_const = true; o2.cw[0] = off.value; } else o2.vreg = off.value;
+            q.off = &o2;
+            vi_instr *I = E(t, kLoad[words]);
+            I->sw = vi_vreg(d, 0, words);
+            I->src[0] = ssbo_address(t, &q);
+            vi_set(I, VAF_offset, 0);
+            if (words == 1) vi_set(I, VAF_lane, VA_LOAD_LANE_32_M_NONE);
+            I->memory = true;
+            break;
+        }
         vi_ref o = off.kind == VI_IMM ? sel_mov32(t, off) : off;
         vi_instr *I = E(t, kLdPka[words]);
         I->sw = vi_vreg(d, 0, words);

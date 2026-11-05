@@ -2373,6 +2373,29 @@ static nir_shader *translate_module(const nir_shader_compiler_options *options, 
             NIR_PASS(progress, s, nir_opt_remove_phis);
         } while (progress);
         NIR_PASS(_, s, nir_remove_dead_variables, nir_var_function_temp | nir_var_shader_temp, NULL);
+        // Mali reads a buffer index from one lane for the whole warp: an SSBO chosen per thread (select/phi of two
+        // [[buffer]] pointers) took one lane's buffer everywhere (C1 on the phone). Such accesses become a loop over
+        // the distinct indices (Gallium's Panfrost does not run this pass; panvk does).
+        {
+            bool any = false;
+            nir_foreach_function_impl(impl, s) nir_foreach_block(blk, impl) nir_foreach_instr(ins, blk) {
+                if (ins->type != nir_instr_type_intrinsic) continue;
+                nir_intrinsic_instr *in = nir_instr_as_intrinsic(ins);
+                int idx = -1;
+                switch (in->intrinsic) {
+                case nir_intrinsic_load_ssbo: case nir_intrinsic_ssbo_atomic: case nir_intrinsic_ssbo_atomic_swap: idx = 0; break;
+                case nir_intrinsic_store_ssbo: idx = 1; break;
+                default: break;
+                }
+                if (idx < 0 || nir_src_is_const(in->src[idx])) continue;
+                nir_intrinsic_set_access(in, nir_intrinsic_access(in) | ACCESS_NON_UNIFORM);
+                any = true;
+            }
+            if (any) {
+                const nir_lower_non_uniform_access_options o = { .types = nir_lower_non_uniform_ssbo_access };
+                NIR_PASS(_, s, nir_lower_non_uniform_access, &o);
+            }
+        }
         nir_shader_gather_info(s, nir_shader_get_entrypoint(s));
         // gather_info recomputes these from variables; keep the slots the translation used.
         for (unsigned i = 0; i < VMG_MAX_TEXTURES; i++) {
