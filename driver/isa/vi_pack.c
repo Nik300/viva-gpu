@@ -70,6 +70,31 @@ bool vi_lower_constants(vi_shader *s)
             M->src[0] = *r;
             *r = vi_vreg(v, 0, 1);
         }
+        // At most 64 bits of distinct FAU values per instruction outside the message unit (Mesa's va_validate_fau):
+        // two 32-bit words among table constants, uniforms and special entries. CSEL x, y, #2.0, #1.0 read three
+        // (zero, 2.0, 1.0) and returned garbage on the phone (F3). Extra values go to registers.
+        bool two_indices = vi_is_msg(I) && I->op != VA_ATEST && I->op != VA_BLEND;
+        if (!two_indices) {
+            vi_ref seen[4]; unsigned nseen = 0;
+            for (unsigned k = 0; k < 4; k++) {
+                vi_ref *r = refs[k];
+                if ((r->kind != VI_TABLE && r->kind != VI_FAU && r->kind != VI_SPECIAL) || r->count > 1) continue;
+                bool dup = false;
+                for (unsigned q = 0; q < nseen; q++)
+                    if (seen[q].kind == r->kind && seen[q].value == r->value && seen[q].word == r->word) dup = true;
+                if (dup) continue;
+                if (nseen < 2) { seen[nseen++] = *r; continue; }
+                vi_ref old = *r;
+                vi_builder b = { s, blk, I };
+                uint32_t v = vi_new_vreg(s, 1);
+                vi_instr *M = vi_emit(&b, VA_MOV_I32);
+                M->dest = vi_vreg(v, 0, 1);
+                M->src[0] = old;
+                for (unsigned q = k; q < 4; q++)
+                    if (refs[q]->kind == old.kind && refs[q]->value == old.value && refs[q]->word == old.word && refs[q]->count <= 1)
+                        *refs[q] = vi_vreg(v, 0, 1);
+            }
+        }
     }
     return true;
 }

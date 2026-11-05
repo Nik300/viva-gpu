@@ -561,5 +561,15 @@ sv *sel_texture(S *t, LLVMValueRef inst, const char *name)
     vi_set(I, VAF_wide_indices, 0);
     vi_set(I, VAF_skip, 0);
     if (implicit && t->stage == MESA_SHADER_FRAGMENT) { I->helpers = true; t->info.helpers = true; }
+    if (gather) {
+        // TEX_GATHER returns the footprint as (h0, h1, h2, h3); Metal's order is (h2, h3, h1, h0) (what Mesa's code for
+        // the same shader writes out: the D3 gather had channels 2 and 3 swapped on the phone).
+        uint32_t g = vi_new_vreg(t->s, 4);
+        static const unsigned order[4] = { 2, 3, 1, 0 };
+        for (unsigned k = 0; k < 4; k++) {
+            vi_instr *M = E(t, VA_MOV_I32); M->dest = vi_vreg(g, k, 1); M->src[0] = vi_vreg(d, order[k], 1);
+        }
+        d = g;
+    }
     return tex_result(t, rt, vi_vreg(d, 0, 4), util_bitcount(wm), ((depth && !gather) || cmp) && !gather);
 }

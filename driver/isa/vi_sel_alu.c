@@ -991,7 +991,7 @@ static vi_ref c_log(S *t, vi_ref *a) { return fmul(t, flog2(t, a[0]), vi_imm(fbi
 static vi_ref c_log10(S *t, vi_ref *a) { return fmul(t, flog2(t, a[0]), vi_imm(fbits((float)(M_LN2 / M_LN10)))); }
 static vi_ref c_tan(S *t, vi_ref *a) { return fmul(t, fsincos(t, a[0], false), f1(t, VA_FRCP_F32, fsincos(t, a[0], true))); }
 
-// atan(x) for |x| <= 1: polynomial (max error ~1e-5), extended with pi/2 - atan(1/x).
+// atan(x) for |x| <= 1: polynomial (max error ~1e-5, six terms), extended with pi/2 - atan(1/x).
 static vi_ref atan_core(S *t, vi_ref x)
 {
     vi_ref ax = f1(t, VA_FABS_F32, x);
@@ -1000,10 +1000,10 @@ static vi_ref atan_core(S *t, vi_ref x)
     vi_set(I, VAF_cmpf, VA_CMPF_M_GT); vi_set(I, VAF_result_type, VA_CMP_RESULT_TYPE_M_I1);
     vi_ref z = sel_csel(t, VA_CMPF_M_NE, VA_CSEL_U32, big, vi_imm(0), f1(t, VA_FRCP_F32, ax), ax);
     vi_ref z2 = fmul(t, z, z);
-    // atan(z) ~ z * (c0 + z2*(c1 + z2*(c2 + z2*(c3 + z2*c4))))
-    static const float c[5] = { 0.99997726f, -0.33262347f, 0.19354346f, -0.11643287f, 0.05265332f };
-    vi_ref p = vi_imm(fbits(c[4]));
-    for (int k = 3; k >= 0; k--) p = ffma(t, p, z2, vi_imm(fbits(c[k])));
+    // atan(z) ~ z * (c0 + z2*(c1 + ... + z2*c5)) (the five-term form missed c5 and was off by ~0.01 near |z| = 1)
+    static const float c[6] = { 0.99997726f, -0.33262347f, 0.19354346f, -0.11643287f, 0.05265332f, -0.01172120f };
+    vi_ref p = vi_imm(fbits(c[5]));
+    for (int k = 4; k >= 0; k--) p = ffma(t, p, z2, vi_imm(fbits(c[k])));
     vi_ref r = fmul(t, p, z);
     vi_ref rb = fadd(t, vi_imm(fbits(1.57079633f)), r, true);
     r = sel_csel(t, VA_CMPF_M_NE, VA_CSEL_U32, big, vi_imm(0), rb, r);

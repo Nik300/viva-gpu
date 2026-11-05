@@ -44,6 +44,18 @@ static vi_ref first_lane(S *t)
     return d;
 }
 
+// The 4 bits of a SIMD-group mask that belong to the thread's quad (quad_any/all/ballot are per quad).
+static vi_ref quad_bits(S *t, vi_ref m)
+{
+    vi_ref base = sel_tmp(t);
+    vi_instr *I = E(t, VA_AND_I32); I->dest = base; I->src[0] = lane_id(t); I->src[2] = vi_imm(~3u);
+    vi_ref sh = sel_tmp(t);
+    I = E(t, VA_RSHIFT_OR_I32); I->dest = sh; I->src[0] = m; I->src[1] = base; I->src[2] = vi_imm(0);
+    vi_ref r = sel_tmp(t);
+    I = E(t, VA_AND_I32); I->dest = r; I->src[0] = sh; I->src[2] = vi_imm(15u);
+    return r;
+}
+
 static sv *arg(S *t, LLVMValueRef inst, unsigned i)
 {
     if (i >= (unsigned)ts_LLVMGetNumArgOperands(inst)) SFAIL(t, "missing argument");
@@ -206,6 +218,7 @@ sv *sel_subgroup(S *t, LLVMValueRef inst, const char *name)
         bool all = sel_name_is(op, "all");
         if (all) b = sel_alu2(t, VA_ISUB_S32, vi_imm(1), b);   // !b
         vi_ref m = ballot(t, b);
+        if (quad) m = quad_bits(t, m);
         vi_ref r = sel_tmp(t);
         vi_instr *I = E(t, VA_ICMP_U32); I->dest = r; I->src[0] = m; I->src[1] = vi_imm(0);
         vi_set(I, VAF_cmpf, all ? VA_CMPF_M_EQ : VA_CMPF_M_NE); vi_set(I, VAF_result_type, VA_CMP_RESULT_TYPE_M_I1);
@@ -221,6 +234,7 @@ sv *sel_subgroup(S *t, LLVMValueRef inst, const char *name)
     if (sel_name_is(op, "ballot")) {
         USE(t, F4);
         vi_ref m = ballot(t, sv_comp32(t, x, 0, X_ZEXT));
+        if (quad) m = quad_bits(t, m);
         vi_ref w[2] = { m, vi_imm(0) };
         sv *v = sv_from_comps32(t, 32, 2, w);
         unsigned b = 64, n = 1; bool f;

@@ -1706,7 +1706,7 @@ static val *texture(T *t, LLVMValueRef inst, const char *name)
         t->smp_vars[sv->index] = v;
     }
     nir_def *d = &tex->def;
-    if ((depth && !gather) || cmp) d = nir_channel(b, d, 0);
+    if ((depth || cmp) && !gather) d = nir_channel(b, d, 0);   // gather_compare returns four results
     return tex_result(t, rt, d);
 }
 
@@ -1800,6 +1800,14 @@ static val *subgroup(T *t, LLVMValueRef inst, const char *name)
     else if (name_is(op, "product")) r = nir_reduce(b, x, .reduction_op = is_float(ts_LLVMTypeOf(inst)) ? nir_op_fmul : nir_op_imul, .cluster_size = quad ? 4 : 0);
     else if (name_is(op, "min")) r = nir_reduce(b, x, .reduction_op = is_float(ts_LLVMTypeOf(inst)) ? nir_op_fmin : strstr(name, ".u.") ? nir_op_umin : nir_op_imin, .cluster_size = quad ? 4 : 0);
     else if (name_is(op, "max")) r = nir_reduce(b, x, .reduction_op = is_float(ts_LLVMTypeOf(inst)) ? nir_op_fmax : strstr(name, ".u.") ? nir_op_umax : nir_op_imax, .cluster_size = quad ? 4 : 0);
+    else if (quad && (name_is(op, "all") || name_is(op, "any") || name_is(op, "ballot"))) {
+        // per quad: the 4 bits of the SIMD-group ballot that belong to the thread's quad
+        bool all = name_is(op, "all");
+        nir_def *m = nir_ballot(b, 1, 32, all ? nir_inot(b, x) : x);
+        nir_def *base = nir_iand_imm(b, nir_load_subgroup_invocation(b), ~3u);
+        nir_def *qb = nir_iand_imm(b, nir_ushr(b, m, base), 15);
+        r = name_is(op, "ballot") ? nir_u2uN(b, qb, 64) : all ? nir_ieq_imm(b, qb, 0) : nir_ine_imm(b, qb, 0);
+    }
     else if (name_is(op, "all")) r = nir_vote_all(b, 1, x);
     else if (name_is(op, "any")) r = nir_vote_any(b, 1, x);
     else if (name_is(op, "is_first")) r = nir_elect(b, 1);
