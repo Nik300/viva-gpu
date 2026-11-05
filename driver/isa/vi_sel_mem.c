@@ -363,9 +363,13 @@ static vi_ref load_words(S *t, sv *p, unsigned words, unsigned extra)
         if (words == 1) vi_set(I, VAF_lane, VA_LOAD_LANE_32_M_NONE);
         break;
     }
-    case SP_PUSH:
-        // (VMG_ISA_PUSH_LD=1, diagnosis: read the window with LD_PKA from constant buffer 0 instead of FAU)
-        if (off.kind == VI_IMM && !getenv("VMG_ISA_PUSH_LD")) {
+    case SP_PUSH: {
+        // Compute kernels read the window with LD_PKA from constant buffer 0: through FAU, MPS's Gaussian blur
+        // (D2F6H/V) read wrong parameters on the phone although its FAU layout matched the instructions (cause not
+        // found yet; VMG_ISA_PUSH_FAU_COMPUTE=1 brings the FAU path back for compute, VMG_ISA_PUSH_LD=1 uses LD_PKA
+        // for every stage).
+        bool fau_ok = !getenv("VMG_ISA_PUSH_LD") && (t->stage != MESA_SHADER_COMPUTE || getenv("VMG_ISA_PUSH_FAU_COMPUTE"));
+        if (off.kind == VI_IMM && fau_ok) {
             bool ok = true;
             vi_ref w[4];
             for (unsigned k = 0; k < words && ok; k++) { w[k] = sel_fau_ubo(t, VI_UBO_CB0, off.value + 4 * k); if (!w[k].kind) ok = false; }
@@ -384,6 +388,7 @@ static vi_ref load_words(S *t, sv *p, unsigned words, unsigned extra)
             if (words == 1) vi_set(I, VAF_lane, VA_LOAD_LANE_32_M_NONE);
         }
         break;
+    }
     default: {
         sv q = *p;
         sv o2 = { .kind = SV_VAL, .bits = 32, .ncomp = 1 };

@@ -292,6 +292,14 @@ static bool compile_one(const vmg_air_input *in, const vmg_isa_options *opt, LLV
         else if (trace) {
             fprintf(stderr, "vmg-isa: %s: %u bytes, %u work registers (%u live at most), %u spills\n", fname ? fname : "?", bin->size - start, t->s->work_regs, t->s->max_live, t->s->spills);
             disassemble_valhall(stderr, (uint8_t *)bin->data + start, bin->size - start, false);
+            if (fau) {
+                fprintf(stderr, "vmg-isa: FAU %u words:", fau->count);
+                for (unsigned i = 0; i < fau->count; i++) {
+                    if (BITSET_TEST(fau->is_const, i)) fprintf(stderr, " [%u]=#%x", i, fau->words[i].constant);
+                    else fprintf(stderr, " [%u]=ubo%u+%u", i, fau->words[i].relocation.ubo, fau->words[i].relocation.offset);
+                }
+                fprintf(stderr, "\n");
+            }
         }
     }
     if (!ok) {
