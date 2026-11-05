@@ -229,6 +229,21 @@ static bool compile_one(const vmg_air_input *in, const vmg_isa_options *opt, LLV
     if (ok) {
         vi_optimize(t->s);
         if (trace) { fprintf(stderr, "vmg-isa: %s (stage %d, idvs %d) selected:\n", fname ? fname : "?", stage, idvs); vi_print(t->s, stderr); }
+        static int check = -1;
+        if (check < 0) check = getenv("VMG_ISA_CHECK") != NULL;
+        if (check) {
+            // a register live at the entry is read before any definition (selection emitted a use before its def)
+            vi_liveness(t->s);
+            vi_block *entry = list_first_entry(&t->s->blocks, vi_block, link);
+            for (unsigned v = 0; v < vi_num_vregs(t->s); v++) {
+                if (vi_vreg_get(t->s, v)->multi_def) continue;
+                for (unsigned q = 0; q < vi_vreg_get(t->s, v)->nwords; q++)
+                    if (BITSET_TEST(entry->live_in, t->s->live_base[v] + q)) {
+                        fprintf(stderr, "vmg-isa: CHECK %s: v%u[%u] read before its definition\n", fname ? fname : "?", v, q);
+                        break;
+                    }
+            }
+        }
         vi_lower_constants(t->s);
         // Sinking usually lowers register pressure, but a few blurs spill with it: those are compiled again without it
         // and the better of the two is kept.

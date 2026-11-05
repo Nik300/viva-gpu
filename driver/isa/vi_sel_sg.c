@@ -47,8 +47,8 @@ static vi_ref first_lane(S *t)
 // The 4 bits of a SIMD-group mask that belong to the thread's quad (quad_any/all/ballot are per quad).
 static vi_ref quad_bits(S *t, vi_ref m)
 {
-    vi_ref base = sel_tmp(t);
-    vi_instr *I = E(t, VA_AND_I32); I->dest = base; I->src[0] = lane_id(t); I->src[2] = vi_imm(~3u);
+    vi_ref base = sel_tmp(t), lid = lane_id(t);   // (the lane id MOV must come first)
+    vi_instr *I = E(t, VA_AND_I32); I->dest = base; I->src[0] = lid; I->src[2] = vi_imm(~3u);
     vi_ref sh = sel_tmp(t);
     I = E(t, VA_RSHIFT_OR_I32); I->dest = sh; I->src[0] = m; I->src[1] = base; I->src[2] = vi_imm(0);
     vi_ref r = sel_tmp(t);

@@ -341,9 +341,10 @@ static vi_ref load_words(S *t, sv *p, unsigned words, unsigned extra)
             sv o2 = { .kind = SV_VAL, .bits = 32, .ncomp = 1 };
             if (off.kind == VI_IMM) { o2.is_const = true; o2.cw[0] = off.value; } else o2.vreg = off.value;
             q.off = &o2;
+            vi_ref addr = ssbo_address(t, &q);   // (emitted before the load that reads it)
             vi_instr *I = E(t, kLoad[words]);
             I->sw = vi_vreg(d, 0, words);
-            I->src[0] = ssbo_address(t, &q);
+            I->src[0] = addr;
             vi_set(I, VAF_offset, 0);
             if (words == 1) vi_set(I, VAF_lane, VA_LOAD_LANE_32_M_NONE);
             I->memory = true;
