@@ -1048,6 +1048,9 @@ void vmg_cmd_dispatch_tile(vmg_device *dev, vmg_compute_pipeline *kernel, uint32
     if (dev->pass.depth.texture) dev->pass.depth.store = VMG_STORE_STORE;
     if (dev->pass.stencil.texture) dev->pass.stencil.store = VMG_STORE_STORE;
     vmg_cmd_end_pass(dev);
+    // the rendered attachments are read as images, and the kernel's image writes are loaded by the pass that follows:
+    // Gallium orders neither without a barrier (G2 kept the unmodified pattern on the phone)
+    if (dev->pipe->memory_barrier) dev->pipe->memory_barrier(dev->pipe, PIPE_BARRIER_ALL);
     // 2. the tile kernel: one threadgroup per tile, attachments as images
     for (unsigned i = 0; i < VMG_MAX_COLOR && VMG_TILE_IMAGE_BASE + i < VMG_MAX_TEXTURES; i++)
         if (saved.color[i].texture) vmg_cmd_set_texture(dev, VMG_COMPUTE, VMG_TILE_IMAGE_BASE + i, saved.color[i].texture);
@@ -1058,6 +1061,7 @@ void vmg_cmd_dispatch_tile(vmg_device *dev, vmg_compute_pipeline *kernel, uint32
     for (unsigned k = 0; k < 3; k++) d.threads[k] = MAX2(threads[k], 1);
     d.tile[0] = tile_w; d.tile[1] = tile_h;
     vmg_cmd_dispatch(dev, &d);
+    if (dev->pipe->memory_barrier) dev->pipe->memory_barrier(dev->pipe, PIPE_BARRIER_ALL);
     for (unsigned i = 0; i < VMG_MAX_COLOR && VMG_TILE_IMAGE_BASE + i < VMG_MAX_TEXTURES; i++)
         if (saved.color[i].texture) vmg_cmd_set_texture(dev, VMG_COMPUTE, VMG_TILE_IMAGE_BASE + i, NULL);
     // 3. the pass again, loading the attachments, with the encoder's state
