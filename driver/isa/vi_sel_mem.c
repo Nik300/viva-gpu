@@ -6,6 +6,7 @@
 //   threadgroup memory     workgroup-local pointer (special FAU) + offset (C5)
 //   private memory         thread-local pointer + offset, .force accesses, never across 16 bytes (C6)
 #include "vi_sel.h"
+#include <stdlib.h>
 #include <string.h>
 
 static unsigned align_of(uint64_t a) { return a ? (unsigned)MIN2(a, 16) : 4; }
@@ -363,7 +364,8 @@ static vi_ref load_words(S *t, sv *p, unsigned words, unsigned extra)
         break;
     }
     case SP_PUSH:
-        if (off.kind == VI_IMM) {
+        // (VMG_ISA_PUSH_LD=1, diagnosis: read the window with LD_PKA from constant buffer 0 instead of FAU)
+        if (off.kind == VI_IMM && !getenv("VMG_ISA_PUSH_LD")) {
             bool ok = true;
             vi_ref w[4];
             for (unsigned k = 0; k < words && ok; k++) { w[k] = sel_fau_ubo(t, VI_UBO_CB0, off.value + 4 * k); if (!w[k].kind) ok = false; }

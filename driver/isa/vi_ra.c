@@ -253,9 +253,14 @@ static bool ra_try(vi_shader *s, int *spill)
             if (r >= 0 && r < VI_NUM_REGS && (r < 16 || r >= 48) && active[r] < 0 && !(forbidden >> r & 1) && !overlaps(c.fixed[r], iv)) chosen = r;
         }
         // two passes: first only ranges wholly inside r0-r15 / r48-r63 (32-register mode), then any
+        // (VMG_ISA_NO_R48=1, diagnosis: never r48-r63 for ordinary values)
+        static int no_r48 = -1;
+        if (no_r48 < 0) no_r48 = getenv("VMG_ISA_NO_R48") != NULL;
+        if (no_r48 && chosen >= 48 && info->fixed < 0) chosen = -1;
         for (unsigned pass = 0; pass < 2 && chosen < 0; pass++)
         for (unsigned o = 0; o < VI_NUM_REGS && chosen < 0; o++) {
             unsigned r = info->fixed >= 0 ? (unsigned)info->fixed : kOrder[o];
+            if (no_r48 && info->fixed < 0 && r + nw > 48) continue;
             if (r % al || r + nw > VI_NUM_REGS) { if (info->fixed >= 0) break; continue; }
             if (pass == 0 && info->fixed < 0 && ((r < 16 && r + nw > 16) || (r >= 16 && r < 48))) continue;
             bool free_ = true;
