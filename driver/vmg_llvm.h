@@ -198,7 +198,13 @@ typedef struct LLVMOpaqueAttributeRef *LLVMAttributeRef;
     X(LLVMTypeRef, LLVMInt64TypeInContext, (LLVMContextRef)) \
     X(void, LLVMInstructionEraseFromParent, (LLVMValueRef)) \
     X(LLVMBasicBlockRef, LLVMGetEntryBasicBlock, (LLVMValueRef)) \
-    X(LLVMValueRef, LLVMGetUndef, (LLVMTypeRef))
+    X(LLVMValueRef, LLVMGetUndef, (LLVMTypeRef)) \
+    X(LLVMValueRef, LLVMBuildGEP, (LLVMBuilderRef, LLVMValueRef, LLVMValueRef *, unsigned, const char *)) \
+    X(LLVMValueRef, LLVMBuildGEP2, (LLVMBuilderRef, LLVMTypeRef, LLVMValueRef, LLVMValueRef *, unsigned, const char *)) \
+    X(LLVMValueRef, LLVMBuildNeg, (LLVMBuilderRef, LLVMValueRef, const char *)) \
+    X(LLVMTypeRef, LLVMInt8TypeInContext, (LLVMContextRef)) \
+    X(LLVMTypeRef, LLVMPointerType, (LLVMTypeRef, unsigned)) \
+    X(LLVMValueRef, LLVMConstNull, (LLVMTypeRef))
 
 #define TS_LLVM_DECLARE(ret, name, args) extern ret (*ts_##name) args;
 TS_LLVM_FUNCS(TS_LLVM_DECLARE)

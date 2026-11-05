@@ -1003,6 +1003,13 @@ sv *sel_io_call(S *t, LLVMValueRef inst, const char *name)
         USE(t, G2);
         return imageblock_access(t, inst, sel_name_is(name, "air.store."));
     }
+    if (sel_name_is(name, "air.get_simdgroup_size")) {   // threads_per_simdgroup as a call (newer compilers)
+        USE(t, F1);
+        vi_ref w = vi_imm(16);
+        unsigned bits = 32, n = 1; bool f;
+        sel_type_info(ts_LLVMTypeOf(inst), &bits, &n, &f);
+        return sv_from_comps32(t, bits, 1, &w);
+    }
     if (!strcmp(name, "air.get_read_sampler")) {
         sv *s = sv_new(t, SV_SMP);
         s->index = 0;

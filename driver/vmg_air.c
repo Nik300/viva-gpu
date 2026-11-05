@@ -117,7 +117,7 @@ const char *vmg_air_tag(void) { return "vmg-air-nir-1"; }
 // ---- Values ---------------------------------------------------------------------------------------------------------
 
 typedef enum { V_NONE, V_SSA, V_AGG, V_PTR, V_TEX, V_SMP } vkind;
-typedef enum { SP_SSBO, SP_SHARED, SP_SCRATCH, SP_POOL, SP_PUSH } vspace;
+typedef enum { SP_SSBO, SP_SHARED, SP_SCRATCH, SP_POOL, SP_PUSH, SP_TEXARR } vspace;   // SP_TEXARR: array of textures
 
 typedef struct val {
     vkind kind;
@@ -125,7 +125,10 @@ typedef struct val {
     unsigned n; struct val **e;   // V_AGG members
     vspace sp; nir_def *slot;     // V_PTR: SSBO index (32-bit, SP_SSBO only)
     nir_def *off;                 //        byte offset (32-bit)
-    int index;                    // V_TEX: [[texture(n)]]; V_SMP: sampler slot
+    int index;                    // V_TEX: [[texture(n)]]; V_SMP: sampler slot; SP_TEXARR: first texture
+    nir_def *dyn;                 // V_TEX from an array of textures: index added at run time (texture_offset)
+    unsigned count;               // V_TEX with dyn / SP_TEXARR: textures in the array
+    bool null;                    // V_PTR: null or undef pointer (takes the memory of the pointer it is mixed with)
     uint64_t word;                // V_SMP constexpr word
     bool pixel;                   // V_SMP: coord::pixel
 } val;
@@ -153,6 +156,8 @@ typedef struct {
     nir_variable *color_out[VMG_MAX_COLOR];   // render target variables (also read by programmable blending)
     nir_variable *tex_vars[VMG_MAX_TEXTURES], *img_vars[VMG_MAX_TEXTURES], *smp_vars[32];
     unsigned scratch, shared;
+    nir_def *tex_dyn;             // texture of the current texture call: dynamic index into an array (or NULL)
+    unsigned tex_count;
     bool no_nans;                 // fast math (Metal's default): NaN constants are poison
     bool push;                    // small constant buffers go to the push window
     unsigned push_used;
@@ -191,13 +196,36 @@ static bool is_half_type(LLVMTypeRef t)
 static bool scalar_info(LLVMTypeRef t, unsigned *bits, bool *flt)
 {
     switch (ts_LLVMGetTypeKind(t)) {
-    case LLVMIntegerTypeKind: *bits = ts_LLVMGetIntTypeWidth(t); *flt = false; return *bits <= 64;
+    case LLVMIntegerTypeKind: {
+        // Odd widths (i5 for a small switch, i24...) live in a 32/64-bit container, zero-extended (see odd_width).
+        unsigned w = ts_LLVMGetIntTypeWidth(t);
+        *bits = w == 1 || w == 8 || w == 16 || w == 32 || w == 64 ? w : w < 32 ? 32 : 64;
+        *flt = false;
+        return w <= 64;
+    }
     case LLVMHalfTypeKind: *bits = g_half32 ? 32 : 16; *flt = true; return true;
     case LLVMFloatTypeKind: *bits = 32; *flt = true; return true;
     case LLVMDoubleTypeKind: *bits = 64; *flt = true; return true;
     case LLVMBFloatTypeKind: return false;
     default: return false;
     }
+}
+
+// Width of an odd-width integer type (scalar or vector element), 0 for the others. Such a value is kept zero-extended
+// in its container: operations that can set the upper bits mask again, signed ones sign-extend their operands first.
+static unsigned odd_width(LLVMTypeRef t)
+{
+    if (ts_LLVMGetTypeKind(t) == LLVMVectorTypeKind) t = ts_LLVMGetElementType(t);
+    if (ts_LLVMGetTypeKind(t) != LLVMIntegerTypeKind) return 0;
+    unsigned w = ts_LLVMGetIntTypeWidth(t);
+    return w == 1 || w == 8 || w == 16 || w == 32 || w == 64 || w > 64 ? 0 : w;
+}
+
+static nir_def *odd_mask(nir_builder *b, nir_def *x, unsigned w) { return nir_iand_imm(b, x, (int64_t)((1ull << w) - 1)); }
+static nir_def *odd_sext(nir_builder *b, nir_def *x, unsigned w)
+{
+    unsigned sh = x->bit_size - w;
+    return nir_ishr_imm(b, nir_ishl_imm(b, x, sh), sh);
 }
 
 // (bits, components, float) of a scalar or vector type; false for aggregates/pointers.
@@ -253,7 +281,7 @@ static val *zero_val(T *t, LLVMTypeRef ty)
         }
         return a;
     }
-    if (k == LLVMPointerTypeKind) return vptr(t, SP_SCRATCH, NULL, nir_imm_int(&t->b, 0));
+    if (k == LLVMPointerTypeKind) { val *p = vptr(t, SP_SCRATCH, NULL, nir_imm_int(&t->b, 0)); p->null = true; return p; }
     nir_def *z = zero_of(t, ty);
     return z ? vssa(t, z) : NULL;
 }
@@ -424,11 +452,12 @@ static bool mem_store(T *t, val *p, nir_def *d, unsigned align)
     }
 }
 
+static val *ptr_keep(val *n, val *p) { n->index = p->index; n->count = p->count; return n; }
 static val *ptr_add(T *t, val *p, nir_def *bytes)
 {
-    return vptr(t, p->sp, p->slot, nir_iadd(&t->b, p->off, bytes->bit_size == 32 ? bytes : nir_u2u32(&t->b, bytes)));
+    return ptr_keep(vptr(t, p->sp, p->slot, nir_iadd(&t->b, p->off, bytes->bit_size == 32 ? bytes : nir_u2u32(&t->b, bytes))), p);
 }
-static val *ptr_add_imm(T *t, val *p, int64_t bytes) { return bytes ? vptr(t, p->sp, p->slot, nir_iadd_imm(&t->b, p->off, bytes)) : p; }
+static val *ptr_add_imm(T *t, val *p, int64_t bytes) { return bytes ? ptr_keep(vptr(t, p->sp, p->slot, nir_iadd_imm(&t->b, p->off, bytes)), p) : p; }
 
 // Typed load, recursing into aggregates (members at their data-layout offsets).
 static val *load_typed(T *t, val *p, LLVMTypeRef ty, unsigned align)
@@ -445,9 +474,25 @@ static val *load_typed(T *t, val *p, LLVMTypeRef ty, unsigned align)
         }
         return a;
     }
+    if (k == LLVMPointerTypeKind && p->sp == SP_TEXARR) {
+        // a texture of an array of textures (8 bytes each): constant index, or texture_offset at run time
+        val *v = vnew(t, V_TEX);
+        v->index = p->index;
+        if (nir_src_is_const(nir_src_for_ssa(p->off))) {
+            unsigned i = (unsigned)nir_src_as_uint(nir_src_for_ssa(p->off)) / 8;
+            if (i >= p->count) FAIL(t, "texture %u of an array of %u", i, p->count);
+            v->index += (int)i;
+        } else {
+            v->dyn = nir_ushr_imm(&t->b, p->off, 3);
+            v->count = p->count;
+        }
+        return v;
+    }
+    if (p->sp == SP_TEXARR) FAIL(t, "non-texture load from an array of textures");
     if (k == LLVMPointerTypeKind) FAIL(t, "pointer loaded from memory (argument buffers are not supported yet)");
     unsigned bits, comps; bool flt;
-    if (!type_info(ty, &bits, &comps, &flt)) FAIL(t, "load of an unsupported type");
+    if (!type_info(ty, &bits, &comps, &flt) || odd_width(ty)) FAIL(t, "load of an unsupported type");
+    if (comps > 16) FAIL(t, "load of a %u-component vector", comps);   // NIR vectors stop at 16 (simdgroup matrices)
     bool widen = g_half32 && is_half_type(ty);   // 16-bit in memory, 32-bit in registers
     unsigned mbits = widen ? 16 : bits;
     nir_def *d;
@@ -475,7 +520,7 @@ static bool store_typed(T *t, val *p, val *v, LLVMTypeRef ty, unsigned align)
     }
     if (v->kind != V_SSA) FAILB(t, "store of a pointer or texture into memory");
     unsigned bits, comps; bool flt;
-    if (!type_info(ty, &bits, &comps, &flt)) FAILB(t, "store of an unsupported type");
+    if (!type_info(ty, &bits, &comps, &flt) || odd_width(ty)) FAILB(t, "store of an unsupported type");
     nir_def *d = v->def;
     if (g_half32 && is_half_type(ty)) { d = nir_f2f16(&t->b, d); bits = 16; }
     if (comps == 3 || comps > 4) {
@@ -836,8 +881,18 @@ static bool declare_inputs(T *t, LLVMValueRef node)
         } else if (md_is(rolev, "air.texture")) {
             long slot = md_int_after(&o, "air.location_index", 0);
             if (slot < 0 || slot >= VMG_MAX_TEXTURES) FAILB(t, "texture %ld", slot);
-            v = vnew(t, V_TEX);
-            v->index = (int)slot;
+            LLVMTypeRef el = is_ptr(pt) ? ts_LLVMGetElementType(pt) : NULL;
+            if (el && ts_LLVMGetTypeKind(el) == LLVMArrayTypeKind) {
+                // array<texture, N> [[texture(n)]]: passed byval, textures n .. n + N - 1
+                unsigned count = ts_LLVMGetArrayLength(el);
+                if (!count || slot + count > VMG_MAX_TEXTURES) FAILB(t, "array of %u textures at %ld", count, slot);
+                v = vptr(t, SP_TEXARR, NULL, nir_imm_int(b, 0));
+                v->index = (int)slot;
+                v->count = count;
+            } else {
+                v = vnew(t, V_TEX);
+                v->index = (int)slot;
+            }
         } else if (md_is(rolev, "air.sampler")) {
             long slot = md_int_after(&o, "air.location_index", 0);
             if (slot < 0 || slot >= VMG_MAX_SAMPLERS) FAILB(t, "sampler %ld", slot);
@@ -996,6 +1051,9 @@ static val *binary(T *t, LLVMValueRef inst, LLVMOpcode op)
     if (!x || !y) return NULL;
     nir_builder *b = &t->b;
     nir_def *r;
+    unsigned odd = odd_width(ts_LLVMTypeOf(inst));
+    if (odd && (op == LLVMSDiv || op == LLVMSRem)) { x = odd_sext(b, x, odd); y = odd_sext(b, y, odd); }
+    if (odd && op == LLVMAShr) x = odd_sext(b, x, odd);
     switch (op) {
     case LLVMAdd: r = nir_iadd(b, x, y); break;
     case LLVMSub: r = nir_isub(b, x, y); break;
@@ -1017,6 +1075,8 @@ static val *binary(T *t, LLVMValueRef inst, LLVMOpcode op)
     case LLVMFRem: r = nir_frem(b, x, y); break;
     default: FAIL(t, "binary opcode %d", op);
     }
+    if (odd && op != LLVMAnd && op != LLVMOr && op != LLVMXor && op != LLVMLShr && op != LLVMUDiv && op != LLVMURem)
+        r = odd_mask(b, r, odd);
     return vssa(t, r);
 }
 
@@ -1043,7 +1103,10 @@ static val *compare(T *t, LLVMValueRef inst, bool flt)
     if (xv->kind != V_SSA || yv->kind != V_SSA) FAIL(t, "comparison of non-values");
     nir_def *x = xv->def, *y = yv->def, *r;
     if (!flt) {
-        switch (ts_LLVMGetICmpPredicate(inst)) {
+        LLVMIntPredicate pr = ts_LLVMGetICmpPredicate(inst);
+        unsigned odd = odd_width(ts_LLVMTypeOf(ts_LLVMGetOperand(inst, 0)));
+        if (odd && pr >= LLVMIntSGT) { x = odd_sext(b, x, odd); y = odd_sext(b, y, odd); }
+        switch (pr) {
         case LLVMIntEQ: r = nir_ieq(b, x, y); break;
         case LLVMIntNE: r = nir_ine(b, x, y); break;
         case LLVMIntUGT: r = nir_ult(b, y, x); break;
@@ -1106,13 +1169,17 @@ static val *cast(T *t, LLVMValueRef inst, LLVMOpcode op)
     if (!x) return NULL;
     unsigned tb, tc; bool tf;
     if (!type_info(to, &tb, &tc, &tf)) FAIL(t, "cast to an aggregate");
-    (void)from;
+    unsigned odd_to = odd_width(to), odd_from = odd_width(from);
+    if (odd_from && (op == LLVMSExt || op == LLVMSIToFP)) x = odd_sext(b, x, odd_from);
     switch (op) {
     case LLVMTrunc:
         if (tb == 1) return vssa(t, nir_ine_imm(b, nir_iand_imm(b, x, 1), 0));
-        return vssa(t, nir_u2uN(b, x, tb));
+        return vssa(t, odd_to ? odd_mask(b, nir_u2uN(b, x, tb), odd_to) : nir_u2uN(b, x, tb));
     case LLVMZExt: return vssa(t, x->bit_size == 1 ? nir_b2iN(b, x, tb) : nir_u2uN(b, x, tb));
-    case LLVMSExt: return vssa(t, x->bit_size == 1 ? nir_ineg(b, nir_b2iN(b, x, tb)) : nir_i2iN(b, x, tb));
+    case LLVMSExt: {
+        nir_def *r = x->bit_size == 1 ? nir_ineg(b, nir_b2iN(b, x, tb)) : nir_i2iN(b, x, tb);
+        return vssa(t, odd_to ? odd_mask(b, r, odd_to) : r);
+    }
     case LLVMFPToUI: return vssa(t, tb == 1 ? nir_fneu_imm(b, x, 0) : nir_f2uN(b, x, tb));
     case LLVMFPToSI: return vssa(t, tb == 1 ? nir_fneu_imm(b, x, 0) : nir_f2iN(b, x, tb));
     case LLVMUIToFP: return vssa(t, x->bit_size == 1 ? nir_b2fN(b, x, tb) : nir_u2fN(b, x, tb));
@@ -1130,6 +1197,9 @@ static val *select_inst(T *t, LLVMValueRef inst)
     nir_builder *b = &t->b;
     if (x->kind == V_SSA && y->kind == V_SSA) return vssa(t, nir_bcsel(b, c, x->def, y->def));
     if (x->kind == V_PTR && y->kind == V_PTR) {
+        // a null pointer takes the other one's memory (its offset 0 is never dereferenced)
+        if (x->null && !y->null) x = ptr_keep(vptr(t, y->sp, y->slot, x->off), y);
+        if (y->null && !x->null) y = ptr_keep(vptr(t, x->sp, x->slot, y->off), x);
         if (x->sp != y->sp) FAIL(t, "select between memories");
         nir_def *slot = x->slot && y->slot ? nir_bcsel(b, c, x->slot, y->slot) : x->slot;
         return vptr(t, x->sp, slot, nir_bcsel(b, c, x->off, y->off));
@@ -1420,7 +1490,26 @@ static nir_alu_type tex_type(LLVMTypeRef rt)
     return flt ? nir_type_float32 : nir_type_uint32;
 }
 
+static void use_texture_one(T *t, int index, bool image, enum glsl_sampler_dim dim, bool array, nir_alu_type type);
 static void use_texture(T *t, int index, bool image, enum glsl_sampler_dim dim, bool array, nir_alu_type type)
+{
+    unsigned n = t->tex_dyn ? t->tex_count : 1;
+    for (unsigned i = 0; i < n; i++) use_texture_one(t, index + (int)i, image, dim, array, type);
+}
+
+// Texture of the current call indexed at run time: the texture instruction adds it to texture_index (after insertion:
+// nir_tex_instr_add_src moves the other sources, which must already be linked).
+static void tex_add_dyn(T *t, nir_tex_instr *tex)
+{
+    if (t->tex_dyn) nir_tex_instr_add_src(tex, nir_tex_src_texture_offset, t->tex_dyn);
+}
+
+static nir_def *image_index(T *t, int index)
+{
+    return t->tex_dyn ? nir_iadd_imm(&t->b, t->tex_dyn, index) : nir_imm_int(&t->b, index);
+}
+
+static void use_texture_one(T *t, int index, bool image, enum glsl_sampler_dim dim, bool array, nir_alu_type type)
 {
     if (image) {
         t->refl->textures_written |= 1u << index;
@@ -1481,6 +1570,7 @@ static nir_def *texture_size(T *t, int index, enum glsl_sampler_dim dim, bool ar
     if (tex->num_srcs) tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_lod, lod ? nir_u2u32(b, lod) : nir_imm_int(b, 0));
     nir_def_init(&tex->instr, &tex->def, comps, 32);
     nir_builder_instr_insert(b, &tex->instr);
+    tex_add_dyn(t, tex);
     use_texture(t, index, false, dim, array, type);
     return &tex->def;
 }
@@ -1498,6 +1588,8 @@ static val *texture(T *t, LLVMValueRef inst, const char *name)
     val *tv = value(t, texArg);
     if (!tv) return NULL;
     if (tv->kind != V_TEX) FAIL(t, "texture call on a non-texture");
+    t->tex_dyn = tv->dyn;
+    t->tex_count = tv->count;
     bool array, ms;
     unsigned coords;
     enum glsl_sampler_dim dim = shape_of(op, &array, &ms, &coords);
@@ -1514,6 +1606,7 @@ static val *texture(T *t, LLVMValueRef inst, const char *name)
             tex->texture_index = (unsigned)tv->index;
             nir_def_init(&tex->instr, &tex->def, 1, 32);
             nir_builder_instr_insert(b, &tex->instr);
+            tex_add_dyn(t, tex);
             use_texture(t, tv->index, false, dim, array, nir_type_float32);
             return vssa(t, fit_lanes(t, &tex->def, rt));
         }
@@ -1524,6 +1617,7 @@ static val *texture(T *t, LLVMValueRef inst, const char *name)
             tex->texture_index = (unsigned)tv->index;
             nir_def_init(&tex->instr, &tex->def, 1, 32);
             nir_builder_instr_insert(b, &tex->instr);
+            tex_add_dyn(t, tex);
             use_texture(t, tv->index, false, dim, array, nir_type_float32);
             return vssa(t, fit_lanes(t, &tex->def, rt));
         }
@@ -1552,7 +1646,7 @@ static val *texture(T *t, LLVMValueRef inst, const char *name)
         coord = nir_u2u32(b, coord);
         for (unsigned i = 0; i < coord->num_components && i < 3; i++) c[i] = nir_channel(b, coord, i);
         if (layer) c[coord->num_components] = nir_u2u32(b, layer);
-        nir_image_store(b, nir_imm_int(b, tv->index), nir_vec(b, c, 4), nir_undef(b, 1, 32), data,
+        nir_image_store(b, image_index(t, tv->index), nir_vec(b, c, 4), nir_undef(b, 1, 32), data,
                         lod ? nir_u2u32(b, lod) : nir_imm_int(b, 0), .image_dim = dim, .image_array = array,
                         .src_type = type, .access = ACCESS_NON_READABLE);
         use_texture(t, tv->index, true, dim, array, type);
@@ -1579,7 +1673,7 @@ static val *texture(T *t, LLVMValueRef inst, const char *name)
             nir_def *c[4] = { nir_imm_int(b, 0), nir_imm_int(b, 0), nir_imm_int(b, 0), nir_imm_int(b, 0) };
             for (unsigned k = 0; k < coord->num_components && k < 3; k++) c[k] = nir_channel(b, coord, k);
             if (layer) c[coord->num_components] = layer;
-            nir_def *d = nir_image_load(b, 4, 32, nir_imm_int(b, tv->index), nir_vec(b, c, 4), nir_undef(b, 1, 32),
+            nir_def *d = nir_image_load(b, 4, 32, image_index(t, tv->index), nir_vec(b, c, 4), nir_undef(b, 1, 32),
                                         lod ? lod : nir_imm_int(b, 0), .image_dim = dim, .image_array = array, .dest_type = type);
             use_texture(t, tv->index, true, dim, array, type);
             return tex_result(t, rt, d);
@@ -1596,6 +1690,7 @@ static val *texture(T *t, LLVMValueRef inst, const char *name)
         tex->src[1] = nir_tex_src_for_ssa(ms ? nir_tex_src_ms_index : nir_tex_src_lod, lod ? lod : nir_imm_int(b, 0));
         nir_def_init(&tex->instr, &tex->def, 4, 32);
         nir_builder_instr_insert(b, &tex->instr);
+        tex_add_dyn(t, tex);
         use_texture(t, tv->index, false, dim, array, type);
         return tex_result(t, rt, depth ? nir_channel(b, &tex->def, 0) : &tex->def);
     }
@@ -1699,6 +1794,7 @@ static val *texture(T *t, LLVMValueRef inst, const char *name)
     memcpy(tex->src, srcs, ns * sizeof srcs[0]);
     nir_def_init(&tex->instr, &tex->def, 4, 32);
     nir_builder_instr_insert(b, &tex->instr);
+    tex_add_dyn(t, tex);
     use_texture(t, tv->index, false, dim, array, type);
     BITSET_SET(t->s->info.samplers_used, sv->index);
     if (sv->index < 32 && !t->smp_vars[sv->index]) {
@@ -1746,8 +1842,10 @@ static val *atomic(T *t, LLVMValueRef inst, const char *name)
     val *ptr = value(t, ts_LLVMGetOperand(inst, 0));
     if (!ptr) return NULL;
     if (ptr->kind != V_PTR || (ptr->sp != SP_SSBO && ptr->sp != SP_SHARED)) FAIL(t, "atomic on unsupported memory");
-    nir_def *data = arg(t, inst, 1);
-    if (!data) return NULL;
+    // operand 1: the value, or for cmpxchg the pointer to the expected value (read below)
+    bool cas = !strcmp(op, "cmpxchg");
+    nir_def *data = cas ? NULL : arg(t, inst, 1);
+    if (!cas && !data) return NULL;
     nir_atomic_op aop;
     bool swap = false, load = false, store = false;
     if (!strcmp(op, "add")) aop = nir_atomic_op_iadd;
@@ -1800,6 +1898,11 @@ static val *subgroup(T *t, LLVMValueRef inst, const char *name)
         r = nir_shuffle(b, x, lane);
     } else if (name_is(op, "broadcast_first")) r = nir_read_first_invocation(b, x);
     else if (name_is(op, "broadcast")) r = quad ? nir_quad_broadcast(b, x, nir_u2u32(b, y)) : nir_read_invocation(b, x, nir_u2u32(b, y));
+    else if (name_is(op, "prefix_inclusive_") || name_is(op, "prefix_exclusive_")) {
+        bool flt = is_float(ts_LLVMTypeOf(inst)), sum = strstr(op, "_sum") != NULL;
+        nir_op rop = sum ? (flt ? nir_op_fadd : nir_op_iadd) : (flt ? nir_op_fmul : nir_op_imul);
+        r = name_is(op, "prefix_inclusive_") ? nir_inclusive_scan(b, x, .reduction_op = rop) : nir_exclusive_scan(b, x, .reduction_op = rop);
+    }
     else if (name_is(op, "sum")) r = nir_reduce(b, x, .reduction_op = is_float(ts_LLVMTypeOf(inst)) ? nir_op_fadd : nir_op_iadd, .cluster_size = quad ? 4 : 0);
     else if (name_is(op, "product")) r = nir_reduce(b, x, .reduction_op = is_float(ts_LLVMTypeOf(inst)) ? nir_op_fmul : nir_op_imul, .cluster_size = quad ? 4 : 0);
     else if (name_is(op, "min")) r = nir_reduce(b, x, .reduction_op = is_float(ts_LLVMTypeOf(inst)) ? nir_op_fmin : strstr(name, ".u.") ? nir_op_umin : nir_op_imin, .cluster_size = quad ? 4 : 0);
@@ -1874,6 +1977,7 @@ static val *call(T *t, LLVMValueRef inst)
     else if (name_is(name, "air.mem_barrier") || name_is(name, "air.simdgroup.barrier")) r = barrier(t, inst, false);
     else if (name_is(name, "air.get_num_samples")) r = vssa(t, fit_lanes(t, t->stage == MESA_SHADER_FRAGMENT ? sysval_word(t, 48, 1) : nir_imm_int(b, 1), ts_LLVMTypeOf(inst)));
     else if (!strcmp(name, "air.get_read_sampler")) { r = vnew(t, V_SMP); r->index = 0; }
+    else if (name_is(name, "air.get_simdgroup_size")) r = vssa(t, fit_lanes(t, nir_load_subgroup_size(b), ts_LLVMTypeOf(inst)));
     else if (name_is(name, "llvm.memcpy") || name_is(name, "llvm.memmove")) r = memcpy_set(t, inst, false);
     else if (name_is(name, "llvm.memset")) r = memcpy_set(t, inst, true);
     else if (name_is(name, "air.atomic.")) r = atomic(t, inst, name);
@@ -1918,7 +2022,7 @@ static bool edge_copies(T *t, LLVMBasicBlockRef from, LLVMBasicBlockRef to)
                 // the slot travels with the offset (a pointer phi can pick a buffer per thread); the memory cannot
                 struct hash_entry *he = _mesa_hash_table_search(t->vals, i);
                 val *pv = he ? he->data : NULL;
-                if (pv && pv->kind == V_PTR && pv->sp != v->sp) FAILB(t, "pointer phi between memories");
+                if (pv && pv->kind == V_PTR && !v->null && pv->sp != v->sp) FAILB(t, "pointer phi between memories");
                 d = glsl_get_vector_elements(var->type) == 2 ? nir_vec2(&t->b, v->off, v->slot ? v->slot : nir_imm_int(&t->b, 0)) : v->off;
             }
             if (!d) FAILB(t, "phi of a resource");
@@ -2004,6 +2108,30 @@ static bool terminator(T *t, LLVMValueRef term, LLVMBasicBlockRef bb)
     }
 }
 
+static LLVMValueRef ptr_root(LLVMValueRef v, struct hash_table *seen, bool *mixed, unsigned depth);
+
+// The first non-null root a pointer derives from, already translated (or an argument / constant): its memory.
+static val *ptr_any_root(T *t, LLVMValueRef v, struct hash_table *seen, unsigned depth)
+{
+    if (depth > 64 || is_undef(v) || ts_LLVMIsAConstantPointerNull(v)) return NULL;
+    struct hash_entry *he = _mesa_hash_table_search(t->vals, v);
+    if (he) { val *x = he->data; return x->kind == V_PTR && !x->null ? x : NULL; }
+    if (ts_LLVMIsAArgument(v) || ts_LLVMIsAConstant(v)) { val *x = value(t, v); return x && x->kind == V_PTR && !x->null ? x : NULL; }
+    if (!ts_LLVMIsAInstruction(v)) return NULL;
+    LLVMOpcode op = ts_LLVMGetInstructionOpcode(v);
+    if (op == LLVMBitCast || op == LLVMAddrSpaceCast || op == LLVMGetElementPtr) return ptr_any_root(t, ts_LLVMGetOperand(v, 0), seen, depth + 1);
+    unsigned first = op == LLVMSelect ? 1 : 0, n = op == LLVMSelect ? 2 : op == LLVMPHI ? ts_LLVMCountIncoming(v) : 0;
+    if (op == LLVMPHI) {
+        if (_mesa_hash_table_search(seen, v)) return NULL;
+        _mesa_hash_table_insert(seen, v, v);
+    }
+    for (unsigned k = 0; k < n; k++) {
+        val *r = ptr_any_root(t, ts_LLVMGetOperand(v, first + k), seen, depth + 1);
+        if (r) return r;
+    }
+    return NULL;
+}
+
 static bool instruction(T *t, LLVMValueRef inst)
 {
     LLVMOpcode op = ts_LLVMGetInstructionOpcode(inst);
@@ -2080,18 +2208,29 @@ static bool instruction(T *t, LLVMValueRef inst)
         LLVMTypeRef ty = ts_LLVMTypeOf(inst);
         if (is_ptr(ty)) {
             // Pointer phis: the space and slot of the first incoming pointer (all must agree).
+            // the first known incoming pointer that is not null (else the first known one)
             val *first = NULL;
-            for (unsigned k = 0; k < ts_LLVMCountIncoming(inst) && !first; k++) {
+            for (unsigned k = 0; k < ts_LLVMCountIncoming(inst) && (!first || first->null); k++) {
                 LLVMValueRef iv = ts_LLVMGetIncomingValue(inst, k);
                 struct hash_entry *he = _mesa_hash_table_search(t->vals, iv);
-                if (he) first = he->data;
-                else if (ts_LLVMIsAConstant(iv) || ts_LLVMIsAArgument(iv)) first = value(t, iv);
+                val *c = he ? he->data : ts_LLVMIsAConstant(iv) || ts_LLVMIsAArgument(iv) ? value(t, iv) : NULL;
+                if (c && (!first || !c->null)) first = c;
+            }
+            if (first && first->kind == V_PTR && first->null) {
+                // only null known so far (the rest comes through a back edge): the memory of the pointers it mixes
+                struct hash_table *seen = _mesa_pointer_hash_table_create(NULL);
+                _mesa_hash_table_insert(seen, inst, inst);
+                val *rv = NULL;
+                for (unsigned k = 0; k < ts_LLVMCountIncoming(inst) && !rv; k++)
+                    rv = ptr_any_root(t, ts_LLVMGetIncomingValue(inst, k), seen, 0);
+                _mesa_hash_table_destroy(seen, NULL);
+                if (rv) first = rv;
             }
             if (!first || first->kind != V_PTR) FAILB(t, "pointer phi with no known incoming pointer");
             for (unsigned k = 0; k < ts_LLVMCountIncoming(inst); k++) {
                 struct hash_entry *he = _mesa_hash_table_search(t->vals, ts_LLVMGetIncomingValue(inst, k));
                 val *iv = he ? he->data : NULL;
-                if (iv && iv->kind == V_PTR && iv->sp != first->sp) FAILB(t, "pointer phi between memories");
+                if (iv && iv->kind == V_PTR && !iv->null && iv->sp != first->sp) FAILB(t, "pointer phi between memories");
             }
             if (d->num_components == 2)
                 r = vptr(t, first->sp, first->sp == SP_SSBO ? nir_channel(&t->b, d, 1) : first->slot, nir_channel(&t->b, d, 0));
@@ -2343,7 +2482,7 @@ static char *link_visible(LLVMContextRef ctx, LLVMModuleRef mod, const vmg_air_i
 // the scratch path. VMG_NO_SPLIT_RESOURCES=1 turns it off.
 
 typedef struct { uint64_t off; LLVMTypeRef ty; LLVMValueRef slot; } res_leaf;
-typedef struct { LLVMValueRef inst; bool store; LLVMTypeRef ty; uint64_t cst; LLVMValueRef dyn; } res_access;
+typedef struct { LLVMValueRef inst; bool store; LLVMTypeRef ty; uint64_t cst; LLVMValueRef dyn; uint64_t memset_len; } res_access;
 typedef struct {
     LLVMTargetDataRef td;
     LLVMBuilderRef bld;
@@ -2494,10 +2633,21 @@ static bool res_collect(res_split *r, LLVMValueRef p, uint64_t cst, LLVMValueRef
             if (!res_collect(r, user, c, d)) return false;
             break;
         }
-        case LLVMCall:
+        case LLVMCall: {
+            // memset(p, 0, constant length) at a constant offset: zero (null) every field it covers
+            LLVMValueRef callee = ts_LLVMGetCalledValue(user);
+            size_t len = 0;
+            const char *n = callee && ts_LLVMIsAFunction(callee) ? ts_LLVMGetValueName2(callee, &len) : NULL;
+            if (n && len > 12 && !strncmp(n, "llvm.memset.", 12) && ts_LLVMGetOperand(user, 0) == p && !dyn &&
+                ts_LLVMIsAConstantInt(ts_LLVMGetOperand(user, 1)) && !ts_LLVMConstIntGetZExtValue(ts_LLVMGetOperand(user, 1)) &&
+                ts_LLVMIsAConstantInt(ts_LLVMGetOperand(user, 2)) && ts_LLVMConstIntGetZExtValue(ts_LLVMGetOperand(user, 2)) && r->nacc < 512) {
+                r->acc[r->nacc++] = (res_access){ user, true, NULL, cst, NULL, ts_LLVMConstIntGetZExtValue(ts_LLVMGetOperand(user, 2)) };
+                break;
+            }
             if (!res_is_lifetime(user) || r->nlifetime == 64) return res_reject(r, user);
             r->lifetime[r->nlifetime++] = user;
             break;
+        }
         default:
             return res_reject(r, user);
         }
@@ -2542,15 +2692,28 @@ static bool split_one_alloca(res_split *r, LLVMValueRef fn, LLVMValueRef alloca)
         return false;
     }
     bool stores_pointer = false;
-    for (unsigned i = 0; i < r->nacc; i++) stores_pointer |= r->acc[i].store && is_ptr_type(r->acc[i].ty);
+    for (unsigned i = 0; i < r->nacc; i++) stores_pointer |= r->acc[i].store && r->acc[i].ty && is_ptr_type(r->acc[i].ty);
     if (!stores_pointer) return false;
     // Every access must reach at least one leaf before anything is rewritten.
     unsigned cand[256];
-    for (unsigned i = 0; i < r->nacc; i++)
-        if (!res_candidates(r, &r->acc[i], cand) && !res_out_of_bounds(r, &r->acc[i])) {
+    for (unsigned i = 0; i < r->nacc; i++) {
+        res_access *a = &r->acc[i];
+        if (a->memset_len) {
+            // every field it touches must be inside it
+            for (unsigned k = 0; k < r->nleaf; k++) {
+                uint64_t lo = r->leaf[k].off, hi = lo + ts_LLVMStoreSizeOfType(r->td, r->leaf[k].ty);
+                if (hi > a->cst && lo < a->cst + a->memset_len && (lo < a->cst || hi > a->cst + a->memset_len)) {
+                    if (r->trace) res_trace(alloca, "kept in scratch, memset covers part of a field", a->inst);
+                    return false;
+                }
+            }
+            continue;
+        }
+        if (!res_candidates(r, a, cand) && !res_out_of_bounds(r, a)) {
             if (r->trace) res_trace(alloca, "kept in scratch, access matches no field", r->acc[i].inst);
             return false;
         }
+    }
 
     LLVMValueRef first = ts_LLVMGetFirstInstruction(ts_LLVMGetEntryBasicBlock(fn));
     for (unsigned i = 0; i < r->nleaf; i++) {
@@ -2559,8 +2722,16 @@ static bool split_one_alloca(res_split *r, LLVMValueRef fn, LLVMValueRef alloca)
     }
     for (unsigned i = 0; i < r->nacc; i++) {
         res_access *a = &r->acc[i];
-        unsigned n = res_candidates(r, a, cand);
         ts_LLVMPositionBuilderBefore(r->bld, a->inst);
+        if (a->memset_len) {
+            for (unsigned k = 0; k < r->nleaf; k++) {
+                uint64_t lo = r->leaf[k].off;
+                if (lo >= a->cst && lo < a->cst + a->memset_len) ts_LLVMBuildStore(r->bld, ts_LLVMConstNull(r->leaf[k].ty), r->leaf[k].slot);
+            }
+            ts_LLVMInstructionEraseFromParent(a->inst);
+            continue;
+        }
+        unsigned n = res_candidates(r, a, cand);
         LLVMValueRef off = NULL;
         if (a->dyn) off = a->cst ? ts_LLVMBuildAdd(r->bld, a->dyn, ts_LLVMConstInt(r->i64, a->cst, 0), "") : a->dyn;
         if (!n) {   // out of bounds
@@ -2601,7 +2772,7 @@ static bool split_resource_allocas(LLVMModuleRef mod, LLVMValueRef fn)
         !(ts_LLVMBuildLoad2 || ts_LLVMBuildLoad) || !ts_LLVMBuildStore || !ts_LLVMBuildSelect || !ts_LLVMBuildICmp ||
         !ts_LLVMBuildAdd || !ts_LLVMBuildMul || !ts_LLVMBuildSExt || !ts_LLVMBuildPointerCast || !ts_LLVMBuildBitCast ||
         !ts_LLVMConstInt || !ts_LLVMInt64TypeInContext || !ts_LLVMInstructionEraseFromParent || !ts_LLVMGetEntryBasicBlock ||
-        !ts_LLVMGetModuleContext || !ts_LLVMGetUndef)
+        !ts_LLVMGetModuleContext || !ts_LLVMGetUndef || !ts_LLVMConstNull)
         return false;
     res_split *r = calloc(1, sizeof *r);
     if (!r) return false;
@@ -2620,6 +2791,50 @@ static bool split_resource_allocas(LLVMModuleRef mod, LLVMValueRef fn)
     ts_LLVMDisposeBuilder(r->bld);
     ts_LLVMDisposeTargetData(r->td);
     free(r);
+    return changed;
+}
+
+// Pointer arithmetic through integers, inttoptr(ptrtoint(p) + x) (MPSImage's morphology filters): rewritten as a byte
+// GEP on p, which both translators follow (a pointer is a memory and an offset, never an address).
+static bool fold_ptr_int(LLVMModuleRef mod, LLVMValueRef fn)
+{
+    if (!fn || !ts_LLVMCreateBuilderInContext || !(ts_LLVMBuildGEP || ts_LLVMBuildGEP2) || !ts_LLVMInt8TypeInContext ||
+        !ts_LLVMPointerType || !ts_LLVMBuildPointerCast || !ts_LLVMBuildNeg || !ts_LLVMInstructionEraseFromParent || !ts_LLVMGetModuleContext)
+        return false;
+    LLVMContextRef ctx = ts_LLVMGetModuleContext(mod);
+    LLVMBuilderRef bld = ts_LLVMCreateBuilderInContext(ctx);
+    LLVMTypeRef i8 = ts_LLVMInt8TypeInContext(ctx);
+    bool changed = false;
+    for (LLVMBasicBlockRef bb = ts_LLVMGetFirstBasicBlock(fn); bb; bb = ts_LLVMGetNextBasicBlock(bb)) {
+        LLVMValueRef next;
+        for (LLVMValueRef i = ts_LLVMGetFirstInstruction(bb); i; i = next) {
+            next = ts_LLVMGetNextInstruction(i);
+            if (ts_LLVMGetInstructionOpcode(i) != LLVMIntToPtr) continue;
+            LLVMValueRef x = ts_LLVMGetOperand(i, 0), p = NULL, off = NULL;
+            bool neg = false;
+            #define PTR_OF(v) (ts_LLVMIsAInstruction(v) && ts_LLVMGetInstructionOpcode(v) == LLVMPtrToInt ? ts_LLVMGetOperand(v, 0) : NULL)
+            if ((p = PTR_OF(x))) {}
+            else if (ts_LLVMIsAInstruction(x) && ts_LLVMGetInstructionOpcode(x) == LLVMAdd) {
+                if ((p = PTR_OF(ts_LLVMGetOperand(x, 0)))) off = ts_LLVMGetOperand(x, 1);
+                else if ((p = PTR_OF(ts_LLVMGetOperand(x, 1)))) off = ts_LLVMGetOperand(x, 0);
+            } else if (ts_LLVMIsAInstruction(x) && ts_LLVMGetInstructionOpcode(x) == LLVMSub && (p = PTR_OF(ts_LLVMGetOperand(x, 0)))) {
+                off = ts_LLVMGetOperand(x, 1);
+                neg = true;
+            }
+            #undef PTR_OF
+            if (!p) continue;
+            ts_LLVMPositionBuilderBefore(bld, i);
+            LLVMValueRef q = ts_LLVMBuildPointerCast(bld, p, ts_LLVMPointerType(i8, ts_LLVMGetPointerAddressSpace(ts_LLVMTypeOf(p))), "");
+            if (off) {
+                if (neg) off = ts_LLVMBuildNeg(bld, off, "");
+                q = ts_LLVMBuildGEP2 ? ts_LLVMBuildGEP2(bld, i8, q, &off, 1, "") : ts_LLVMBuildGEP(bld, q, &off, 1, "");
+            }
+            ts_LLVMReplaceAllUsesWith(i, ts_LLVMBuildPointerCast(bld, q, ts_LLVMTypeOf(i), ""));
+            ts_LLVMInstructionEraseFromParent(i);
+            changed = true;
+        }
+    }
+    ts_LLVMDisposeBuilder(bld);
     return changed;
 }
 
@@ -2650,6 +2865,29 @@ static bool fold_null_textures(LLVMModuleRef mod)
                 ts_LLVMInstructionEraseFromParent(q);
             }
             ts_LLVMReplaceAllUsesWith(call, ts_LLVMGetUndef(ts_LLVMTypeOf(call)));
+            ts_LLVMInstructionEraseFromParent(call);
+            changed = true;
+        }
+    }
+    return changed;
+}
+
+// air.is_uniform(x) only comes from metal::uniform<T>, as __builtin_assume(__metal_is_uniform(x)): a promise of the
+// program, not a query. True, so the assume disappears.
+static bool fold_uniform_hints(LLVMModuleRef mod)
+{
+    if (!ts_LLVMConstInt || !ts_LLVMInstructionEraseFromParent) return false;
+    bool changed = false;
+    for (LLVMValueRef f = ts_LLVMGetFirstFunction(mod); f; f = ts_LLVMGetNextFunction(f)) {
+        size_t len = 0;
+        const char *n = ts_LLVMGetValueName2(f, &len);
+        if (!n || len < 14 || strncmp(n, "air.is_uniform", 14)) continue;
+        void *u = ts_LLVMGetFirstUse(f);
+        while (u) {
+            LLVMValueRef call = ts_LLVMGetUser(u);
+            u = ts_LLVMGetNextUse(u);
+            if (!ts_LLVMIsAInstruction(call) || ts_LLVMGetInstructionOpcode(call) != LLVMCall || ts_LLVMGetCalledValue(call) != f) continue;
+            ts_LLVMReplaceAllUsesWith(call, ts_LLVMConstInt(ts_LLVMTypeOf(call), 1, 0));
             ts_LLVMInstructionEraseFromParent(call);
             changed = true;
         }
@@ -2835,10 +3073,11 @@ bool vmg_air_module_load(const vmg_air_input *in, LLVMContextRef *ctx_out, LLVMM
         err = run_passes(mod, "always-inline");
         if (!err) err = run_passes(mod, kCleanupPasses);
     }
+    if (!err && fold_ptr_int(mod, entry_function(mod))) err = run_passes(mod, kCleanupPasses);
     // Again while it splits something: once a struct is split, an array whose address was stored in it can be too.
     for (int round = 0; round < 4 && !err && split_resource_allocas(mod, entry_function(mod)); round++)
         err = run_passes(mod, kCleanupPasses);
-    if (!err && fold_null_textures(mod)) err = run_passes(mod, kCleanupPasses);
+    if (!err && (fold_null_textures(mod) | fold_uniform_hints(mod))) err = run_passes(mod, kCleanupPasses);
     if (err) {
         *error = err;
         ts_LLVMDisposeModule(mod);

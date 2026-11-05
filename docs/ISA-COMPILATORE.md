@@ -131,6 +131,31 @@ Con 74960ae (`privateFunctions` letto) `mpstest` è tutto ok sul telefono, `grap
 `VMG_NO_SPLIT_RESOURCES=1`: una volta inlinate le funzioni, sui kernel di questo test basta SROA. Lo split resta per i
 kernel che indicizzano gli array di buffer in modo dinamico (MPSNDArray su macOS: +50 kernel).
 
+### Kernel MPS di iOS 16 (2026-11-06)
+
+Metallib MPS del telefono (MPSCore, MPSImage, MPSMatrix, MPSNeuralNetwork, MPSNDArray: 879 kernel), tradotte sul Mac
+con le private function vere di MPS collegate (catturate da MPSGraph). Rispetto a 74960ae: percorso NIR **693 → 872 /
+879** (prima MPSNeuralNetwork abortiva al kernel 475 di 606: gli altri non erano nemmeno provati), ISA 819 → 832 / 879
+(in produzione una funzione che fallisce sull'ISA ricade sul NIR).
+
+| Problema | Kernel | Correzione (`vmg_air.c`) |
+|---|---|---|
+| `array<texture2d, N> [[texture(n)]]` (byval) indicizzato per thread: "GEP on a non-pointer" | 21 (MPSCNN, MPSImage, MPSCore) | argomento = puntatore nello spazio `SP_TEXARR`; load con indice costante = texture `n + i`, dinamico = `nir_tex_src_texture_offset` (Valhall: handle in registro) e indice image `n + i` |
+| `select`/phi tra un buffer e `null`, o phi nel ciclo con solo `null` noto: "select between memories" | 17 (MPSLSTM/RNN) | puntatore nullo neutro (prende la memoria dell'altro); phi: memoria dalla prima radice non nulla (`ptr_any_root`) |
+| interi a larghezza dispari (`trunc i32 to i5` per uno switch): `u2u1`, **abort di Bifrost** (processo terminato) | 1 | contenitore a 32/64 bit sempre esteso a zero; maschera dopo add/sub/mul/shl/trunc/sext, estensione di segno per confronti e divisioni con segno |
+| load di un vettore oltre 16 componenti (`<64 x float>` delle simdgroup matrix): **stack overflow** in `load_typed` | 1 | errore pulito |
+| `air.is_uniform` (`metal::uniform<T>`: `__builtin_assume`) | 29 su macOS | piegato a `true` in A1 |
+| `air.get_simdgroup_size` | – | NIR `load_subgroup_size`, ISA 16 |
+| `simd_prefix_inclusive/exclusive_sum/product` | 2 (MIBox) | NIR `inclusive_scan`/`exclusive_scan` (Bifrost: `lower_reduce`) |
+| `inttoptr(ptrtoint(p) + x)` | 2 (Dilate/Erode) | A1: GEP di byte su `p` |
+| `memset 0` di un array privato di puntatori | 2 | lo split azzera (null) i campi coperti |
+| `cmpxchg.weak` con atteso per puntatore: operando 1 letto come valore | 1 | `atomic()` legge l'operando dopo aver riconosciuto il cmpxchg |
+
+Rimasti sul NIR: 3 `simdgroup_matrix_8x8` (varianti per GPU Apple `A14X`/`G13P`, non scelte da MPS con il nostro
+device) e 3 kernel che chiamano `prefixTertiary_f` (private function non catturata: artefatto della misura). Casi
+`isatest` nuovi: D9 array di texture con indice per thread, F3 prefix sum, E2 switch su `x & 31` (l'ISA non fa ancora
+array di texture né prefix sum: in quei casi ricade sul NIR).
+
 ## Prestazioni (2026-11-05 sera): codice alla pari con Mesa sugli shader di CoreAnimation
 
 Sintomo: con `VMG_ISA=1` le animazioni erano più lente che col percorso NIR. Misura sul telefono (swipe della home,

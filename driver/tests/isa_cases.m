@@ -1528,6 +1528,59 @@ static void ref_G4s(const isa_case *c, const double *g, double *out) {
     }
 }
 
+// array<texture2d, 3> [[texture(0)]] indexed per thread (MPSImage/MPSCNN kernels): a dynamic texture index.
+static const char kD9a[] =
+    "kernel void k(device float4 *o [[buffer(0)]], array<texture2d<float>, 3> ts [[texture(0)]], uint2 p [[thread_position_in_grid]]) {\n"
+    "  uint i = (p.x / 8 + p.y) % 3;\n"
+    "  float4 a = ts[i].read(p & 15), b = ts[2].read(uint2(p.y & 15, p.x & 15));\n"
+    "  o[p.y * 64 + p.x] = float4(a.x, a.y, b.x, float(ts[i].get_width())); }\n";
+static void ta0(int i, int j, uint8_t q[4]) { q[0] = (uint8_t)(i * 16); q[1] = (uint8_t)(j * 16); q[2] = 0; q[3] = 255; }
+static void ta1(int i, int j, uint8_t q[4]) { q[0] = (uint8_t)(255 - i * 16); q[1] = 77; q[2] = 0; q[3] = 255; }
+static void ta2(int i, int j, uint8_t q[4]) { q[0] = (uint8_t)((i ^ j) * 16); q[1] = (uint8_t)(j * 8); q[2] = 0; q[3] = 255; }
+static void (*const kTA[3])(int, int, uint8_t *) = { ta0, ta1, ta2 };
+static void setup_D9a(ISAInputs *in) {
+    in.textures[@0] = tex_rgba8(in, 16, 16, 1, ta0);
+    in.textures[@1] = tex_rgba8(in, 32, 16, 1, ta1);
+    in.textures[@2] = tex_rgba8(in, 16, 16, 1, ta2);
+}
+static void ref_D9a(const isa_case *c, const double *g, double *out) {
+    PIX(c) {
+        int i = (x / 8 + y) % 3;
+        uint8_t a[4], b[4];
+        kTA[i](x & 15, y & 15, a);
+        ta2(y & 15, x & 15, b);
+        set4(OUT(x, y), a[0] / 255.0, a[1] / 255.0, b[0] / 255.0, i == 1 ? 32 : 16);
+    }
+}
+
+// simd_prefix_inclusive/exclusive_sum (MPSImage integral image, MIBox).
+static const char kF3p[] = SG_HEAD
+    "  o[gid] = uint4(simd_prefix_exclusive_sum(v), simd_prefix_inclusive_sum(v), meta, uint(simd_prefix_exclusive_sum(float(v & 7)))); }\n";
+static void ref_F3p(const isa_case *c, const double *g, double *out) {
+    SG_REF
+        uint32_t ex = 0, exf = 0;
+        for (int l = 0; l < lane; l++) { ex += sgv(base + l); exf += sgv(base + l) & 7; }
+        set4(o, ex, ex + sgv(i), meta, exf);
+    SG_END
+}
+
+// A switch over x & 31: instcombine may narrow it to an odd-width integer (i5, as in MPSCNN's neuron switch compiled by
+// Apple; the Mac's LLVM keeps i32), which the NIR path keeps in a 32-bit container.
+static const char kE2s[] =
+    "kernel void k(device uint4 *o [[buffer(0)]], uint2 p [[thread_position_in_grid]]) {\n"
+    "  uint v = (p.x * 7 + p.y) & 31, r;\n"
+    "  switch (v) { case 0: r = 5; break; case 3: r = 9; break; case 7: r = 1; break; case 12: r = 40; break;\n"
+    "    case 17: r = 2; break; case 22: r = 3; break; case 19: r = 11; break; default: r = v * 2; }\n"
+    "  o[p.y * 64 + p.x] = uint4(r, v, uint(int(v) - 11 < 0), 0); }\n";
+static void ref_E2s(const isa_case *c, const double *g, double *out) {
+    PIX(c) {
+        unsigned v = (x * 7 + y) & 31, r;
+        switch (v) { case 0: r = 5; break; case 3: r = 9; break; case 7: r = 1; break; case 12: r = 40; break;
+            case 17: r = 2; break; case 22: r = 3; break; case 19: r = 11; break; default: r = v * 2; }
+        set4(OUT(x, y), r, v, (int)v - 11 < 0, 0);
+    }
+}
+
 // ==== The table =============================================================================================================
 
 #define FR(ID) .id = #ID, .kind = ISA_FRAG, .out = ISA_OUT_RGBA32F, .w = 64, .h = 64, .msl = k##ID, .ref = ref_##ID
@@ -1615,10 +1668,13 @@ const isa_case isa_cases[] = {
     {FR(D7), .title = "Sampler legato (slot 3, repeat) e constexpr coord::pixel", .setup = setup_D7},
     {FR(D8), .title = "Tipi dei risultati: uint, int, half, depth", .setup = setup_D8, .feats = "D4,D7", .vis_lo = -1500, .vis_hi = 255},
     {FR(D9), .title = "Due texture con lo stesso sampler (dual tex)", .setup = setup_D9, .feats = "D7"},
+    {CS(D9a, ISA_OUT_F32), .id = "D9", .title = "Array di texture con indice per thread (solo NIR: l'ISA ricade sul NIR)", .setup = setup_D9a,
+     .feats = "D4,D6", .vis_hi = 32},
     // E: ALU and math library
     {CS(E1, ISA_OUT_I32), .title = "Interi: div/rem con e senza segno, shift, logiche"},
     {FR(E1f), .id = "E1", .title = "Float: fdiv, fneg, mul, add", .rel = 2e-6, .vis_lo = -2, .vis_hi = 2},
     {CS(E2, ISA_OUT_U32), .title = "Confronti int/uint/float, select, booleani"},
+    {CS(E2s, ISA_OUT_U32), .id = "E2", .title = "switch su x & 31 (intero a 5 bit se LLVM lo restringe)", .feats = "A2"},
     {CS(E3, ISA_OUT_U32), .title = "Cast: trunc/sext/zext, fp↔int, f32→f16→f32, bitcast"},
     {CS(E4, ISA_OUT_F32), .title = "Vettori: extract/insert dinamici, swizzle, lane a 16 bit", .feats = "E5", .vis_lo = -100, .vis_hi = 1000},
     {CS(E5, ISA_OUT_F32), .title = "half nativo (v2f16), arrotondamento", .tol = 1e-3, .rel = 2e-3, .vis_hi = 50},
@@ -1652,6 +1708,7 @@ const isa_case isa_cases[] = {
     {CS(F2q, ISA_OUT_U32), .id = "F2", .title = "quad_broadcast", SG_GRID, .skip_llvmpipe = true,
      .mac_note = "llvmpipe non implementa quad_broadcast nei compute (abort: Unsupported intrinsic)"},
     {CS(F3a, ISA_OUT_U32), .id = "F3", .title = "simd_sum (float), product, min, max", SG_GRID},
+    {CS(F3p, ISA_OUT_U32), .id = "F3", .title = "simd_prefix_exclusive/inclusive_sum (solo NIR: l'ISA ricade sul NIR)", SG_GRID},
     {CS(F3b, ISA_OUT_U32), .id = "F3", .title = "quad_sum, quad_product, quad_min, quad_max", SG_GRID},
     {CS(F4, ISA_OUT_U32), .title = "simd_all/any, is_first, ballot; quad_any/all/ballot", SG_GRID},
     // G: today's gaps
