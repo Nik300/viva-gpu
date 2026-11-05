@@ -1,5 +1,26 @@
 # Acceleratori dell'iPhone e cosa può sostituirli su MT6781 (2026-11-04)
 
+# Stato (2026-11-05 sera)
+
+Prima la domanda di partenza: **le animazioni lente non dipendevano da un acceleratore mancante.** Durante gli swipe
+della home la GPU era occupata al 96% e il tempo per job scala con 1/frequenza GPU (limite di calcolo, non di DRAM):
+il colpevole era il codice generato dal compilatore ISA diretto, 2,5-3 volte più lungo di quello di Mesa. Corretto
+(`docs/ISA-COMPILATORE.md`, sezione Prestazioni): swipe della home da 36,5 a 27,2 ms per frame (27 → 37 fps), alla pari
+col percorso NIR. Il reverse engineering di IOSurfaceAccelerator conferma che la composizione normale di CoreAnimation
+**non passa dallo scaler** (serve per detach di layer su piani hardware, mirroring/clone, HDR, conversioni video).
+
+| Voce | Stato | Dettagli |
+|---|---|---|
+| A. IOSurfaceAccelerator (`AppleM2ScalerCSCDriver`) | **ABI ricavata** (passo 1 del piano) | `docs/ABI-IOSURFACEACCELERATOR.md`: servizio cercato per nome classe, user client tipo 0, Transfer/Transform/Blit = selettore 1 (struct 0x170 byte, nessun output), completamento asincrono con `kIOAsyncCompletionNotificationType` sulla porta registrata, selettori 0/2/3/4/5/7/8/9, dizionario capabilities. Consumatori: QuartzCore (detach/clone/HDR, ripiega su GPU e riprova a ogni frame stampando una riga su stderr), VideoToolbox (ripiega su conversioni software), ImageIO (solo color matching CIF10→P3 se dichiarato), CMCapture (fotocamera). Nessun guadagno sulle animazioni. Rischio: pubblicando il servizio, VideoToolbox gli manda tutti i suoi formati YUV e propaga gli errori ai chiamanti; uno stub CPU nel kernel sarebbe più lento del ripiego NEON di VideoToolbox. Il valore vero arriva solo col backend MDP (passi 3-5: MTCMOS, clock, MUTEX, RDMA/RSZ/WROT, M4U in bypass), che richiede iterazioni con flash del kernel. |
+| B. JPEG (`AppleJPEGDriver`, solo codifica con `jpgenc`) | non iniziato | stessa dipendenza da M4U/bypass e da un'ABI da ricavare; non sul percorso delle animazioni. |
+| C. Video (`AppleAVD`/`AppleAVE2`) | non iniziato | firmware VCU/SCP + IPC + M4U vero: mesi di lavoro (stima invariata). |
+| D. MPS / MPSGraph sul nostro driver | **verificato** | Compilatore: MPSImage 1819/1825 funzioni, MPSMatrix 135/136 (manca solo `simdgroup_matrix` di A14, che MPS non sceglie per il nostro device). `mpstest` sul telefono: `MPSSupportsMTLDevice` = sì; Gaussian blur, Sobel, Lanczos, conversione, matmul corretti (il blur era sbagliato sul percorso ISA: parametri letti via FAU nei kernel compute, ora LD_PKA). **MPSGraph no**: i kernel NDArray (`ndArrayIdentity`) salvano puntatori e texture in memoria privata e chiamano function reference visibili; il traduttore li rifiuta su entrambi i percorsi ("pointer stored into memory") e il grafo dà risultati sbagliati. È la prossima estensione di G3/G4 se servono CoreML/Vision su GPU. |
+
+Prerequisito comune ad A (backend MDP), B e C resta un driver M4U (anche minimo, bypass come lo scanout).
+
+---
+
+
 Domanda: cosa ha questo SoC (Helio G96: Mali-G57 MC2 + blocchi multimediali MediaTek) per simulare l'hardware
 dell'iPhone X (A11) che iOS usa (acceleratore JPEG, acceleratore IOSurface, ...), cosa no, quanto costa e come.
 
