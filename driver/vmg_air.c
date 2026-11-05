@@ -497,7 +497,9 @@ static val *global(T *t, LLVMValueRef g)
     unsigned as = ts_LLVMGetPointerAddressSpace(ts_LLVMTypeOf(g));
     val *v = NULL;
     if (name && !strncmp(name, "__air_sampler_state", 19)) {
-        LLVMValueRef word = init ? (ts_LLVMIsAConstantDataSequential(init) ? ts_LLVMGetElementAsConstant(init, 0) : ts_LLVMGetOperand(init, 0)) : NULL;
+        // macOS: [1 x i64]; iOS 16's compiler: a plain i64 constant
+        LLVMValueRef word = !init ? NULL : ts_LLVMIsAConstantInt(init) ? init
+                          : ts_LLVMIsAConstantDataSequential(init) ? ts_LLVMGetElementAsConstant(init, 0) : ts_LLVMGetOperand(init, 0);
         uint64_t w = word && ts_LLVMIsAConstantInt(word) ? ts_LLVMConstIntGetZExtValue(word) : 0;
         unsigned k = 0;
         for (; k < t->refl->constexpr_samplers && t->refl->constexpr_words[k] != w; k++) {}
