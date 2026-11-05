@@ -184,6 +184,8 @@ static void air_cache_key(vmg_device *dev, const char *kind, const vmg_air_input
     struct blob b;
     blob_init(&b);
     blob_write_string(&b, kind);
+    // the driver build: a new translator or ISA compiler must not reuse binaries made by an older one
+    blob_write_string(&b, __DATE__ " " __TIME__);
     blob_write_string(&b, dev->screen->get_name(dev->screen));
     blob_write_uint8(&b, in->half32);
     blob_write_uint8(&b, getenv("VMG_SSBO_BASE") != NULL);
@@ -1046,7 +1048,8 @@ static struct vmg_isa_program *isa_compile_cached(vmg_device *dev, const vmg_air
     char okey[48];
     vmg_isa_options_key(opt, okey, sizeof okey);
     snprintf(kind, sizeof kind, "isa:%s:%x", okey, attached);
-    bool cache = g_air_cache && !(opt->disabled >> VMG_ISA_A9 & 1) && !(opt->trace && *opt->trace);
+    bool cache = g_air_cache && !(opt->disabled >> VMG_ISA_A9 & 1) && !(opt->trace && *opt->trace) &&
+                 !getenv("VMG_ISA_SKIP") && !getenv("VMG_ISA_NO_SPILL");   // bisection: never a cached binary
     if (cache) {
         air_cache_key(dev, kind, in, key);
         size_t size = 0;

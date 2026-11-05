@@ -226,6 +226,22 @@ static bool compile_one(const vmg_air_input *in, const vmg_isa_options *opt, LLV
     if (ok) ok = sel_use(t, VMG_ISA_A6) && sel_use(t, VMG_ISA_A3) && sel_use(t, VMG_ISA_A4) && sel_use(t, VMG_ISA_A5) && sel_use(t, VMG_ISA_A7);
     char *fname = t->fn ? sel_name(t->fn) : NULL;
     bool trace = want_trace(opt, fname);
+    // VMG_ISA_SKIP=name,prefix*,...: these functions stay on the NIR path (bisection on the device)
+    const char *skip = getenv("VMG_ISA_SKIP");
+    if (ok && skip && fname) {
+        for (const char *p = skip; *p;) {
+            const char *e = strchr(p, ',');
+            size_t n = e ? (size_t)(e - p) : strlen(p);
+            bool prefix = n && p[n - 1] == '*';
+            size_t m = prefix ? n - 1 : n;
+            if (prefix ? !strncmp(fname, p, m) : (strlen(fname) == m && !strncmp(fname, p, m))) {
+                ok = false;
+                if (!t->error) t->error = strdup("VMG_ISA_SKIP");
+                break;
+            }
+            p += n + (e ? 1 : 0);
+        }
+    }
     if (ok) {
         vi_optimize(t->s);
         if (trace) { fprintf(stderr, "vmg-isa: %s (stage %d, idvs %d) selected:\n", fname ? fname : "?", stage, idvs); vi_print(t->s, stderr); }
@@ -266,6 +282,7 @@ static bool compile_one(const vmg_air_input *in, const vmg_isa_options *opt, LLV
         }
         vi_shader_free(alt);
         if (!ra) { ok = false; t->error = t->s->error ? strdup(t->s->error) : strdup("register allocation"); }
+        else if (t->s->spills && getenv("VMG_ISA_NO_SPILL")) { ok = false; t->error = strdup("spills (VMG_ISA_NO_SPILL)"); }
     }
     if (ok) {
         vi_insert_flow(t->s, stage == MESA_SHADER_FRAGMENT);
