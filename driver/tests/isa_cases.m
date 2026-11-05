@@ -1211,7 +1211,7 @@ static void ref_E10(const isa_case *c, const double *g, double *out) {
         // half4(f) rounds to f16; a path that keeps half in fp32 (VMG_HALF32, llvmpipe) gives the unrounded sum: both pass.
         double hr = h_round(fy * 0.001f) + h_round(fz * 0.001f), hf = fy * 0.001f + fz * 0.001f;
         double gh = g ? g[((size_t)y * c->w + x) * 4 + 2] : hr;
-        set4(OUT(x, y), fx + fz * 0.5f, (float)(uy + ux), fabs(gh - hf) < 1e-6 + 2e-6 * fabs(hf) ? hf : hr,
+        set4(OUT(x, y), fx + fz * 0.5f, (float)(uy + ux), fabs(gh - hf) < fabs(gh - hr) ? hf : hr,
              (float)(int8_t)((x - 32) * 5) + (float)(int8_t)(x * 7) * 1000.0f);
     }
 }
@@ -1866,7 +1866,15 @@ isa_result isa_run_case(id<MTLDevice> dev, const isa_case *c, int mode, uint8_t 
                 double q = lim > 0 ? err / lim : (err > 0 ? 1e9 : 0);
                 if (q > worst) worst = q;
             }
-            if (b) bad++;
+            if (b) {
+                static int dump_bad = -1;   // ISA_DUMP_BAD=N: print the first N wrong pixels (debugging)
+                if (dump_bad < 0) dump_bad = getenv("ISA_DUMP_BAD") ? atoi(getenv("ISA_DUMP_BAD")) : 0;
+                if ((int)bad < dump_bad)
+                    fprintf(stderr, "%s bad (%zu,%zu): GPU %.9g %.9g %.9g %.9g | ref %.9g %.9g %.9g %.9g\n", c->id, i % (size_t)c->w,
+                            i / (size_t)c->w, gpu[i * 4], gpu[i * 4 + 1], gpu[i * 4 + 2], gpu[i * 4 + 3], ref[i * 4], ref[i * 4 + 1],
+                            ref[i * 4 + 2], ref[i * 4 + 3]);
+                bad++;
+            }
             if (diff_out) diff_out[i] = (float)worst;
         }
         r.pct_bad = 100.0 * bad / n;
