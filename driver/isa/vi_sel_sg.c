@@ -65,8 +65,24 @@ static sv *per_word(S *t, sv *x, word_fn f, void *ctx)
     return r;
 }
 
-typedef struct { vi_ref lane; int op, group; } perm;
-static vi_ref do_perm(S *t, vi_ref w, void *ctx) { perm *p = ctx; return clper(t, w, p->lane, p->op, p->group, VA_CLPER_INACTIVE_RESULT_M_ZERO); }
+// CLPER takes the lane index from one lane for the whole warp (Mesa lowers divergent shuffles to a loop over uniform
+// indices; on the phone a per-lane index read lane 15 everywhere). A per-lane index is therefore done as one CLPER per
+// possible lane (immediate index, 16 for the SIMD-group or 4 inside the quad) and a select on the index.
+typedef struct { vi_ref lane; int op, group; bool uniform; } perm;   // uniform: lane is the same in every thread
+static bool uniform_ref(vi_ref r) { return r.kind == VI_IMM || r.kind == VI_FAU; }
+static vi_ref do_perm(S *t, vi_ref w, void *ctx)
+{
+    perm *p = ctx;
+    if (p->uniform || uniform_ref(p->lane) || p->op != VA_CLPER_LANE_OP_M_NONE)
+        return clper(t, w, p->lane.kind == VI_IMM ? sel_mov32(t, p->lane) : p->lane, p->op, p->group, VA_CLPER_INACTIVE_RESULT_M_ZERO);
+    unsigned n = p->group == VA_CLPER_SUBGROUP_SIZE_M_SUBGROUP4 ? 4 : 16;
+    vi_ref r = clper(t, w, sel_mov32(t, vi_imm(0)), VA_CLPER_LANE_OP_M_NONE, p->group, VA_CLPER_INACTIVE_RESULT_M_ZERO);
+    for (unsigned i = 1; i < n; i++) {
+        vi_ref c = clper(t, w, sel_mov32(t, vi_imm(i)), VA_CLPER_LANE_OP_M_NONE, p->group, VA_CLPER_INACTIVE_RESULT_M_ZERO);
+        r = sel_csel(t, VA_CMPF_M_EQ, VA_CSEL_U32, p->lane, vi_imm(i), c, r);
+    }
+    return r;
+}
 
 // ---- Reductions (F3) --------------------------------------------------------------------------------------------------
 
@@ -132,10 +148,20 @@ sv *sel_subgroup(S *t, LLVMValueRef inst, const char *name)
     bool flt = sel_is_float(ts_LLVMTypeOf(inst));
     bool sgn = strstr(name, ".s.") != NULL;
     int group = quad ? VA_CLPER_SUBGROUP_SIZE_M_SUBGROUP4 : VA_CLPER_SUBGROUP_SIZE_M_SUBGROUP16;
-    perm p = { vi_none(), VA_CLPER_LANE_OP_M_NONE, group };
+    perm p = { vi_none(), VA_CLPER_LANE_OP_M_NONE, group, false };
     if (sel_name_is(op, "shuffle_xor")) {
         USE(t, F1);
         p.lane = sv_comp32(t, y, 0, X_ZEXT); p.op = VA_CLPER_LANE_OP_M_XOR;
+        if (!uniform_ref(p.lane)) {
+            // per-thread mask: the lane index itself, inside the group
+            vi_ref l = lane_id(t);
+            if (quad) { vi_ref q = sel_tmp(t); vi_instr *I = E(t, VA_AND_I32); I->dest = q; I->src[0] = l; I->src[2] = vi_imm(3u); l = q; }
+            vi_ref x2 = sel_tmp(t);
+            vi_instr *I = E(t, VA_XOR_I32); I->dest = x2; I->src[0] = l; I->src[2] = p.lane;
+            vi_ref m = sel_tmp(t);
+            I = E(t, VA_AND_I32); I->dest = m; I->src[0] = x2; I->src[2] = vi_imm(quad ? 3u : 15u);
+            p.lane = m; p.op = VA_CLPER_LANE_OP_M_NONE;
+        }
         return per_word(t, x, do_perm, &p);
     }
     if (sel_name_is(op, "shuffle_up") || sel_name_is(op, "shuffle_down")) {
@@ -143,38 +169,31 @@ sv *sel_subgroup(S *t, LLVMValueRef inst, const char *name)
         // lane -/+ delta (out of range: the lane's own value, as Metal leaves it unchanged)
         vi_ref l = lane_id(t), d = sv_comp32(t, y, 0, X_ZEXT);
         bool up = sel_name_is(op, "shuffle_up");
-        vi_ref src = sel_alu2(t, up ? VA_ISUB_S32 : VA_IADD_U32, l, d);
         unsigned limit = quad ? 4 : 16;
+        vi_ref within = l;
         if (quad) {
-            vi_ref base = sel_tmp(t);
-            vi_instr *I = E(t, VA_AND_I32); I->dest = base; I->src[0] = l; I->src[2] = vi_imm(~3u);
-            vi_ref within = sel_tmp(t);
-            I = E(t, VA_AND_I32); I->dest = within; I->src[0] = l; I->src[2] = vi_imm(3u);
-            vi_ref w2 = sel_alu2(t, up ? VA_ISUB_S32 : VA_IADD_U32, within, d);
-            vi_ref ok = sel_csel(t, VA_CMPF_M_LT, VA_CSEL_U32, w2, vi_imm(limit), w2, within);
-            src = sel_alu2(t, VA_IADD_U32, base, ok);
-        } else {
-            src = sel_csel(t, VA_CMPF_M_LT, VA_CSEL_U32, src, vi_imm(limit), src, l);
+            within = sel_tmp(t);
+            vi_instr *I = E(t, VA_AND_I32); I->dest = within; I->src[0] = l; I->src[2] = vi_imm(3u);
         }
-        p.lane = src;
-        p.group = VA_CLPER_SUBGROUP_SIZE_M_SUBGROUP16;
+        // index inside the group (unsigned compare: below 0 wraps above the limit)
+        vi_ref src = sel_alu2(t, up ? VA_ISUB_S32 : VA_IADD_U32, within, d);
+        p.lane = sel_csel(t, VA_CMPF_M_LT, VA_CSEL_U32, src, vi_imm(limit), src, within);
         return per_word(t, x, do_perm, &p);
     }
     if (sel_name_is(op, "shuffle") || sel_name_is(op, "broadcast_first") || sel_name_is(op, "broadcast")) {
         USE(t, F2);
         if (sel_name_is(op, "shuffle")) USE(t, F1);
-        if (sel_name_is(op, "broadcast_first")) p.lane = first_lane(t);
+        if (sel_name_is(op, "broadcast_first")) { p.lane = first_lane(t); p.uniform = true; }
         else p.lane = sv_comp32(t, y, 0, X_ZEXT);
         if (quad) {
-            // index inside the quad: lane & ~3 | (index & 3), in the 16-lane group
-            vi_ref base = sel_tmp(t), lid = lane_id(t);
-            vi_instr *I = E(t, VA_AND_I32); I->dest = base; I->src[0] = lid; I->src[2] = vi_imm(~3u);
-            vi_ref q = sel_tmp(t), ln = p.lane.kind == VI_IMM ? sel_mov32(t, p.lane) : p.lane;
-            I = E(t, VA_AND_I32); I->dest = q; I->src[0] = ln; I->src[2] = vi_imm(3u);
-            p.lane = sel_alu2(t, VA_IADD_U32, base, q);
-            p.group = VA_CLPER_SUBGROUP_SIZE_M_SUBGROUP16;
+            // index inside the quad (CLPER subgroup4 reads the lane of the thread's own quad)
+            if (p.lane.kind == VI_IMM) p.lane = vi_imm(p.lane.value & 3u);
+            else {
+                vi_ref q = sel_tmp(t);
+                vi_instr *I = E(t, VA_AND_I32); I->dest = q; I->src[0] = p.lane; I->src[2] = vi_imm(3u);
+                p.lane = q;
+            }
         }
-        if (p.lane.kind == VI_IMM) p.lane = sel_mov32(t, p.lane);
         return per_word(t, x, do_perm, &p);
     }
     if (sel_name_is(op, "sum")) return reduce(t, x, R_ADD, flt, sgn, quad);
