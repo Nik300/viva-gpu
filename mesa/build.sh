@@ -99,6 +99,13 @@ MESON_OPTS=(
 
 configure_macos() {
   local B="$HERE/build-macos"
+  # A cached build directory can point at Homebrew versions that were upgraded since (e.g. spirv-llvm-translator
+  # 23.1.2 -> 23.1.3: headers not found): start over when a Cellar path it uses is gone.
+  if [ -f "$B/build.ninja" ]; then
+    local p stale=""
+    for p in $(grep -o "$BREW/Cellar/[^/ ]*/[^/ ]*" "$B/build.ninja" | sort -u); do [ -d "$p" ] || stale="$p"; done
+    if [ -n "$stale" ]; then log "build dir uses $stale (gone): reconfiguring from scratch"; rm -rf "$B"; fi
+  fi
   export PKG_CONFIG_PATH="$LIBDRM/pkgconfig:$BREW/lib/pkgconfig"
   if [ -f "$B/build.ninja" ]; then
     log "reconfiguring $B"

@@ -6,6 +6,7 @@
 // named directly by the selector (preloads, ABI registers) are fixed intervals the allocator works around.
 // Out of registers -> failure: the function falls back to the NIR path (spilling: vi_spill, if enabled).
 #include "vi.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "util/ralloc.h"
@@ -205,11 +206,15 @@ static bool ra_try(vi_shader *s, int *spill)
         if (info->fixed < 0 && nw == 1 && hint_src[v] >= 0) {
             vi_vreg_info *hi = vi_vreg_get(s, (uint32_t)hint_src[v]);
             int r = hi->phys >= 0 ? hi->phys + hint_word[v] : -1;
-            if (r >= 0 && r < VI_NUM_REGS && active[r] < 0 && !(forbidden >> r & 1) && !overlaps(c.fixed[r], iv)) chosen = r;
+            // (only inside the 32-register set: a hint must not push the program to 64 registers)
+            if (r >= 0 && r < VI_NUM_REGS && (r < 16 || r >= 48) && active[r] < 0 && !(forbidden >> r & 1) && !overlaps(c.fixed[r], iv)) chosen = r;
         }
+        // two passes: first only ranges wholly inside r0-r15 / r48-r63 (32-register mode), then any
+        for (unsigned pass = 0; pass < 2 && chosen < 0; pass++)
         for (unsigned o = 0; o < VI_NUM_REGS && chosen < 0; o++) {
             unsigned r = info->fixed >= 0 ? (unsigned)info->fixed : kOrder[o];
             if (r % al || r + nw > VI_NUM_REGS) { if (info->fixed >= 0) break; continue; }
+            if (pass == 0 && info->fixed < 0 && ((r < 16 && r + nw > 16) || (r >= 16 && r < 48))) continue;
             bool free_ = true;
             for (unsigned w = 0; w < nw && free_; w++) {
                 unsigned q = r + w;
@@ -237,7 +242,24 @@ static bool ra_try(vi_shader *s, int *spill)
         }
         info->phys = (int16_t)chosen;
         for (unsigned w = 0; w < nw; w++) { active[chosen + w] = v; used |= 1ull << (chosen + w); }
-        { unsigned live = 0; for (unsigned r = 0; r < VI_NUM_REGS; r++) live += active[r] >= 0; if (live > s->max_live) s->max_live = live; }
+        { unsigned live = 0; for (unsigned r = 0; r < VI_NUM_REGS; r++) live += active[r] >= 0; if (live > s->max_live) s->max_live = live;
+          if (getenv("VMG_ISA_DEBUG_PEAK") && live >= (unsigned)atoi(getenv("VMG_ISA_DEBUG_PEAK"))) {
+              fprintf(stderr, "peak %u at %d:", live, iv.start);
+              int last = -1;
+              for (unsigned r = 0; r < VI_NUM_REGS; r++) if (active[r] >= 0 && active[r] != last) { last = active[r];
+                  vi_vreg_info *ai = vi_vreg_get(s, (uint32_t)last);
+                  fprintf(stderr, " v%d(%u%s %d..%d)", last, ai->nwords, ai->multi_def ? "m" : "", c.iv[last].start, c.iv[last].end); }
+              fprintf(stderr, "\n");
+          } }
+        static int dbg = -1;
+        if (dbg < 0) dbg = getenv("VMG_ISA_DEBUG_RA") != NULL;
+        if (dbg && chosen >= 16 && chosen < 48) {
+            fprintf(stderr, "ra: v%d (%u words, align %u) -> r%d, interval %d..%d; busy:", v, nw, al, chosen, iv.start, iv.end);
+            for (unsigned r = 0; r < VI_NUM_REGS; r++) if (active[r] >= 0 && active[r] != v) fprintf(stderr, " r%u=v%d", r, active[r]);
+            fprintf(stderr, " forbidden %llx fixed:", (unsigned long long)forbidden);
+            for (unsigned r = 0; r < VI_NUM_REGS; r++) if (c.fixed[r].start >= 0) fprintf(stderr, " r%u[%d..%d]", r, c.fixed[r].start, c.fixed[r].end);
+            fprintf(stderr, " hint %d\n", hint_src[v]);
+        }
     }
     free(order);
     free(c.iv);

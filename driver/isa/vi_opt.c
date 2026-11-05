@@ -631,6 +631,7 @@ static void schedule_block(vi_shader *s, vi_block *blk, BITSET_WORD *live_out_wo
     BITSET_WORD *live = calloc(BITSET_WORDS(total ? total : 1), sizeof(BITSET_WORD));
     if (live_out_words) memcpy(live, live_out_words, BITSET_WORDS(total ? total : 1) * sizeof(BITSET_WORD));
     vi_instr **out = malloc(n * sizeof *out);
+    unsigned *recent = calloc(n, sizeof(unsigned));   // for each node: latest placement among its users (+1)
     for (unsigned placed = 0; placed < n; placed++) {
         int best = -1, best_score = 0;
         for (i = 0; i < n; i++) {
@@ -642,9 +643,23 @@ static void schedule_block(vi_shader *s, vi_block *blk, BITSET_WORD *live_out_wo
                 for (unsigned q = 0; q < (w[k]->count ? w[k]->count : 1u); q++) if (BITSET_TEST(live, base[w[k]->value] + w[k]->word + q)) score--;
             vi_ref *r[5] = { &I->src[0], &I->src[1], &I->src[2], &I->src[3], &I->sr };
             for (unsigned k = 0; k < 5; k++) if (r[k]->kind == VI_VREG)
-                for (unsigned q = 0; q < (r[k]->count ? r[k]->count : 1u); q++) if (!BITSET_TEST(live, base[r[k]->value] + r[k]->word + q)) score++;
-            // ties: keep the original order (the latest first, bottom-up)
-            if (best < 0 || score < best_score || (score == best_score && nodes[i].order > nodes[best].order)) { best = (int)i; best_score = score; }
+                for (unsigned q = 0; q < (r[k]->count ? r[k]->count : 1u); q++) {
+                    unsigned word = base[r[k]->value] + r[k]->word + q;
+                    if (BITSET_TEST(live, word)) continue;
+                    bool dup = false;   // the same word read twice counts once
+                    for (unsigned k2 = 0; k2 < k && !dup; k2++) if (r[k2]->kind == VI_VREG)
+                        for (unsigned q2 = 0; q2 < (r[k2]->count ? r[k2]->count : 1u); q2++)
+                            if (base[r[k2]->value] + r[k2]->word + q2 == word) dup = true;
+                    for (unsigned q2 = 0; q2 < q; q2++) if (base[r[k]->value] + r[k]->word + q2 == word) dup = true;
+                    if (!dup) score++;
+                }
+            // ties: the definition of what was just placed (depth first: chains stay short), then the original order
+            static int depth_first = -1;
+            if (depth_first < 0) depth_first = getenv("VMG_ISA_SCHED_DFS") != NULL;
+            bool better = best < 0 || score < best_score ||
+                          (score == best_score && (depth_first ? (recent[i] > recent[best] || (recent[i] == recent[best] && nodes[i].order > nodes[best].order))
+                                                               : nodes[i].order > nodes[best].order));
+            if (better) { best = (int)i; best_score = score; }
         }
         if (best < 0) { free(out); goto done; }   // cycle (cannot happen): keep the block as it was
         snode *b = &nodes[best];
@@ -657,16 +672,17 @@ static void schedule_block(vi_shader *s, vi_block *blk, BITSET_WORD *live_out_wo
         vi_ref *r[5] = { &I->src[0], &I->src[1], &I->src[2], &I->src[3], &I->sr };
         for (unsigned k = 0; k < 5; k++) if (r[k]->kind == VI_VREG)
             for (unsigned q = 0; q < (r[k]->count ? r[k]->count : 1u); q++) BITSET_SET(live, base[r[k]->value] + r[k]->word + q);
-        // predecessors (instructions that must come before) lose one dependent
+        // predecessors (instructions that must come before) lose one dependent, and remember how recently
         for (i = 0; i < n; i++) {
             snode *p = &nodes[i];
-            for (unsigned k = 0; k < p->nsucc; k++) if (p->succ[k] == (unsigned)best) { p->ndeps_left--; break; }
+            for (unsigned k = 0; k < p->nsucc; k++) if (p->succ[k] == (unsigned)best) { p->ndeps_left--; recent[i] = placed + 1; break; }
         }
     }
     list_inithead(&blk->instrs);
     for (i = 0; i < n; i++) list_addtail(&out[i]->link, &blk->instrs);
     free(out);
 done:
+    free(recent);
     for (i = 0; i < n; i++) free(nodes[i].succ);
     free(nodes); free(last_def); free(last_use); free(live);
 }
