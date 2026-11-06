@@ -279,7 +279,7 @@ enum { SecActions, SecAll, SecGroups };
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return 3; }
 
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s {
-    if (s == SecActions) return 2;
+    if (s == SecActions) return 3;
     if (s == SecAll) return 3;
     return (NSInteger)_groups.count;
 }
@@ -303,6 +303,10 @@ enum { SecActions, SecAll, SecGroups };
             c.textLabel.textColor = UIColor.systemOrangeColor;
             c.imageView.image = [UIImage systemImageNamed:@"arrow.clockwise.circle.fill"];
             c.imageView.tintColor = UIColor.systemOrangeColor;
+        } else if (ip.row == 2) {
+            c.textLabel.text = @"Dynamic Island · Viva Link";
+            c.imageView.image = [UIImage systemImageNamed:@"cable.connector"];
+            c.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         } else {
             c.textLabel.text = @"Mostra chiavi interne";
             VMSwitch *sw = [VMSwitch new];
@@ -371,6 +375,9 @@ enum { SecActions, SecAll, SecGroups };
             VMConfirm(self, @"Riavviare SpringBoard?", @"Applica le impostazioni modificate. Le app aperte vengono chiuse.", @"Riavvia", YES, ^{
                 VMRunHelper(@[@"restart", @"SpringBoard"], nil, ^(int s, NSString *o) { if (s) VMAlert(self, @"SpringBoard", o); });
             });
+        else if (ip.row == 2)
+            [self.navigationController pushViewController:[[VMIslandViewController alloc] initWithStyle:UITableViewStyleInsetGrouped]
+                                                 animated:YES];
         return;
     }
     if (ip.section == SecAll) {

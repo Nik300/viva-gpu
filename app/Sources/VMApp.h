@@ -87,6 +87,9 @@ BOOL VMIsaCompatible(NSString *_Nullable *_Nullable name);
 @end
 @interface VMSpringBoardViewController : UITableViewController
 @end
+// Dynamic Island (VMIsland.m): settings and test of the SpringBoard tweak VivaIsland.dylib (Viva Link notice).
+@interface VMIslandViewController : UITableViewController
+@end
 @interface VMStatsViewController : UITableViewController
 @end
 

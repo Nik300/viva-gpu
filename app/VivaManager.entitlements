@@ -20,6 +20,7 @@
 		<string>com.apple.demo-settings</string>
 		<string>com.apple.biometrickitd</string>
 		<string>com.apple.preferences.network</string>
+		<string>it.viva.island</string>
 	</array>
 	<key>com.apple.private.persona-mgmt</key><true/>
 </dict>
