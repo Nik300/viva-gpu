@@ -155,6 +155,69 @@ static VMAccelTestResult *VMRunScalerTest(void) {
     return r;
 }
 
+// ---- Scaler NV12 test: 420f -> BGRA at the same size (the MDP path with vivascaler=2) ---------------------------------
+
+static VMAccelTestResult *VMRunNV12Test(void) {
+    VMAccelTestResult *r = [VMAccelTestResult new];
+    VMAccelLoad();
+    if (!pIOSACreate || !pIOSATransfer) { r.summary = @"IOSurfaceAccelerator.framework non trovato"; return r; }
+    IOSARef acc = NULL;
+    int err = pIOSACreate(kCFAllocatorDefault, NULL, &acc);
+    if (err || !acc) { r.summary = [NSString stringWithFormat:@"Servizio non disponibile (0x%x)", err]; return r; }
+    const int W = 640, H = 360;
+    NSDictionary *planeY = @{ (id)kIOSurfacePlaneWidth: @(W), (id)kIOSurfacePlaneHeight: @(H), (id)kIOSurfacePlaneBytesPerElement: @1,
+                              (id)kIOSurfacePlaneBytesPerRow: @(W), (id)kIOSurfacePlaneOffset: @0, (id)kIOSurfacePlaneSize: @(W * H) };
+    NSDictionary *planeC = @{ (id)kIOSurfacePlaneWidth: @(W / 2), (id)kIOSurfacePlaneHeight: @(H / 2), (id)kIOSurfacePlaneBytesPerElement: @2,
+                              (id)kIOSurfacePlaneBytesPerRow: @(W), (id)kIOSurfacePlaneOffset: @(W * H), (id)kIOSurfacePlaneSize: @(W * H / 2) };
+    NSDictionary *p = @{ (id)kIOSurfaceWidth: @(W), (id)kIOSurfaceHeight: @(H), (id)kIOSurfacePixelFormat: @((uint32_t)'420f'),
+                         (id)kIOSurfaceAllocSize: @(W * H * 3 / 2), (id)kIOSurfacePlaneInfo: @[ planeY, planeC ] };
+    IOSurfaceRef src = IOSurfaceCreate((__bridge CFDictionaryRef)p), dst = VMSurface(W, H);
+    if (!src || !dst) { r.summary = @"IOSurfaceCreate fallita"; if (src) CFRelease(src); if (dst) CFRelease(dst); CFRelease((CFTypeRef)acc); return r; }
+    IOSurfaceLock(src, 0, NULL);
+    uint8_t *y = IOSurfaceGetBaseAddressOfPlane(src, 0), *uv = IOSurfaceGetBaseAddressOfPlane(src, 1);
+    size_t yb = IOSurfaceGetBytesPerRowOfPlane(src, 0), cb = IOSurfaceGetBytesPerRowOfPlane(src, 1);
+    for (int j = 0; j < H; j++) for (int i = 0; i < W; i++) y[j * yb + i] = (uint8_t)(255 * i / (W - 1));
+    for (int j = 0; j < H / 2; j++) for (int i = 0; i < W / 2; i++) {
+        uv[j * cb + 2 * i] = (uint8_t)(255 * j / (H / 2 - 1));                 // U
+        uv[j * cb + 2 * i + 1] = (uint8_t)(255 - 255 * i / (W / 2 - 1));      // V
+    }
+    // CPU reference: BT.601 full range, chroma replicated
+    uint8_t *ref = malloc(W * H * 4);
+    for (int j = 0; j < H; j++) for (int i = 0; i < W; i++) {
+        double Y = y[j * yb + i], U = uv[(j / 2) * cb + (i / 2) * 2] - 128.0, V = uv[(j / 2) * cb + (i / 2) * 2 + 1] - 128.0;
+        double R = Y + 1.402 * V, G = Y - 0.344136 * U - 0.714136 * V, B = Y + 1.772 * U;
+        uint8_t *q = ref + (j * W + i) * 4;
+        q[0] = (uint8_t)MAX(0, MIN(255, lround(B))); q[1] = (uint8_t)MAX(0, MIN(255, lround(G)));
+        q[2] = (uint8_t)MAX(0, MIN(255, lround(R))); q[3] = 255;
+    }
+    IOSurfaceUnlock(src, 0, NULL);
+    NSDictionary *before = VMServiceProperties("AppleM2ScalerCSCDriver")[@"VivaScalerStats"];
+    CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
+    err = pIOSATransfer(acc, src, dst, NULL, NULL, NULL, NULL);
+    double ms = (CFAbsoluteTimeGetCurrent() - t0) * 1000;
+    NSDictionary *after = VMServiceProperties("AppleM2ScalerCSCDriver")[@"VivaScalerStats"];
+    BOOL mdp = [after[@"mdp"] longLongValue] > [before[@"mdp"] longLongValue];
+    IOSurfaceLock(dst, kIOSurfaceLockReadOnly, NULL);
+    const uint8_t *d = IOSurfaceGetBaseAddress(dst);
+    size_t db = IOSurfaceGetBytesPerRow(dst);
+    int maxErr = 0, bad = 0;
+    for (int j = 0; j < H; j++) for (int i = 0; i < W; i++) for (int c = 0; c < 3; c++) {
+        int e = abs((int)d[j * db + i * 4 + c] - (int)ref[(j * W + i) * 4 + c]);
+        maxErr = MAX(maxErr, e);
+        if (e > 6) bad++;
+    }
+    r.result = VMImageFromBGRA(d, W, H, db);
+    IOSurfaceUnlock(dst, kIOSurfaceLockReadOnly, NULL);
+    r.reference = VMImageFromBGRA(ref, W, H, W * 4);
+    r.source = r.reference;
+    r.summary = err ? [NSString stringWithFormat:@"KO: TransferSurface 0x%x", err]
+                    : [NSString stringWithFormat:@"%@ — 420f 640×360 → BGRA, errore max %d, %d valori oltre 6, %.2f ms, %@",
+                       bad == 0 ? @"OK" : @"KO", maxErr, bad, ms, mdp ? @"motori MDP" : @"CPU (MDP non usato)"];
+    free(ref);
+    CFRelease(src); CFRelease(dst); CFRelease((CFTypeRef)acc);
+    return r;
+}
+
 // ---- JPEG test: VideoToolbox's JPEG encoder (the hardware one when AppleJPEGDriver is published) ----------------------
 
 static VMAccelTestResult *VMRunJpegTest(void) {
@@ -324,7 +387,7 @@ static NSString *VMArg(NSArray<NSString *> *tokens, NSString *key) {
     switch (s) {
     case SecState: return 2;
     case SecNext: return 4;
-    case SecScaler: return _scalerTest ? 2 : 1;
+    case SecScaler: return _scalerTest ? 3 : 2;
     case SecJpeg: return _jpegTest ? 2 : 1;
     case SecMPS: return _mpsOutput ? 2 : 1;
     default: return 1;
@@ -392,9 +455,9 @@ static NSString *VMStatsLine(NSDictionary *stats, NSArray<NSString *> *keys) {
         return c;
     }
     if (ip.section == SecScaler) {
-        if (ip.row == 0) {
+        if (ip.row <= 1) {
             UITableViewCell *c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
-            c.textLabel.text = _running ? @"In esecuzione…" : @"Esegui il test dello scaler";
+            c.textLabel.text = _running ? @"In esecuzione…" : ip.row == 0 ? @"Test BGRA → BGRA con scala (CPU)" : @"Test NV12 (420f) → BGRA stessa dimensione (MDP)";
             c.textLabel.textColor = self.view.tintColor;
             return c;
         }
@@ -461,12 +524,13 @@ static NSString *VMStatsLine(NSDictionary *stats, NSArray<NSString *> *keys) {
 
 - (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
     [tv deselectRowAtIndexPath:ip animated:YES];
-    if (_running || ip.row != 0) return;
+    if (_running || ip.row > (ip.section == SecScaler ? 1 : 0)) return;
     if (ip.section == SecScaler) {
         _running = YES;
+        BOOL nv12 = ip.row == 1;
         [tv reloadSections:[NSIndexSet indexSetWithIndex:SecScaler] withRowAnimation:UITableViewRowAnimationNone];
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-            VMAccelTestResult *r = VMRunScalerTest();
+            VMAccelTestResult *r = nv12 ? VMRunNV12Test() : VMRunScalerTest();
             dispatch_async(dispatch_get_main_queue(), ^{
                 self->_running = NO;
                 self->_scalerTest = r;
