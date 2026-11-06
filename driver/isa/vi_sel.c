@@ -591,6 +591,8 @@ static bool terminator(S *t, LLVMValueRef term, LLVMBasicBlockRef bb, vi_block *
     case LLVMSwitch: {
         sv *sel = sel_ssa(t, ts_LLVMGetOperand(term, 0));
         if (!sel) return false;
+        // an odd-width selector (switch i5 after instcombine narrows a `& 31`) keeps garbage above its width
+        sel = sel_zext_odd(t, sel, ts_LLVMTypeOf(ts_LLVMGetOperand(term, 0)));
         unsigned ncases = ts_LLVMGetNumSuccessors(term) - 1;
         vi_block *at = cur;
         for (unsigned k = 0; k < ncases; k++) {

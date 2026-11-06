@@ -166,5 +166,6 @@ sv *sel_io_call(S *t, LLVMValueRef inst, const char *name);           // stage b
 bool sel_io_finish(S *t);
 
 sv *sel_subgroup(S *t, LLVMValueRef inst, const char *name);          // vi_sel_sg.c
+sv *sel_zext_odd(S *t, sv *v, LLVMTypeRef ty);                        // vi_sel_alu.c
 
 bool sel_function(S *t, LLVMValueRef outputs_md, LLVMValueRef inputs_md, vi_block **exit_out);   // vi_sel.c

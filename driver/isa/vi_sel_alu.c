@@ -44,6 +44,9 @@ static sv *normalize_odd(S *t, sv *v, unsigned w, bool sgn)
     return sv_from_comps32(t, 32, v->ncomp, c);
 }
 
+// An integer value of LLVM type `ty` with the bits above an odd width cleared (switch selectors).
+sv *sel_zext_odd(S *t, sv *v, LLVMTypeRef ty) { return normalize_odd(t, v, llvm_int_width(ty), false); }
+
 // ---- Elementwise engine ---------------------------------------------------------------------------------------------
 
 typedef vi_ref (*fn32)(S *t, int op, vi_ref *a, unsigned nargs);
