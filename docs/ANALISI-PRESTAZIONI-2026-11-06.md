@@ -1,5 +1,24 @@
 # Analisi dell'efficienza grafica (2026-11-06): verdetto e piano
 
+## Stato dell'implementazione (2026-11-07)
+
+| voce | dove | stato | toggle |
+|---|---|---|---|
+| P1 boost CPU per l'interfaccia | kernel 0183 (`viva_cpufreq.c`, `VivaGT9896.cpp`, `SweetFramebuffer.cpp`, `gpu kv`) | fatto, compilato in CI; **non provato sul telefono** | `vivacpuboostms=0`, `vivacpuboost=MHz`, link `cpu boost on\|off` |
+| P2 pool di pagine contigue | kernel 0184 (`SweetSurface.cpp`, `SweetFramebuffer.cpp`) | fatto, compilato; non provato | `vivafbpool=N` (0 = come prima) |
+| P3 chi aspetta in SwapWait | kernel 0184: contatori per motivo in `disp` / `disp kv` | contatori fatti; la misura e le leve (a)-(c) richiedono il telefono | `disp lat reset` |
+| P4 scissor dai vertici | driver `vmg_bounds.c` (gpu db7e512) | fatto; sul Mac identico bit per bit con/senza (`tests/bounds.m`) | `VMG_NO_DRAW_BOUNDS=1` |
+| P5 primo draw costante → clear | driver `vmg_bounds.c` / `vmg_exec.c` | fatto, ma il trace mostra che `attachment_clear` di CA è a metà pass con mask 0 su c0 (azzera solo c1): su CA scatterà di rado | `VMG_NO_CLEAR_DRAW=1` |
+| P6 pitch dei client a 64 | kernel 0184 (`sweet_surface_layout`) | fatto, compilato; non provato | `vivasurfpitch=0` |
+| P7 CRC sulle risorse importate | – | rimandato: il buffer CRC dovrebbe stare in una BO separata (l'offset è relativo al piano dell'IOSurface) e un CRC vecchio dopo una scrittura di un altro processo o della CPU salterebbe tile cambiati | – |
+| P8 rendering nativo | – | rimandato (il documento stesso lo mette dopo P1-P6) | – |
+| P9 banda DRAM | `passbench [runs] bw` | benchmark fatto; misura sul telefono da fare | – |
+
+Contatori: `VMG_TRACE_FRAME` stampa `bounded N (K kpx less) clears M` per command buffer; la pagina condivisa
+delle statistiche (versione 3) ha `bounded_draws`, `bounded_kpx`, `clear_draws`. Kernel: `cpu` (boost, ms in boost,
+segnali, sospensioni della preferenza A76), `disp` (SwapWait per motivo, pagine dal pool / contigue / sparse, pitch
+arrotondati).
+
 Domanda: con acceleratori (0170-0181), compilatore diretto AIR → Valhall (`VMG_ISA=1`) e kernel 0180 sul telefono,
 le animazioni sono al limite dell'hardware (MT6781: Mali-G57 MC2, 6×A55 + 2×A76) o il software rallenta ancora la
 presentazione dei frame?
