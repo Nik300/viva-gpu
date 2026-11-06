@@ -479,12 +479,12 @@ static void VMTraceFramePrint(VMCommandBuffer *cb, VMFrameTrace *t, uint64_t don
     double total = VMAbsMs(done - t->commit);
     if (total < VMTraceFrameMs()) return;
     fprintf(stderr, "vmg: cb %llu '%s' %.1f ms: queue %.1f replay %.1f flush %.1f gpu %.1f | %u passes %u draws %u dispatches "
-            "%u blits, copies %u in (%llu KB) %u out (%llu KB) | %llu jobs, create_bo %llu gem_close %llu wait_bo %llu "
-            "sync_wait %llu import_surf %llu\n", (unsigned long long)seq, cb.label ? cb.label.UTF8String : "", total,
+            "%u blits, copies %u in (%llu KB) %u out (%llu KB), bounded %u (%llu kpx less) clears %u | %llu jobs, create_bo %llu "
+            "gem_close %llu wait_bo %llu sync_wait %llu import_surf %llu\n", (unsigned long long)seq, cb.label ? cb.label.UTF8String : "", total,
             VMAbsMs(t->start - t->commit), VMAbsMs(t->replayed - t->start), VMAbsMs(t->flushed - t->replayed),
             VMAbsMs(done - t->flushed), t->st.passes, t->st.draws, t->st.dispatches, t->st.blits, t->st.copy_in,
             (unsigned long long)(t->st.copy_in_bytes >> 10), t->st.copy_out, (unsigned long long)(t->st.copy_out_bytes >> 10),
-            (unsigned long long)t->jobs, (unsigned long long)t->calls[VGPU_SEL_CREATE_BO],
+            t->st.bounded_draws, (unsigned long long)(t->st.bounded_px / 1000), t->st.clear_draws, (unsigned long long)t->jobs, (unsigned long long)t->calls[VGPU_SEL_CREATE_BO],
             (unsigned long long)t->calls[VGPU_SEL_GEM_CLOSE], (unsigned long long)t->calls[VGPU_SEL_WAIT_BO],
             (unsigned long long)t->calls[VGPU_SEL_SYNCOBJ_WAIT], (unsigned long long)t->calls[VGPU_SEL_IMPORT_IOSURFACE]);
 }

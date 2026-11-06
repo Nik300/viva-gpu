@@ -77,7 +77,7 @@ driver() {
     echo "cc $(basename "$f")"
     $CC $TARGET -O2 -g -Wall -Wno-four-char-constants -I"$GPU/libdrm-xnu/include" -I"$GPU/libdrm-xnu/include/libdrm" -c "$f" -o "$o"
   done
-  for f in vmg_air vmg_screen vmg_exec; do
+  for f in vmg_air vmg_screen vmg_exec vmg_bounds; do
     stale "$OBJ/$f.o" "$GPU/driver/$f.c" "${dh[@]}" "${vh[@]}" "$GPU"/driver/isa/*.h || continue
     echo "cc $f.c"
     $CC $TARGET -std=gnu11 -O2 -g -DVMG_HAVE_LLVMPIPE=0 $CF -I"$GPU/driver" -I"$GPU/driver/isa" -c "$GPU/driver/$f.c" -o "$OBJ/$f.o"

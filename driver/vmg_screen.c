@@ -1271,7 +1271,16 @@ vmg_air_input *vmg_air_input_load(const char *path)
     return in;   // (owns `data` for the process lifetime: test tools only)
 }
 
+static vmg_shader *shader_create(vmg_device *dev, const vmg_air_input *in, vmg_reflection *refl, char **error);
+
 vmg_shader *vmg_shader_create(vmg_device *dev, const vmg_air_input *in, vmg_reflection *refl, char **error)
+{
+    vmg_shader *sh = shader_create(dev, in, refl, error);
+    if (sh && (sh->stage == VMG_VERTEX || sh->stage == VMG_FRAGMENT)) sh->bounds = vmg_bounds_create(dev, in, sh->stage, sh->name);
+    return sh;
+}
+
+static vmg_shader *shader_create(vmg_device *dev, const vmg_air_input *in, vmg_reflection *refl, char **error)
 {
     vair_dump(in);
     (void)nir_stage_of;
@@ -1387,6 +1396,7 @@ vmg_shader *vmg_shader_create(vmg_device *dev, const vmg_air_input *in, vmg_refl
 void vmg_shader_release(vmg_device *dev, vmg_shader *sh)
 {
     if (!sh) return;
+    vmg_bounds_free(sh->bounds);
     ralloc_free(sh->nir_keep);
     isa_input_free(sh->isa_in);
     if (sh->cso) {

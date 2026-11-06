@@ -99,6 +99,8 @@ struct vmg_shader {
     // input for fragment variants (outputs without an attachment dropped, B7).
     struct vmg_isa_program *isa;
     struct vmg_isa_input *isa_in;
+    // P4/P5 (vmg_bounds.c): vertex shaders evaluated on the CPU for draw bounds; constant-colour clear shaders.
+    struct vmg_shader_bounds *bounds;
 };
 
 struct vmg_render_pipeline {
@@ -140,6 +142,7 @@ struct vmg_device {
     struct pipe_framebuffer_state fb;
     vmg_pass_desc pass;
     bool in_pass;
+    uint32_t pass_draws;              // draws so far in this pass (P5: only the first may become a clear)
     // VMG_TRACE_CB: fragment shaders drawn by the current command buffer (printed at the flush when the set changes)
     const char *cb_fs[24]; unsigned cb_fs_count, cb_draws; char cb_last[512];
     uint64_t copy_epoch;               // bumped by every vmg_flush and every copy-out of a copied texture
@@ -168,6 +171,15 @@ char **vmg_air_vertex_outputs_uncached(const void *bitcode, size_t size, unsigne
 // vmg_formats.c
 enum pipe_format vmg_pipe_format(unsigned mtl_format);
 enum pipe_format vmg_vertex_format(unsigned mtl_vertex_format);
+
+// vmg_bounds.c (P4/P5 of docs/ANALISI-PRESTAZIONI-2026-11-06.md)
+struct vmg_shader_bounds *vmg_bounds_create(vmg_device *dev, const vmg_air_input *in, enum vmg_stage stage, const char *name);
+void vmg_bounds_free(struct vmg_shader_bounds *b);
+// Scissor covering a draw's vertices (within Metal's scissor); false = unknown (keep Metal's).
+bool vmg_bounds_draw(vmg_device *dev, const vmg_render_pipeline *p, const vmg_draw_info *d, struct pipe_scissor_state *out);
+const char *vmg_bounds_why(void);   // why the last vmg_bounds_draw said false (traces)
+// Colours a fragment shader writes with constants only (mask) and their bits; false = not such a shader.
+bool vmg_bounds_clear_colors(const vmg_shader *fs, uint32_t *mask, uint32_t bits[][4]);
 bool vmg_format_is_depth(unsigned mtl_format), vmg_format_is_stencil(unsigned mtl_format);
 bool vmg_format_is_integer(unsigned mtl_format), vmg_format_is_signed_integer(unsigned mtl_format);
 

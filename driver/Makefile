@@ -6,7 +6,7 @@ MESA_CF   = $(filter-out -std=%,$(shell cat $(MESA)/cflags.txt))
 MESA_LD   = $(shell cat $(MESA)/ldflags.txt)
 CFLAGS    = -O1 -g -Wall -Wno-unused-function -Wno-four-char-constants -DVMG_HAVE_LLVMPIPE=1 $(MESA_CF) -I. -Iisa
 OUT       = out/macos
-C_SRC     = vmg_air.c vmg_screen.c vmg_exec.c $(wildcard isa/*.c)
+C_SRC     = vmg_air.c vmg_screen.c vmg_exec.c vmg_bounds.c $(wildcard isa/*.c)
 M_SRC     = vmg_formats.m
 OBJ       = $(addprefix $(OUT)/,$(C_SRC:.c=.o) $(M_SRC:.m=.o))
 HDR       = vmg.h vmg_internal.h vmg_llvm.h $(wildcard isa/*.h)
@@ -56,10 +56,12 @@ $(OUT)/phase3: $(SHIM)/tests/phase2.m $(OUT)/libVivaMetal.dylib
 $(OUT)/phase1 $(OUT)/translate $(OUT)/uploads: $(OUT)/%: $(SHIM)/tests/%.m $(OUT)/libVivaMetal.dylib
 	@$(CC) $(OBJC) -I$(SHIM)/src $< -L$(OUT) -lVivaMetal -Wl,-rpath,@executable_path $(FRAMEWORKS) -framework Cocoa -o $@
 
-metal: $(OUT)/libVivaMetal.dylib $(addprefix $(OUT)/,$(SHIM_TESTS)) $(OUT)/compute $(OUT)/ca $(OUT)/isatest
+metal: $(OUT)/libVivaMetal.dylib $(addprefix $(OUT)/,$(SHIM_TESTS)) $(OUT)/compute $(OUT)/ca $(OUT)/isatest $(OUT)/bounds
 test-metal: metal
 	@for t in $(SHIM_TESTS); do echo "== $$t (llvmpipe)"; $(OUT)/$$t | tail -2 || exit 1; done
 $(OUT)/compute: tests/compute.m $(OUT)/libVivaMetal.dylib
+	@$(CC) $(OBJC) $< -L$(OUT) -lVivaMetal -Wl,-rpath,@executable_path $(FRAMEWORKS) -o $@
+$(OUT)/bounds: tests/bounds.m $(OUT)/libVivaMetal.dylib
 	@$(CC) $(OBJC) $< -L$(OUT) -lVivaMetal -Wl,-rpath,@executable_path $(FRAMEWORKS) -o $@
 $(OUT)/ca: tests/ca.m $(OUT)/libVivaMetal.dylib
 	@$(CC) $(OBJC) $< -L$(OUT) -lVivaMetal -Wl,-rpath,@executable_path $(FRAMEWORKS) -framework ImageIO -framework CoreText -framework UniformTypeIdentifiers -o $@

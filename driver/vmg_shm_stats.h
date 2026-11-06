@@ -9,7 +9,7 @@
 
 #define VMG_SHM_STATS_DIR     "/private/var/tmp/vmg-stats"
 #define VMG_SHM_STATS_MAGIC   0x534d4756u   // 'VGMS'
-#define VMG_SHM_STATS_VERSION 2
+#define VMG_SHM_STATS_VERSION 3
 #define VMG_SHM_STATS_HAS_ISA 1
 #define VMG_SHM_STATS_CALLS   32            // >= VGPU_SEL_COUNT (uapi selectors, by index)
 
@@ -46,6 +46,11 @@ typedef struct {
     uint64_t isa_compile_us;         // total ISA compile time
     char     isa_last_fallback[96];  // "<function>: <first unsupported operation / disabled feature>"
     uint32_t gpu_product_id;         // 0x9093 on the Mali-G57 MC2 (Viva Manager's compatibility check)
+
+    // Version 3: draw bounds (P4) and clear draws (P5) of docs/ANALISI-PRESTAZIONI-2026-11-06.md.
+    uint64_t bounded_draws;          // draws given a scissor from their vertices
+    uint64_t bounded_kpx;            // thousands of pixels those scissors took off the draws' areas
+    uint64_t clear_draws;            // first draws of a pass turned into a clear
 } vmg_shm_stats;
 
 #endif

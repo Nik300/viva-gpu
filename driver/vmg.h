@@ -158,6 +158,8 @@ const char *vmg_air_tag(void);
 void vmg_air_cache_stats(uint64_t *hits, uint64_t *misses);
 // Driver build id (hex, the translation cache's key prefix; "unknown" before the first device).
 const char *vmg_driver_build_id(void);
+// Draw bounds (P4) and clear draws (P5) of this process: draws bounded, thousands of pixels saved, draws made clears.
+void vmg_bounds_counters(uint64_t *draws, uint64_t *kpx, uint64_t *clears);
 // Direct AIR -> Valhall ISA compiler counters of this process (driver/isa): functions compiled, fallbacks to the NIR
 // path, compile time, last fallback reason. And the GPU product id of the Panfrost device (0x9093 = Mali-G57 MC2;
 // 0 before a device exists or on other drivers).
@@ -281,6 +283,8 @@ typedef struct {
     uint32_t passes, draws, dispatches, blits;
     uint32_t copy_in, copy_out;             // CPU copies of IOSurface/buffer textures the GPU cannot use in place
     uint64_t copy_in_bytes, copy_out_bytes;
+    uint32_t bounded_draws, clear_draws;    // P4: draws given a scissor from their vertices; P5: draws made pipe->clear
+    uint64_t bounded_px;                    // P4: pixels those scissors removed from the draws' areas
 } vmg_cb_stats;
 void vmg_stats_take(vmg_device *dev, vmg_cb_stats *out);
 // timeout_ns: 0 = poll; UINT64_MAX = forever. Returns true when signalled.

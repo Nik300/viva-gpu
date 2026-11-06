@@ -94,6 +94,7 @@ static void VMShmStatsUpdate(void) {
     vmg_air_cache_stats(&s->air_cache_hits, &s->air_cache_misses);
     vmg_isa_counters(&s->isa_functions, &s->isa_fallbacks, &s->isa_compile_us, s->isa_last_fallback, sizeof s->isa_last_fallback);
     s->gpu_product_id = vmg_gpu_product_id();
+    vmg_bounds_counters(&s->bounded_draws, &s->bounded_kpx, &s->clear_draws);
     uint64_t calls[VGPU_SEL_COUNT];
     vgpu_counters(calls, &s->jobs);
     for (unsigned i = 0; i < VGPU_SEL_COUNT && i < VMG_SHM_STATS_CALLS; i++) s->calls[i] = calls[i];

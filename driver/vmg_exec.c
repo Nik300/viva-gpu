@@ -221,6 +221,15 @@ static void set_surface(struct pipe_surface *ps, vmg_texture *t, unsigned level,
     ps->first_layer = ps->last_layer = (uint16_t)layer;
 }
 
+static uint64_t g_bounded_draws, g_bounded_px, g_clear_draws;   // process totals (GPU queue only writes them)
+
+void vmg_bounds_counters(uint64_t *draws, uint64_t *kpx, uint64_t *clears)
+{
+    *draws = __atomic_load_n(&g_bounded_draws, __ATOMIC_RELAXED);
+    *kpx = __atomic_load_n(&g_bounded_px, __ATOMIC_RELAXED) / 1000;
+    *clears = __atomic_load_n(&g_clear_draws, __ATOMIC_RELAXED);
+}
+
 void vmg_stats_take(vmg_device *dev, vmg_cb_stats *out)
 {
     *out = dev->stats;
@@ -280,6 +289,7 @@ void vmg_cmd_begin_pass(vmg_device *dev, const vmg_pass_desc *pass)
     fb->samples = (uint8_t)(pass->samples > 1 ? pass->samples : 0);
     pipe->set_framebuffer_state(pipe, fb);
     dev->in_pass = true;
+    dev->pass_draws = 0;
 
     // Metal defaults for the pass: viewport and scissor cover the framebuffer.
     vmg_viewport vp = { 0, 0, w, h, 0, 1 };
@@ -712,12 +722,65 @@ static enum mesa_prim prim_of(uint8_t p)
     return p < 5 ? m[p] : MESA_PRIM_TRIANGLES;
 }
 
+// P5: the pass's first draw writes constant colours over the whole framebuffer with nothing else going on: a clear.
+static bool draw_as_clear(vmg_device *dev, const vmg_render_pipeline *p, const struct pipe_scissor_state *bounds)
+{
+    uint32_t mask, bits[VMG_MAX_COLOR][4];
+    const struct pipe_framebuffer_state *fb = &dev->fb;
+    if (dev->pass_draws != 0 || dev->dsa || dev->visibility_mode || p->desc.alpha_to_coverage || dev->raster.cull_face != PIPE_FACE_NONE ||
+        fb->samples > 1 || !vmg_bounds_clear_colors(p->desc.fragment, &mask, bits))
+        return false;
+    if (bounds->minx != 0 || bounds->miny != 0 || bounds->maxx < fb->width || bounds->maxy < fb->height) return false;
+    unsigned buffers = 0;
+    for (unsigned i = 0; i < fb->nr_cbufs; i++) {
+        if (!fb->cbufs[i].texture) continue;
+        const vmg_color_attachment *c = &p->desc.color[i];
+        if (!(mask & (1u << i))) {
+            if (c->write_mask) return false;   // written by something we do not know
+            continue;
+        }
+        if (c->write_mask == 0) continue;     // not written: untouched by the draw too
+        if (c->enabled || c->write_mask != 0xf) return false;
+        buffers |= PIPE_CLEAR_COLOR0 << i;
+    }
+    if (!buffers) return false;
+    for (unsigned i = 0; i < fb->nr_cbufs; i++) {
+        if (!(buffers & (PIPE_CLEAR_COLOR0 << i))) continue;
+        union pipe_color_union cc;
+        memcpy(cc.ui, bits[i], sizeof cc.ui);   // float outputs clear float/unorm targets, integer bits integer ones
+        dev->pipe->clear(dev->pipe, PIPE_CLEAR_COLOR0 << i, 0, 0, NULL, &cc, 0, 0);
+    }
+    return true;
+}
+
 void vmg_cmd_draw(vmg_device *dev, const vmg_draw_info *d)
 {
     dev->stats.draws++;
     vmg_render_pipeline *p = dev->pipeline;
     if (!p || !p->desc.vertex) return;
     struct pipe_context *pipe = dev->pipe;
+    // P4: a scissor from the draw's vertices, so the batch (and its tile loads/stores) covers only what is drawn.
+    struct pipe_scissor_state bounds;
+    bool bounded = vmg_bounds_draw(dev, p, d, &bounds);
+    if (bounded && draw_as_clear(dev, p, &bounds)) {
+        dev->pass_draws++;
+        dev->stats.clear_draws++;
+        __atomic_fetch_add(&g_clear_draws, 1, __ATOMIC_RELAXED);
+        return;
+    }
+    dev->pass_draws++;
+    bool bounds_known = bounded;
+    bounded = bounded && (bounds.minx != dev->scissor.minx || bounds.miny != dev->scissor.miny ||
+                          bounds.maxx != dev->scissor.maxx || bounds.maxy != dev->scissor.maxy);
+    if (bounded) {
+        uint64_t full = (uint64_t)(dev->scissor.maxx - dev->scissor.minx) * (dev->scissor.maxy - dev->scissor.miny);
+        uint64_t saved = full - (uint64_t)(bounds.maxx - bounds.minx) * (bounds.maxy - bounds.miny);
+        dev->stats.bounded_draws++;
+        dev->stats.bounded_px += saved;
+        __atomic_fetch_add(&g_bounded_draws, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&g_bounded_px, saved, __ATOMIC_RELAXED);
+        pipe->set_scissor_states(pipe, 0, 1, &bounds);
+    }
     flush_raster(dev);
     bind_stage(dev, VMG_VERTEX, p->desc.vertex, NULL, 0);
     if (p->desc.fragment) bind_stage(dev, VMG_FRAGMENT, p->desc.fragment, NULL, 0);
@@ -734,11 +797,15 @@ void vmg_cmd_draw(vmg_device *dev, const vmg_draw_info *d)
     if (trace_draw < 0) trace_draw = getenv("VMG_TRACE_DRAW") ? atoi(getenv("VMG_TRACE_DRAW")) : 0;
     if (trace_draw == 1) {
         const vmg_color_attachment *c = &p->desc.color[0];
-        fprintf(stderr, "vmg: draw %s/%s prim %u count %u inst %u blend %d %u,%u,%u,%u op %u,%u mask %x scissor %u,%u-%u,%u%s%s\n",
+        fprintf(stderr, "vmg: draw %s/%s prim %u count %u inst %u blend %d %u,%u,%u,%u op %u,%u mask %x scissor %u,%u-%u,%u%s%s",
                 p->desc.vertex->name, p->desc.fragment ? p->desc.fragment->name : "-", d->primitive, d->count,
                 d->instance_count, c->enabled, c->src_rgb, c->dst_rgb, c->src_alpha, c->dst_alpha, c->rgb_op, c->alpha_op,
                 c->write_mask, dev->scissor.minx, dev->scissor.miny, dev->scissor.maxx, dev->scissor.maxy,
                 dev->dsa ? " dsa" : "", p->fs_variant ? " variant" : "");
+        if (bounded) fprintf(stderr, " bounds %u,%u-%u,%u", bounds.minx, bounds.miny, bounds.maxx, bounds.maxy);
+        else if (bounds_known) fprintf(stderr, " bounds full");
+        else if (p->desc.vertex->bounds) fprintf(stderr, " bounds ? (%s)", vmg_bounds_why());
+        fprintf(stderr, "\n");
     }
     // Vertex buffers: the vertex stage's buffer slots the vertex descriptor reads.
     struct pipe_vertex_buffer vb[VMG_MAX_VERTEX_ATTRIBS];
@@ -771,6 +838,7 @@ void vmg_cmd_draw(vmg_device *dev, const vmg_draw_info *d)
         ind.stride = d->index_buffer ? 20 : 16;
     }
     pipe->draw_vbo(pipe, &info, 0, d->indirect ? &ind : NULL, &draw, 1);
+    if (bounded) pipe->set_scissor_states(pipe, 0, 1, &dev->scissor);
 }
 
 void vmg_cmd_dispatch(vmg_device *dev, const vmg_dispatch_info *d)

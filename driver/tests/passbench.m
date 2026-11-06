@@ -1,13 +1,16 @@
 // What a render pass costs on the phone's GPU: full-screen passes (the size of CoreAnimation's framebuffer) on a
 // linear IOSurface (what backboardd renders into) and on a private texture (Panfrost: AFBC), with each load/store
 // combination, and full-screen blended draws within one pass. Times are commit -> completed, median of the runs.
-// Usage: passbench [runs]
+// P9 (docs/ANALISI-PRESTAZIONI-2026-11-06.md): GPU memory bandwidth, a compute copy of a framebuffer-sized buffer
+// (read + write) and a texture-to-texture blit; below ~10 GB/s the DRAM clock (DVFSRC) is worth configuring.
+// Usage: passbench [runs] [bw]          (bw: only the bandwidth part)
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #import <IOSurface/IOSurfaceRef.h>
 #import <mach/mach_time.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 id<MTLDevice> TSMtlCreateDevice(void);
 
@@ -20,7 +23,9 @@ static NSString *const kMSL = @
     "fragment half4 fs(constant float4 &c [[buffer(0)]]) { return half4(c); }\n"
     "fragment half4 fs_lit() { return half4(0.5, 0.2, 0.3, 0.25); }\n"
     "fragment half4 fs_tex(V v [[stage_in]], texture2d<half> t [[texture(0)]], sampler s [[sampler(0)]]) {\n"
-    "  return t.sample(s, v.p.xy / float2(1125, 2436)) * half(0.25); }\n";
+    "  return t.sample(s, v.p.xy / float2(1125, 2436)) * half(0.25); }\n"
+    "kernel void copy4(device const uint4 *a [[buffer(0)]], device uint4 *b [[buffer(1)]], uint i [[thread_position_in_grid]]) { b[i] = a[i]; }\n"
+    "kernel void fill4(device uint4 *b [[buffer(0)]], uint i [[thread_position_in_grid]]) { b[i] = uint4(i); }\n";
 
 static id<MTLTexture> g_src;   // sampled by fs_tex
 static id<MTLSamplerState> g_smp;
@@ -87,9 +92,72 @@ static double run(id<MTLCommandQueue> q, id<MTLRenderPipelineState> ps, id<MTLTe
     return m;
 }
 
+// Median ms of a command buffer made by `encode`.
+static double timed(id<MTLCommandQueue> q, int runs, void (^encode)(id<MTLCommandBuffer>)) {
+    double *v = calloc(runs, sizeof *v);
+    for (int r = -2; r < runs; r++) {
+        id<MTLCommandBuffer> cb = [q commandBuffer];
+        encode(cb);
+        uint64_t t0 = mach_absolute_time();
+        [cb commit];
+        [cb waitUntilCompleted];
+        if (r >= 0) v[r] = ms(mach_absolute_time() - t0);
+    }
+    qsort(v, runs, sizeof *v, cmp);
+    double m = v[runs / 2];
+    free(v);
+    return m;
+}
+
+// P9: GB/s of a compute copy (bytes read + written) and of a write-only fill, at 1x and 4x the framebuffer size (the
+// fixed submit cost shows as the difference), and of a private texture blit.
+static void bandwidth(id<MTLDevice> dev, id<MTLLibrary> lib, id<MTLCommandQueue> q, int runs) {
+    NSError *err = nil;
+    id<MTLComputePipelineState> copy = [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"copy4"] error:&err];
+    id<MTLComputePipelineState> fill = [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"fill4"] error:&err];
+    if (!copy || !fill) { printf("bandwidth: %s\n", err.description.UTF8String); return; }
+    printf("bandwidth (P9), median of %d runs:\n", runs);
+    double t1[2] = { 0, 0 };
+    for (int k = 0; k < 2; k++) {
+        NSUInteger bytes = (NSUInteger)W * H * 4 * (k ? 4 : 1), n = bytes / 16;
+        id<MTLBuffer> a = [dev newBufferWithLength:bytes options:MTLResourceStorageModePrivate];
+        id<MTLBuffer> b = [dev newBufferWithLength:bytes options:MTLResourceStorageModePrivate];
+        NSUInteger tg = MIN(copy.maxTotalThreadsPerThreadgroup, (NSUInteger)256);
+        double c = timed(q, runs, ^(id<MTLCommandBuffer> cb) {
+            id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+            [e setComputePipelineState:copy];
+            [e setBuffer:a offset:0 atIndex:0];
+            [e setBuffer:b offset:0 atIndex:1];
+            [e dispatchThreads:MTLSizeMake(n, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+            [e endEncoding];
+        });
+        double f = timed(q, runs, ^(id<MTLCommandBuffer> cb) {
+            id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+            [e setComputePipelineState:fill];
+            [e setBuffer:b offset:0 atIndex:0];
+            [e dispatchThreads:MTLSizeMake(n, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+            [e endEncoding];
+        });
+        printf("  %5.1f MB: copy %.2f ms (%.1f GB/s read+write)  fill %.2f ms (%.1f GB/s)\n", bytes / 1e6, c,
+               2 * bytes / c / 1e6, f, bytes / f / 1e6);
+        if (k == 0) { t1[0] = c; t1[1] = f; }
+        else printf("  marginal (4x - 1x): copy %.1f GB/s  fill %.1f GB/s\n", 2 * 3.0 * W * H * 4 / (c - t1[0]) / 1e6,
+                    3.0 * W * H * 4 / (f - t1[1]) / 1e6);
+    }
+    id<MTLTexture> s = privateTexture(dev), d = privateTexture(dev);
+    double bl = timed(q, runs, ^(id<MTLCommandBuffer> cb) {
+        id<MTLBlitCommandEncoder> e = [cb blitCommandEncoder];
+        [e copyFromTexture:s sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(W, H, 1)
+                 toTexture:d destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+        [e endEncoding];
+    });
+    printf("  texture blit %dx%d private: %.2f ms (%.1f GB/s read+write)\n", W, H, bl, 2.0 * W * H * 4 / bl / 1e6);
+}
+
 int main(int argc, char **argv) {
     @autoreleasepool {
         int runs = argc > 1 ? atoi(argv[1]) : 15;
+        bool bwOnly = argc > 2 && !strcmp(argv[2], "bw");
         id<MTLDevice> dev = TSMtlCreateDevice();
         NSError *err = nil;
         id<MTLLibrary> lib = [dev newLibraryWithSource:kMSL options:nil error:&err];
@@ -116,6 +184,8 @@ int main(int argc, char **argv) {
         g_src = privateTexture(dev);
         g_smp = [dev newSamplerStateWithDescriptor:[MTLSamplerDescriptor new]];
         id<MTLCommandQueue> q = [dev newCommandQueue];
+        bandwidth(dev, lib, q, runs);
+        if (bwOnly) return 0;
         id<MTLTexture> tex[2] = { surfaceTexture(dev), privateTexture(dev) };
         const char *names[2] = { "IOSurface (linear)", "private" };
         printf("passbench %dx%d BGRA8, median of %d runs (ms per command buffer)\n", W, H, runs);
