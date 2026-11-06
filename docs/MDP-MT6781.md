@@ -1032,3 +1032,18 @@ dove la sorgente cambia. Ipotesi da provare: formato del collegamento interno (R
 WROT con `uv_xsel/uv_ysel = 2` si aspetta 4:4:4?), `RDMA_CON` diverso per MT6781 (bit 12 `lb_2b_mode`), `MF_SRC_SIZE`
 con w/h invertiti (qui 64x64, non distingue), percorso via PQ0 con RSZ0 in relay invece del diretto. Finché non è
 chiuso il backend MDP dello scaler resta il segnaposto e lavora la CPU (`vivascaler=2` ripiega su 1).
+
+### 10.1 Aggiornamento (2026-11-06): copia e NV12 → BGRA funzionano
+
+- Le prove precedenti erano in parte falsate: **con lo schermo spento il dominio DIS si spegne e l'MDP perde clock e
+  registri** (`CG_CON0` torna 0xFFFFFFFF). Ogni prova (e il driver) rifà clock, larb2, reset e mux; il driver usa la
+  CPU se il pannello è spento.
+- **I codici formato di RDMA su MT6781 non sono quelli di MML/mdp3**. Trovati provando 0..15 (`SRC_CON` = filterMode
+  | codice):
+  - BGRA 8888: **codice 14** (`SRC_CON` 0x60E) → copia esatta pixel per pixel con WROT `VIDO_CTRL` 0xA0005002;
+  - NV12 4:2:0: **codice 1** (`SRC_CON` 0x601 croma replicata, 0x201 croma interpolata in orizzontale), con WROT
+    `MAT_CTRL` 0x41 (BT.601 full) → valori attesi su righe 0-2 (croma verticale 4:2:0 corretta);
+  - codice 5 = NV16 (croma per riga); 3 = 2 piani con un'altra disposizione; 11 = Y8 (grigio).
+- **Larghezza massima di una striscia** RDMA0→WROT0: 640 pixel si chiudono, 1024 no. Il driver usa strisce da 512.
+- Backend nel kernel: patch 0171 (`VivaMDP.cpp`), NV12 → BGRA alla stessa dimensione con `vivascaler=2`; tutto il
+  resto (scala, RGB → RGB) resta alla CPU. Prossimo passo: percorso via RSZ0 per la scala.
