@@ -1047,3 +1047,56 @@ chiuso il backend MDP dello scaler resta il segnaposto e lavora la CPU (`vivasca
 - **Larghezza massima di una striscia** RDMA0→WROT0: 640 pixel si chiudono, 1024 no. Il driver usa strisce da 512.
 - Backend nel kernel: patch 0171 (`VivaMDP.cpp`), NV12 → BGRA alla stessa dimensione con `vivascaler=2`; tutto il
   resto (scala, RGB → RGB) resta alla CPU. Prossimo passo: percorso via RSZ0 per la scala.
+
+### 10.2 Aggiornamento (2026-11-06 notte): scala BGRA → BGRA via RSZ0 (kernel 0181)
+
+Strumento: `mdp.py` (scratchpad della sessione, una sola connessione del link, watchdog TOPRGU armato e "calciato" ogni
+3 s, disarmato all'uscita; se il telefono si blocca si riavvia da solo in ~40 s).
+
+**Percorso** RDMA0 → catena PQ0 (HDR0 → AAL0 → RSZ0 → TDSHP0) → WROT0:
+
+| registro | valore | nota |
+|---|---|---|
+| `CG_CLR0` 0x1B000108 | 0xAFC3 | clock anche di TDSHP0, HDR0, RSZ1, AAL0 |
+| `RDMA0_MOUT_EN` 0xF20 | 1 | |
+| `PQ0_SEL_IN` 0xF30 | 0 | da RDMA0 |
+| `AAL0_MOUT_EN` 0xF28 | 1 | |
+| `PQ0_SOUT_SEL` 0xF80 | 0 | |
+| `WROT0_SEL_IN` 0xF70 | 1 | dalla catena PQ |
+| HDR0 0x7000 | **1** | il valore di reset 0x38382060 blocca i dati |
+| HDR0 0x7004 / 0x7014 | 1 / (h<<16)\|w | relay, dimensione d'**ingresso** |
+| AAL0 0x5000, 0x5020 | 1, 1 | relay; 0x5030/0x5034 = (w<<16)\|h d'ingresso, 0x5038 = 0 |
+| TDSHP0 0xC100, 0xC110 | 1, 1 | relay; 0xC120/0xC128 = (w<<16)\|h d'**uscita**, 0xC124 = 0 |
+| `MUTEX0_MOD0` | 0x3FF | tutti i motori della catena |
+| reset | `SW0_RST_B` = ~0x10703 poi 0xFFFFFFFF | RDMA0, TDSHP0, WROT0, RSZ0, HDR0, AAL0 |
+
+Colore: RDMA `SRC_CON` 0x60E con `TRANSFORM_0` 0x10000 (RGB → YUV full), WROT `MAT_CTRL` 0x41 (ritorno a RGB).
+WROT scrive **alpha fisso 0xFF** (`DITHER` 0xFF000000): solo contenuti opachi.
+
+**RSZ0** (passi e algoritmi di `rsz_fw` MediaTek), per asse:
+- ingrandimento (o ≥ i): algoritmo 0 (6 tap), `step = 32768·(i−1)/(o−1)`, `sub = (32768·(i−1) − step·(o−1))/2`,
+  tabella 9 (7 se 1:1);
+- riduzione: algoritmo 2 (cubica ad accumulo; 1 se i > 24·o), `step = ⌈2^20·(o−1)/(i−1)⌉`,
+  `sub = ((i−1)·step − (o−1)·2^20)/2`, tabella 17.
+- `CON_1` = 0x3 | (ow ≥ iw)<<4 | algoH<<5 | algoV<<7 | tabH<<16 | tabV<<21 | 1<<26 (use121) | 1<<31;
+  `CON_2` = (larghezza striscia pari)<<12 | (striscia non iniziale)<<11 | (non ultima)<<13.
+
+**Limite e strisce**: con riduzione verticale l'uscita si rompe oltre ~272 colonne (line buffer verticale) → strisce
+verticali di **256 colonne d'uscita**, ciascuna un frame a sé con la fase orizzontale della sua prima colonna:
+- 6 tap: `pos = k0·step + sub`, `ix0 = max(0, (pos>>15) − 2) & ~1`, `ix1 = min(iw, (((k1−1)·step+sub)>>15) + 4)`,
+  `off = pos − (ix0<<15)`: `LUMA_HOR_INT = off>>15`, `LUMA_HOR_SUB = off & 0x7FFF`, croma INT 0 e stesso SUB;
+- accumulo: `ix0 = max(0, ⌊(k0·2^20 + sub)/step⌋ − 2)`, `ix1 = min(iw, ⌈((k1−1)·2^20 + sub)/step⌉ + 3)`,
+  tutto nel SUB: `INT = 0`, `SUB = sub + k0·2^20 − ix0·step` (luma e croma uguali; la divisione INT/SUB "naturale"
+  sbaglia).
+- RDMA base = sorgente + 4·ix0 (larghezza ix1−ix0), WROT base = destinazione + 4·k0, stride pieni.
+
+**Misure**: 1125×48 → 787×34 (4 strisce) errore max 3 livelli contro il bilineare; **1125×2436 → 787×1705** (il caso
+reale di QuartzCore, sorgente con pattern sinusoidale, stride 16 byte) completato, alpha 0xFF, errore max 7 su righe
+0, 1, 2, 300, 851, 1200, 1702-1704 (filtro diverso dal bilineare); ingrandimenti a strisce: croma ≤ 5.
+
+**Kernel 0181** (`VivaMDP.cpp`, `rgbTransfer`): BGRA → BGRA a qualsiasi scala, rettangolo sorgente solo a pixel interi,
+niente flip/rotazioni; sorgente e destinazione contigue (superfici dello schermo) senza copie, altrimenti buffer di
+rimbalzo (`vivamdpmax`, default 1125×2448 pixel, 4 byte). Boot-arg **`vivamdprgb`**: 0 = RGB mai sull'MDP, **1
+(default) = solo sorgenti opache** (alpha campionato su una griglia 64×64, se un campione ≠ 0xFF → `Unsupported` e la
+richiesta torna alla GPU), 2 = sempre (alpha perso). Con lo schermo spento → `NotReady` → CPU solo per lavori piccoli
+(`vivascalercpumax`), altrimenti alla GPU.
