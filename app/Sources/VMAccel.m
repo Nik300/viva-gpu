@@ -128,9 +128,12 @@ static VMAccelTestResult *VMRunScalerTest(void) {
     VMPattern(src);
     uint8_t *ref = calloc(DW * DH, 4);
     VMReference(src, ref, DW, DH);
+    NSDictionary *before = VMServiceProperties("AppleM2ScalerCSCDriver")[@"VivaScalerStats"];
     CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
     err = pIOSATransfer(acc, src, dst, NULL, NULL, NULL, NULL);
     double ms = (CFAbsoluteTimeGetCurrent() - t0) * 1000;
+    NSDictionary *after = VMServiceProperties("AppleM2ScalerCSCDriver")[@"VivaScalerStats"];
+    BOOL mdp = [after[@"mdp"] longLongValue] > [before[@"mdp"] longLongValue];
     IOSurfaceLock(dst, kIOSurfaceLockReadOnly, NULL);
     const uint8_t *d = IOSurfaceGetBaseAddress(dst);
     size_t bpr = IOSurfaceGetBytesPerRow(dst);
@@ -138,8 +141,10 @@ static VMAccelTestResult *VMRunScalerTest(void) {
     for (int j = 0; j < DH; j++) for (int i = 0; i < DW; i++) for (int c = 0; c < 4; c++) {
         int e = abs((int)d[j * bpr + i * 4 + c] - (int)ref[(j * DW + i) * 4 + c]);
         maxErr = MAX(maxErr, e);
-        if (e > 3) bad++;
+        // the MDP's resizer filters differently from bilinear (6 taps / accumulation): loose bound, the checker's edges
+        if (e > (mdp ? 24 : 3)) bad++;
     }
+    BOOL pass = mdp ? bad < DW * DH * 4 / 50 : bad == 0;
     r.result = VMImageFromBGRA(d, DW, DH, bpr);
     IOSurfaceUnlock(dst, kIOSurfaceLockReadOnly, NULL);
     r.reference = VMImageFromBGRA(ref, DW, DH, DW * 4);
@@ -147,8 +152,8 @@ static VMAccelTestResult *VMRunScalerTest(void) {
     r.source = VMImageFromBGRA(IOSurfaceGetBaseAddress(src), SW, SH, IOSurfaceGetBytesPerRow(src));
     IOSurfaceUnlock(src, kIOSurfaceLockReadOnly, NULL);
     r.summary = err ? [NSString stringWithFormat:@"KO: TransferSurface 0x%x", err]
-                    : [NSString stringWithFormat:@"%@ — BGRA 256×192 → 160×120 bilineare, errore max %d, %d valori oltre 3, %.2f ms",
-                       bad == 0 ? @"OK" : @"KO", maxErr, bad, ms];
+                    : [NSString stringWithFormat:@"%@ — BGRA 256×192 → 160×120 su %@, errore max %d, %d valori oltre %d, %.2f ms",
+                       pass ? @"OK" : @"KO", mdp ? @"motori MDP (resizer)" : @"CPU (bilineare)", maxErr, bad, mdp ? 24 : 3, ms];
     free(ref);
     CFRelease(src); CFRelease(dst);
     CFRelease((CFTypeRef)acc);
