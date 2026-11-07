@@ -565,6 +565,7 @@ static void VIInvalidate(id assertion, NSString *reason) {
     dispatch_queue_t _pollQueue;
     int _polled;            // last raw value seen by the poller (poll queue)
     int _pendingLow;        // consecutive polls below 2 while the link is shown (poll queue)
+    int _pendingHigh;       // consecutive polls at 2 while it is not (poll queue)
     BOOL _missing;          // last sysctl result was ENOENT (poll queue)
     int _link;              // state applied on the main queue
     BOOL _enabled, _standard, _forceOverlay, _noSysctl;
@@ -703,7 +704,12 @@ static void VIInvalidate(id assertion, NSString *reason) {
     [self publishStatus];
 }
 
-// Poll queue: 1 s, cheap (one sysctl). Showing is immediate; hiding needs two readings below 2 (debounce).
+// Poll queue: 1 s, cheap (one sysctl). Debounced both ways: the link must be up for VI_SHOW_POLLS readings to show and
+// down for VI_HIDE_POLLS to hide. Registering/invalidating aperture elements at every flap (a script of one-shot
+// viva-link commands) while an app was launching left SpringBoard's main thread in an endless layout/animation
+// loop (2026-11-07): one notice per real session only.
+#define VI_SHOW_POLLS   2
+#define VI_HIDE_POLLS   15
 - (void)poll {
     int raw = VIReadLinkState();
     BOOL missing = raw < 0;
@@ -716,9 +722,11 @@ static void VIInvalidate(id assertion, NSString *reason) {
             [self publishStatus];
         });
     }
-    if (v == prev) { _pendingLow = 0; return; }
-    if (prev == 2 && v < 2 && ++_pendingLow < 2) return;
+    if (v == prev) { _pendingLow = 0; _pendingHigh = 0; return; }
+    if (prev == 2 && v < 2 && ++_pendingLow < VI_HIDE_POLLS) return;
+    if (v == 2 && ++_pendingHigh < VI_SHOW_POLLS) return;
     _pendingLow = 0;
+    _pendingHigh = 0;
     _polled = v;
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
@@ -739,7 +747,7 @@ static void VIInvalidate(id assertion, NSString *reason) {
     } else if (!_enabled && _timer) {
         dispatch_source_cancel(_timer);
         _timer = nil;
-        dispatch_async(_pollQueue, ^{ self->_polled = 0; self->_pendingLow = 0; });
+        dispatch_async(_pollQueue, ^{ self->_polled = 0; self->_pendingLow = 0; self->_pendingHigh = 0; });
         _link = 0;
     }
 }
