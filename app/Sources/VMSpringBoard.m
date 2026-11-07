@@ -279,7 +279,7 @@ enum { SecActions, SecAll, SecGroups };
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return 3; }
 
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s {
-    if (s == SecActions) return 3;
+    if (s == SecActions) return 4;
     if (s == SecAll) return 3;
     return (NSInteger)_groups.count;
 }
@@ -306,6 +306,10 @@ enum { SecActions, SecAll, SecGroups };
         } else if (ip.row == 2) {
             c.textLabel.text = @"Dynamic Island · Viva Link";
             c.imageView.image = [UIImage systemImageNamed:@"cable.connector"];
+            c.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        } else if (ip.row == 3) {
+            c.textLabel.text = @"Display · frequenza";
+            c.imageView.image = [UIImage systemImageNamed:@"display"];
             c.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         } else {
             c.textLabel.text = @"Mostra chiavi interne";
@@ -378,6 +382,8 @@ enum { SecActions, SecAll, SecGroups };
         else if (ip.row == 2)
             [self.navigationController pushViewController:[[VMIslandViewController alloc] initWithStyle:UITableViewStyleInsetGrouped]
                                                  animated:YES];
+        else if (ip.row == 3)
+            [self.navigationController pushViewController:[VMDisplayViewController new] animated:YES];
         return;
     }
     if (ip.section == SecAll) {
