@@ -312,6 +312,24 @@ static const char kB2v[] =
     "  o.xm = int(r[inst].sz.x * 32.0 - 1.0); o.ym = int(r[inst].sz.y * 32.0 - 1.0); return o; }\n"
     "fragment float4 fs(VOq i [[stage_in]]) { return float4(float(i.o), float(i.b), float(i.xm), float(i.ym)); }\n";
 #define ref_B2v ref_B2q
+// B2w: the same quads from instance_id arithmetic alone (no buffer); B2y: positions from the buffer, flat ints from
+// instance_id: which of instance_id, the buffer reads and the int varyings breaks.
+static const char kB2w[] =
+    "struct VOw { float4 p [[position]]; int o [[flat]]; int b [[flat]]; };\n"
+    "vertex VOw vs(uint index [[vertex_id]], uint inst [[instance_id]]) {\n"
+    "  float ox = (index & 1) == 0 ? 0.5 : 0.0; float oy = (index & 2) == 0 ? 0.5 : 0.0;\n"
+    "  float2 mn = float2(-1.0 + 0.5 * float(inst % 4), 1.0 - 0.5 * float(inst / 4));\n"
+    "  VOw o; o.p = float4(mn.x + ox, mn.y - oy, 0, 1); o.o = int(inst); o.b = 100 + int(inst); return o; }\n"
+    "fragment float4 fs(VOw i [[stage_in]]) { return float4(float(i.o), float(i.b), 15, 15); }\n";
+#define ref_B2w ref_B2q
+static const char kB2y[] =
+    "struct Rq { float2 mn; float2 sz; int off; int bpr; };\n"
+    "struct VOw { float4 p [[position]]; int o [[flat]]; int b [[flat]]; };\n"
+    "vertex VOw vs(uint index [[vertex_id]], uint inst [[instance_id]], device const Rq *r [[buffer(1)]]) {\n"
+    "  float ox = (index & 1) == 0 ? r[inst].sz.x : 0.0; float oy = (index & 2) == 0 ? r[inst].sz.y : 0.0;\n"
+    "  VOw o; o.p = float4(r[inst].mn.x + ox, r[inst].mn.y - oy, 0, 1); o.o = int(inst); o.b = 100 + int(inst); return o; }\n"
+    "fragment float4 fs(VOw i [[stage_in]]) { return float4(float(i.o), float(i.b), 15, 15); }\n";
+#define ref_B2y ref_B2q
 
 static const char kB3[] =
     "struct VO3 { float4 p [[position]]; float4 a [[user(alpha)]] [[flat]]; float b [[user(beta)]] [[flat]]; float ps [[point_size]]; };\n"
@@ -1683,6 +1701,10 @@ const isa_case isa_cases[] = {
     {VT(B2t), .id = "B2", .title = "Diagnosi: matrice da buffer(2) per puntatore, m * (1, 2, 0, 1) flat", .fs = "fs",
      .setup = setup_B2t, .draw = draw_B2t, .vis_hi = 40},
     {VT(B2v), .id = "B2", .title = "Diagnosi: come B2r senza matrice nella posizione",
+     .fs = "fs", .draw = draw_B2q, .setup = setup_B2q, .vis_hi = 128},
+    {VT(B2w), .id = "B2", .title = "Diagnosi: quad da instance_id, nessun buffer",
+     .fs = "fs", .draw = draw_B2q, .setup = setup_B2q, .vis_hi = 128},
+    {VT(B2y), .id = "B2", .title = "Diagnosi: posizioni dal buffer, interi flat da instance_id",
      .fs = "fs", .draw = draw_B2q, .setup = setup_B2q, .vis_hi = 128},
     {VT(B3), .title = "Uscite vertice: varying con chiave, point_size"},
     {VT(B3k), .id = "B3", .title = "Varying che leggono un buffer non usato dalla posizione", .setup = setup_B3k},
