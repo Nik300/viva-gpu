@@ -2171,6 +2171,14 @@ isa_result isa_run_case(id<MTLDevice> dev, const isa_case *c, int mode, uint8_t 
                         note = [NSString stringWithFormat:@"primo errore (%zu,%zu) canale %d: GPU %.9g, atteso %.9g; pixel GPU (%.9g %.9g %.9g %.9g) atteso (%.9g %.9g %.9g %.9g)",
                                 i % (size_t)c->w, i / (size_t)c->w, k, g, e, gpu[i * 4], gpu[i * 4 + 1], gpu[i * 4 + 2], gpu[i * 4 + 3],
                                 ref[i * 4], ref[i * 4 + 1], ref[i * 4 + 2], ref[i * 4 + 3]];
+                        // channel 0 on a 4 x 4 grid of cell centres (instanced rect cases: which instance's data)
+                        NSMutableString *grid = [NSMutableString stringWithString:@"; griglia canale 0:"];
+                        for (int gy = 0; gy < 4; gy++)
+                            for (int gx = 0; gx < 4; gx++) {
+                                size_t px = (size_t)(c->w / 8 + gx * c->w / 4), py = (size_t)(c->h / 8 + gy * c->h / 4);
+                                [grid appendFormat:@" %g", gpu[(py * (size_t)c->w + px) * 4]];
+                            }
+                        note = [note stringByAppendingString:grid];
                         break;
                     }
                 }
