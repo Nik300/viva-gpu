@@ -330,6 +330,23 @@ static const char kB2y[] =
     "  VOw o; o.p = float4(r[inst].mn.x + ox, r[inst].mn.y - oy, 0, 1); o.o = int(inst); o.b = 100 + int(inst); return o; }\n"
     "fragment float4 fs(VOw i [[stage_in]]) { return float4(float(i.o), float(i.b), 15, 15); }\n";
 #define ref_B2y ref_B2q
+// One more piece of B2v each: a half2 varying (B2h), the flat ints read from the buffer (B2i), the corners as half (B2j).
+#define B2Y_BODY(VOUT, CORNERS, EXTRA) \
+    "struct Rq { float2 mn; float2 sz; int off; int bpr; };\n" \
+    "struct VOw { float4 p [[position]]; int o [[flat]]; int b [[flat]]; " VOUT " };\n" \
+    "vertex VOw vs(uint index [[vertex_id]], uint inst [[instance_id]], device const Rq *r [[buffer(1)]]) {\n" \
+    CORNERS \
+    "  VOw o; o.p = float4(r[inst].mn.x + float(ox), r[inst].mn.y - float(oy), 0, 1); o.o = int(inst); o.b = 100 + int(inst);\n" \
+    EXTRA \
+    "  return o; }\n" \
+    "fragment float4 fs(VOw i [[stage_in]]) { return float4(float(i.o), float(i.b), 15, 15); }\n"
+#define B2Y_FLOAT "  float ox = (index & 1) == 0 ? r[inst].sz.x : 0.0; float oy = (index & 2) == 0 ? r[inst].sz.y : 0.0;\n"
+static const char kB2h[] = B2Y_BODY("half2 uv;", B2Y_FLOAT, "  o.uv = half2(ox, oy);\n");
+static const char kB2i[] = B2Y_BODY("", B2Y_FLOAT, "  o.o = r[inst].off; o.b = r[inst].bpr;\n");
+static const char kB2j[] = B2Y_BODY("", "  half ox = (index & 1) == 0 ? half(r[inst].sz.x) : half(0); half oy = (index & 2) == 0 ? half(r[inst].sz.y) : half(0);\n", "");
+#define ref_B2h ref_B2q
+#define ref_B2i ref_B2q
+#define ref_B2j ref_B2q
 
 static const char kB3[] =
     "struct VO3 { float4 p [[position]]; float4 a [[user(alpha)]] [[flat]]; float b [[user(beta)]] [[flat]]; float ps [[point_size]]; };\n"
@@ -1705,6 +1722,12 @@ const isa_case isa_cases[] = {
     {VT(B2w), .id = "B2", .title = "Diagnosi: quad da instance_id, nessun buffer",
      .fs = "fs", .draw = draw_B2q, .setup = setup_B2q, .vis_hi = 128},
     {VT(B2y), .id = "B2", .title = "Diagnosi: posizioni dal buffer, interi flat da instance_id",
+     .fs = "fs", .draw = draw_B2q, .setup = setup_B2q, .vis_hi = 128},
+    {VT(B2h), .id = "B2", .title = "Diagnosi: B2y + varying half2",
+     .fs = "fs", .draw = draw_B2q, .setup = setup_B2q, .vis_hi = 128},
+    {VT(B2i), .id = "B2", .title = "Diagnosi: B2y + interi flat letti dal buffer",
+     .fs = "fs", .draw = draw_B2q, .setup = setup_B2q, .vis_hi = 128},
+    {VT(B2j), .id = "B2", .title = "Diagnosi: B2y + angoli in half",
      .fs = "fs", .draw = draw_B2q, .setup = setup_B2q, .vis_hi = 128},
     {VT(B3), .title = "Uscite vertice: varying con chiave, point_size"},
     {VT(B3k), .id = "B3", .title = "Varying che leggono un buffer non usato dalla posizione", .setup = setup_B3k},
