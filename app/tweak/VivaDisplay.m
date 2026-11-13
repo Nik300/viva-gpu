@@ -29,6 +29,9 @@ static os_log_t VDLog;
 // viva-display-geometry.py defaults (hole 543,50 r 20 px; corners 110 px), points unless _PX
 static double VDIslandW = 100.0, VDIslandH = 29.333, VDIslandTop = 2.0;
 static double VDInterX = 193.333, VDInterW = 9.0;
+// What the status bar avoids around the island (points, centred): wider than the pill pushes the time and the icons
+// toward the screen edges (they are centred between edgeInsets and the area; user request 2026-11-14).
+static double VDAvoidW = 150.0;
 static double VDSafeTop = 53.667, VDSafeBottom = 34.0, VDSafeLandscapeSide = 53.667, VDSafeLandscapeBottom = 21.0;
 static double VDScreenW = 360.0;
 
@@ -118,7 +121,8 @@ static void VDInstall(void) {
     VDHook(@"UISDisplaySingleRectShape", NSSelectorFromString(@"sb_displayShapeForScreenType:"), YES, ^id(id self, NSInteger type) {
         // Points, not pixels: the status bar takes _exclusionArea.rect x nativeScale / scale as points
         // (-[_UIStatusBarVisualProvider_DynamicSplit sensorAreaRect]); px put the island at x 390 pt (phone, 2026-11-14).
-        CGRect r = CGRectMake(VDScreenW / 2 - VDIslandW / 2, VDIslandTop, VDIslandW, VDIslandH);
+        double w = MAX(VDAvoidW, VDIslandW);
+        CGRect r = CGRectMake(VDScreenW / 2 - w / 2, VDIslandTop, w, VDIslandH);
         id (*init)(id, SEL, CGRect) = (id (*)(id, SEL, CGRect))objc_msgSend;
         return init([NSClassFromString(@"UISDisplaySingleRectShape") alloc], @selector(initWithRect:), r);
     }, NULL);
@@ -172,6 +176,7 @@ __attribute__((constructor)) static void VDInit(void) {
         VDIslandH = VDPrefNumber(p, @"IslandHeight", VDIslandH);
         VDIslandTop = VDPrefNumber(p, @"IslandTop", VDIslandTop);
         VDInterX = VDPrefNumber(p, @"InterSensorX", VDInterX);
+        VDAvoidW = VDPrefNumber(p, @"StatusBarAvoidWidth", VDAvoidW);
         VDSafeTop = VDPrefNumber(p, @"SafeTop", VDSafeTop);
         VDSafeBottom = VDPrefNumber(p, @"SafeBottom", VDSafeBottom);
         VDSafeLandscapeSide = VDPrefNumber(p, @"SafeLandscapeSide", VDSafeLandscapeSide);
@@ -181,7 +186,7 @@ __attribute__((constructor)) static void VDInit(void) {
         } @catch (NSException *e) {
             VDLOG("install: %{public}@", e);
         }
-        VDLOG("active: island %.2fx%.2f at %.2f pt, safe top %.2f bottom %.2f", VDIslandW, VDIslandH, VDIslandTop,
-              VDSafeTop, VDSafeBottom);
+        VDLOG("active: island %.2fx%.2f at %.2f pt, status bar avoids %.2f pt, safe top %.2f bottom %.2f", VDIslandW,
+              VDIslandH, VDIslandTop, VDAvoidW, VDSafeTop, VDSafeBottom);
     }
 }
