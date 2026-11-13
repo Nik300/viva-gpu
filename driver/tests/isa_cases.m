@@ -237,6 +237,54 @@ static void ref_B2(const isa_case *c, const double *g, double *out) {
     PIX(c) set4(OUT(x, y), (x + 7) / 256.0, (y + 2) / 256.0, 7 / 256.0, 2 / 256.0);
 }
 
+// CoreAnimation's buffer_image_blit_vert (Safari's text on the phone, 2026-11-13): ushort vertex/instance id, one
+// instanced triangle strip per rect read from a buffer, the X corner chosen by a branch on vid & 1 (divergent in
+// every warp), the Y corner by a select on vid & 2, a half2 varying and flat ints. 4 x 4 rects of 16 x 16 pixels. The
+// matrix is a pointer: CA's reference has no air.buffer_size, so it is SSBO 2 too (not the push window).
+static const char kB2q[] =
+    "struct Rq { float2 mn; float2 sz; int off; int bpr; };\n"
+    "struct VOq { float4 p [[position]]; half2 uv; int o [[flat]]; int b [[flat]]; int xm [[flat]]; int ym [[flat]]; };\n"
+    "vertex VOq vs(ushort index [[vertex_id]], ushort inst [[instance_id]], constant float4x4 *m [[buffer(2)]],\n"
+    "              device const Rq *r [[buffer(1)]]) {\n"
+    "  half ox = 0; if ((index & 1) == 0) ox = half(r[inst].sz.x);\n"
+    "  half oy = (index & 2) == 0 ? half(r[inst].sz.y) : half(0);\n"
+    "  float2 p = float2(r[inst].mn.x + float(ox), r[inst].mn.y - float(oy));\n"
+    "  VOq o; o.p = m[0] * float4(p, 0, 1); o.uv = half2(ox, oy); o.o = r[inst].off; o.b = r[inst].bpr;\n"
+    "  o.xm = int(r[inst].sz.x * 32.0 - 1.0); o.ym = int(r[inst].sz.y * 32.0 - 1.0); return o; }\n"
+    "fragment float4 fs(VOq i [[stage_in]]) { return float4(float(i.o), float(i.b), float(i.xm), float(i.ym)); }\n";
+typedef struct { float mn[2], sz[2]; int32_t off, bpr; } b2q_rect;
+static void setup_B2q(ISAInputs *in) {
+    b2q_rect r[16];
+    for (int i = 0; i < 16; i++)
+        r[i] = (b2q_rect){ { -1.0f + 0.5f * (i % 4), 1.0f - 0.5f * (i / 4) }, { 0.5f, 0.5f }, i, 100 + i };
+    float m[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+    in.buffers[@1] = buf(in, r, sizeof r);
+    in.buffers[@2] = buf(in, m, sizeof m);
+}
+static void draw_B2q(id<MTLRenderCommandEncoder> e, ISAInputs *in, const isa_case *c, int n) {
+    for (int i = 0; i < n; i++)
+        [e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4 instanceCount:16];
+}
+static void ref_B2q(const isa_case *c, const double *g, double *out) {
+    PIX(c) { int i = (y / 16) * 4 + x / 16; set4(OUT(x, y), i, 100 + i, 15, 15); }
+}
+// The same with 32-bit ids (B2r) and with a select for the X corner too, no branch (B2s): which part breaks.
+#define B2Q_BODY(ID_T, XCORNER) \
+    "struct Rq { float2 mn; float2 sz; int off; int bpr; };\n" \
+    "struct VOq { float4 p [[position]]; half2 uv; int o [[flat]]; int b [[flat]]; int xm [[flat]]; int ym [[flat]]; };\n" \
+    "vertex VOq vs(" ID_T " index [[vertex_id]], " ID_T " inst [[instance_id]], constant float4x4 *m [[buffer(2)]],\n" \
+    "              device const Rq *r [[buffer(1)]]) {\n" \
+    XCORNER \
+    "  half oy = (index & 2) == 0 ? half(r[inst].sz.y) : half(0);\n" \
+    "  float2 p = float2(r[inst].mn.x + float(ox), r[inst].mn.y - float(oy));\n" \
+    "  VOq o; o.p = m[0] * float4(p, 0, 1); o.uv = half2(ox, oy); o.o = r[inst].off; o.b = r[inst].bpr;\n" \
+    "  o.xm = int(r[inst].sz.x * 32.0 - 1.0); o.ym = int(r[inst].sz.y * 32.0 - 1.0); return o; }\n" \
+    "fragment float4 fs(VOq i [[stage_in]]) { return float4(float(i.o), float(i.b), float(i.xm), float(i.ym)); }\n"
+static const char kB2r[] = B2Q_BODY("uint", "  half ox = 0; if ((index & 1) == 0) ox = half(r[inst].sz.x);\n");
+static const char kB2s[] = B2Q_BODY("ushort", "  half ox = (index & 1) == 0 ? half(r[inst].sz.x) : half(0);\n");
+#define ref_B2r ref_B2q
+#define ref_B2s ref_B2q
+
 static const char kB3[] =
     "struct VO3 { float4 p [[position]]; float4 a [[user(alpha)]] [[flat]]; float b [[user(beta)]] [[flat]]; float ps [[point_size]]; };\n"
     "struct FI3 { float4 p [[position]]; float4 a [[user(alpha)]] [[flat]]; float b [[user(beta)]] [[flat]]; };\n"
@@ -1598,6 +1646,12 @@ const isa_case isa_cases[] = {
     // B: stages, inputs and outputs
     {VT(B1), .title = "Ingressi vertice (vertex descriptor: float2, uchar4 norm, float)", .setup = setup_B1, .pipe = pipe_B1, .vis_hi = 1},
     {VT(B2), .title = "vertex_id, instance_id, base_vertex, base_instance", .draw = draw_B2, .setup = setup_B2},
+    {VT(B2q), .id = "B2", .title = "Rettangoli istanziati di CoreAnimation (testo di Safari): angolo da vertex_id ushort",
+     .fs = "fs", .draw = draw_B2q, .setup = setup_B2q, .vis_hi = 128},
+    {VT(B2r), .id = "B2", .title = "Rettangoli istanziati: come B2q con vertex_id/instance_id uint",
+     .fs = "fs", .draw = draw_B2q, .setup = setup_B2q, .vis_hi = 128},
+    {VT(B2s), .id = "B2", .title = "Rettangoli istanziati: come B2q con select al posto del salto",
+     .fs = "fs", .draw = draw_B2q, .setup = setup_B2q, .vis_hi = 128},
     {VT(B3), .title = "Uscite vertice: varying con chiave, point_size"},
     {VT(B3k), .id = "B3", .title = "Varying che leggono un buffer non usato dalla posizione", .setup = setup_B3k},
     {FR(B3c), .id = "B3", .title = "clip_distance (triangolo tagliato a x = 40)", CLEAR,
