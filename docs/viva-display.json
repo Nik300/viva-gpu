@@ -1,0 +1,159 @@
+{
+ "panel": {
+  "px": [
+   1080,
+   2400
+  ],
+  "pt": [
+   360.0,
+   800.0
+  ],
+  "scale": 3.0,
+  "ppi": 394.4212796549245,
+  "mm_per_pt": 0.19319444444444445
+ },
+ "hole": {
+  "center_px": [
+   543.0,
+   50.0
+  ],
+  "radius_px": 20.0,
+  "center_pt": [
+   181.0,
+   16.666666666666668
+  ],
+  "radius_pt": 6.666666666666667,
+  "measured": true
+ },
+ "corner_radius": {
+  "px": 110.0,
+  "pt": 36.666666666666664
+ },
+ "island": {
+  "collapsed_pt": [
+   130.0,
+   2.0,
+   100.0,
+   29.333333333333332
+  ],
+  "collapsed_px": [
+   390,
+   6,
+   300,
+   88
+  ],
+  "radius_pt": 14.666666666666666,
+  "hole_margins_pt": {
+   "top": 8.0,
+   "bottom": 7.9999999999999964,
+   "left": 44.33333333333334,
+   "right": 42.33333333333334
+  },
+  "sensorRegionSize_pt": [
+   100.0,
+   29.333333333333332
+  ],
+  "minimumScreenEdgeInsets_pt": {
+   "top": 2.0,
+   "left": 11.333,
+   "right": 11.333
+  },
+  "maximumWidth_pt": 337.334,
+  "interSensorRegion_pt": [
+   193.33333333333334,
+   2.0,
+   9.0,
+   29.333333333333332
+  ],
+  "exclusion_rect_px": [
+   390,
+   6,
+   300,
+   88
+  ]
+ },
+ "status_bar": {
+  "height_pt": 53.667,
+  "items_center_y_pt": 16.666666666666664,
+  "leading_width_pt": 105.0,
+  "trailing_width_pt": 104.0,
+  "apple_14pro_side_pt": 109.0
+ },
+ "safe_area_pt": {
+  "portrait": {
+   "top": 53.667,
+   "bottom": 34.0,
+   "left": 0,
+   "right": 0
+  },
+  "landscape": {
+   "top": 0,
+   "bottom": 21.0,
+   "left": 53.667,
+   "right": 53.667
+  }
+ },
+ "compat": {
+  "3": {
+   "name": "4,7\" (iPhone 8)",
+   "size_pt": [
+    375,
+    667
+   ],
+   "scale": 0.96,
+   "shown_pt": [
+    360.0,
+    640.3199999999999
+   ],
+   "bars_pt": [
+    0.0,
+    79.84000000000003
+   ]
+  },
+  "5": {
+   "name": "5,8\" (iPhone X)",
+   "size_pt": [
+    375,
+    812
+   ],
+   "scale": 0.96,
+   "shown_pt": [
+    360.0,
+    779.52
+   ],
+   "bars_pt": [
+    0.0,
+    10.240000000000009
+   ]
+  },
+  "6": {
+   "name": "6,5\" (iPhone XS Max)",
+   "size_pt": [
+    414,
+    896
+   ],
+   "scale": 0.8695652173913043,
+   "shown_pt": [
+    360.0,
+    779.1304347826086
+   ],
+   "bars_pt": [
+    0.0,
+    10.434782608695684
+   ]
+  }
+ },
+ "kernel_adt": {
+  "canvas": [
+   1080,
+   2400
+  ],
+  "dot_pitch": 394,
+  "display-corner-radius": [
+   110.0,
+   3
+  ],
+  "artwork-device-subtype": 2556,
+  "touch": "8640x19200 -> 1080x2400 (/8, no offset)"
+ }
+}

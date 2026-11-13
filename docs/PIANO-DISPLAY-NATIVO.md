@@ -503,3 +503,29 @@ finestra del pannello (oggi 1080×2400 a offset 22,18 della superficie 1125×243
 kernel 0202 la superficie viene scelta da `disp kv shown_surface`; prima salva tutti i framebuffer (`FILE-N.png`).
 Per ogni fase: screenshot di schermata di blocco, home, Centro di Controllo, Impostazioni, un'app di terze parti con
 storyboard (Sileo) e una senza, isola compatta ed espansa (`vctl` per aprire le app, `watch` per aspettare l'utente).
+
+### 8.3 Misure reali (2026-11-13, foto IMG_0255/0256 dell'utente)
+
+Metodo: isola di oggi nello screenshot `viva-link.py shot` = x 263..817, y 16..125 px del pannello; nella foto ravvicinata
+(2268×4032) la stessa isola = x 519..1790, y ~1042..1293 → 2,29 px di foto per px di pannello, uguale in x e y
+(prospettiva trascurabile, rotazione 0,8° corretta). Il bordo alto del pannello nella foto cade a y ≈ 0 del pannello,
+come deve. Seconda foto (telefono intero): bordi e curva dell'angolo in alto a sinistra, adattamento di un cerchio.
+
+| Grandezza | Misura | Stima precedente |
+|---|---|---|
+| Centro del foro | **(543, 50) px** = (181, 16,67) pt (±2 px) | (540, 52) |
+| Raggio del foro | **18 px visibili** (disco grigio dell'obiettivo); si usa 20 con margine | 24,5 |
+| Raggio degli angoli | **110 px** (±10) = 36,67 pt → ADT `<110 3>` | 90 |
+
+Il foro è 3 px (1 pt) a destra del centro: l'isola resta centrata sullo schermo (SpringBoard la centra comunque),
+margini 44,3 / 42,3 pt ai lati. Geometria finale (`viva-display-geometry.py`, ora con questi valori di default;
+JSON per il tweak in `gpu/docs/viva-display.json`):
+
+| Grandezza | Valore |
+|---|---|
+| Isola compatta | **x 130, y 2, 100 × 29,33 pt** = (390, 6, 300, 88) px, raggio 14,67 pt; foro con 8 pt sopra e sotto |
+| `interSensorRegion` | (193,33, 2, 9, 29,33) pt |
+| Area di esclusione | (390, 6, 300, 88) px |
+| Status bar | 53,67 pt, voci centrate a y 16,67 pt, ~104-105 pt per lato |
+| Safe area | verticale top 53,67 / bottom 34; orizzontale lati 53,67 / bottom 21 |
+| Angoli | 36,67 pt |
