@@ -144,6 +144,11 @@ static bool want_trace(const vmg_isa_options *o, const char *fn)
 }
 
 // Physical registers read before being written in the program (preloads), r48-r63 only matter to the driver.
+// The whole program, in block order: the scan used to stop at the first branch, so a register read only after one
+// was not preloaded. CoreAnimation's buffer_image_blit_vert branches on vertex_id first and reads r59 (the IDVS
+// output index) only at its stores: r59 kept the previous warp's value, positions and varyings went to other
+// vertices' slots (Safari's text as big black triangles, isatest B2q, 2026-11-14). The hardware's preloads
+// (r59-r63 in a vertex shader) are never written by the program; an extra bit only costs the hardware a load.
 static uint64_t preload_mask(vi_shader *s)
 {
     uint64_t written = 0, preload = 0;
@@ -160,8 +165,6 @@ static uint64_t preload_mask(vi_shader *s)
             unsigned n = w[k]->count ? w[k]->count : 1;
             for (unsigned q = 0; q < n; q++) written |= 1ull << (w[k]->value + q);
         }
-        // only the straight-line start matters; stop at the first branch
-        if (I->target) return preload & 0xffff000000000000ull;
     }
     return preload & 0xffff000000000000ull;
 }
