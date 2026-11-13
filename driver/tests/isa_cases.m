@@ -284,6 +284,34 @@ static const char kB2r[] = B2Q_BODY("uint", "  half ox = 0; if ((index & 1) == 0
 static const char kB2s[] = B2Q_BODY("ushort", "  half ox = (index & 1) == 0 ? half(r[inst].sz.x) : half(0);\n");
 #define ref_B2r ref_B2q
 #define ref_B2s ref_B2q
+// Diagnostics: B2t reads the matrix (1..16, column-major) and passes m * (1, 2, 0, 1) as a flat varying on a
+// full-screen triangle (expected 24, 28, 32, 36); B2v is B2r without the matrix in the position.
+static const char kB2t[] =
+    "struct VOt { float4 p [[position]]; float4 q [[flat]]; };\n"
+    "vertex VOt vs(uint i [[vertex_id]], constant float4x4 *m [[buffer(2)]]) {\n"
+    "  VOt o; float2 t = float2((i << 1) & 2, i & 2); o.p = float4(t * 2 - 1, 0, 1); o.q = m[0] * float4(1, 2, 0, 1); return o; }\n"
+    "fragment float4 fs(VOt i [[stage_in]]) { return i.q; }\n";
+static void setup_B2t(ISAInputs *in) {
+    float m[16];
+    for (int i = 0; i < 16; i++) m[i] = (float)(i + 1);
+    in.buffers[@2] = buf(in, m, sizeof m);
+}
+static void ref_B2t(const isa_case *c, const double *g, double *out) { PIX(c) set4(OUT(x, y), 24, 28, 32, 36); }
+static void draw_B2t(id<MTLRenderCommandEncoder> e, ISAInputs *in, const isa_case *c, int n) {
+    for (int i = 0; i < n; i++) [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+}
+static const char kB2v[] =
+    "struct Rq { float2 mn; float2 sz; int off; int bpr; };\n"
+    "struct VOq { float4 p [[position]]; half2 uv; int o [[flat]]; int b [[flat]]; int xm [[flat]]; int ym [[flat]]; };\n"
+    "vertex VOq vs(uint index [[vertex_id]], uint inst [[instance_id]], constant float4x4 *m [[buffer(2)]],\n"
+    "              device const Rq *r [[buffer(1)]]) {\n"
+    "  half ox = 0; if ((index & 1) == 0) ox = half(r[inst].sz.x);\n"
+    "  half oy = (index & 2) == 0 ? half(r[inst].sz.y) : half(0);\n"
+    "  float2 p = float2(r[inst].mn.x + float(ox), r[inst].mn.y - float(oy));\n"
+    "  VOq o; o.p = float4(p, 0, 1); o.uv = half2(ox, oy); o.o = r[inst].off; o.b = r[inst].bpr;\n"
+    "  o.xm = int(r[inst].sz.x * 32.0 - 1.0); o.ym = int(r[inst].sz.y * 32.0 - 1.0); return o; }\n"
+    "fragment float4 fs(VOq i [[stage_in]]) { return float4(float(i.o), float(i.b), float(i.xm), float(i.ym)); }\n";
+#define ref_B2v ref_B2q
 
 static const char kB3[] =
     "struct VO3 { float4 p [[position]]; float4 a [[user(alpha)]] [[flat]]; float b [[user(beta)]] [[flat]]; float ps [[point_size]]; };\n"
@@ -1651,6 +1679,10 @@ const isa_case isa_cases[] = {
     {VT(B2r), .id = "B2", .title = "Rettangoli istanziati: come B2q con vertex_id/instance_id uint",
      .fs = "fs", .draw = draw_B2q, .setup = setup_B2q, .vis_hi = 128},
     {VT(B2s), .id = "B2", .title = "Rettangoli istanziati: come B2q con select al posto del salto",
+     .fs = "fs", .draw = draw_B2q, .setup = setup_B2q, .vis_hi = 128},
+    {VT(B2t), .id = "B2", .title = "Diagnosi: matrice da buffer(2) per puntatore, m * (1, 2, 0, 1) flat", .fs = "fs",
+     .setup = setup_B2t, .draw = draw_B2t, .vis_hi = 40},
+    {VT(B2v), .id = "B2", .title = "Diagnosi: come B2r senza matrice nella posizione",
      .fs = "fs", .draw = draw_B2q, .setup = setup_B2q, .vis_hi = 128},
     {VT(B3), .title = "Uscite vertice: varying con chiave, point_size"},
     {VT(B3k), .id = "B3", .title = "Varying che leggono un buffer non usato dalla posizione", .setup = setup_B3k},
