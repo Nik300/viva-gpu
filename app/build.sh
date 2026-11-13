@@ -10,8 +10,8 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 OUT="$HERE/out"
 SRC=("$HERE"/Sources/*.m "$HERE/../driver/tests/isa_cases.m")   # ISA test cases, shared with the isatest CLI
 CFLAGS=(-fobjc-arc -O2 -g -Wall -Wextra -Wno-unused-parameter -I"$HERE/../driver")
-TWEAK="$HERE/tweak/VivaIsland.m"
-TWEAK_FW=(-framework UIKit -framework Foundation -framework CoreGraphics -framework QuartzCore)
+TWEAK=("$HERE/tweak/VivaIsland.m" "$HERE/tweak/VivaDisplay.m")
+TWEAK_FW=(-framework UIKit -framework Foundation -framework CoreGraphics -framework QuartzCore -framework IOKit)
 
 if [ "${1:-}" = check ]; then
   SDK="$(xcrun --show-sdk-path)"
@@ -20,7 +20,7 @@ if [ "${1:-}" = check ]; then
       "${CFLAGS[@]}" -fsyntax-only "$f"
   done
   clang -target arm64-apple-ios16.0-macabi -isysroot "$SDK" -iframework "$SDK/System/iOSSupport/System/Library/Frameworks" \
-    "${CFLAGS[@]}" -fsyntax-only "$TWEAK"
+    "${CFLAGS[@]}" -fsyntax-only "${TWEAK[@]}"
   for f in "$HERE/tweak/inject.sh" "$HERE/tweak/vi-sb.sh" "$HERE/install.sh"; do bash -n "$f"; done
   clang -target arm64-apple-macos13 -Wall -Wextra -fsyntax-only "$HERE/helper/vmhelper.c"
   echo "check: ok"
@@ -38,7 +38,7 @@ mkdir -p "$APP"
 "$CC" "${T[@]}" -O2 -Wall -Wextra "$HERE/helper/vmhelper.c" -o "$APP/vmhelper"
 # SpringBoard tweak (weakly loaded by the patched SpringBoard from /var/jb/usr/lib) and its phone-side script.
 "$CC" "${T[@]}" "${CFLAGS[@]}" -dynamiclib -install_name /var/jb/usr/lib/VivaIsland.dylib \
-  -current_version 1.0 -compatibility_version 1.0 "$TWEAK" "${TWEAK_FW[@]}" \
+  -current_version 1.0 -compatibility_version 1.0 "${TWEAK[@]}" "${TWEAK_FW[@]}" \
   -o "$APP/VivaIsland.dylib"
 cp "$HERE/tweak/vi-sb.sh" "$APP/vi-sb.sh"
 cp "$HERE/Info.plist" "$APP/Info.plist"
