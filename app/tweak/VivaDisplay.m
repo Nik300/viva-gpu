@@ -9,7 +9,7 @@
 //  - the island: -[SBUISystemApertureLayoutMetrics sensorRegionSize] (every compact / minimal size derives from it
 //    through _inertSize), minimumScreenEdgeInsets (top only: the sides keep Apple's 11.33 pt), and
 //    interSensorRegionInWindowSpace (where the privacy dot goes);
-//  - the exclusion area: +[UISDisplaySingleRectShape sb_displayShapeForScreenType:] -> rect in px with y > 0, so every
+//  - the exclusion area: +[UISDisplaySingleRectShape sb_displayShapeForScreenType:] -> rect in points, y > 0, so every
 //    app's status bar is _UIStatusBarVisualProvider_DynamicSplitMedium, laid out on that rect (no size tables);
 //  - safe areas: +[UISApplicationSupportDisplayEdgeInfo _sbh_displayEdgeInfoForScreenType:];
 //  - compatibility: -[SBApplication _defaultClassicMode] -> 0 (native) for apps with a launch storyboard /
@@ -30,7 +30,7 @@ static os_log_t VDLog;
 static double VDIslandW = 100.0, VDIslandH = 29.333, VDIslandTop = 2.0;
 static double VDInterX = 193.333, VDInterW = 9.0;
 static double VDSafeTop = 53.667, VDSafeBottom = 34.0, VDSafeLandscapeSide = 53.667, VDSafeLandscapeBottom = 21.0;
-static double VDScale = 3.0, VDScreenW = 360.0;
+static double VDScreenW = 360.0;
 
 static double VDPrefNumber(NSDictionary *d, NSString *key, double def) {
     id v = d[key];
@@ -114,10 +114,11 @@ static void VDInstall(void) {
         return CGRectMake(VDInterX, VDIslandTop, VDInterW, VDIslandH);
     }, NULL);
 
-    // SpringBoard: the exclusion area every app gets (px, y > 0 -> DynamicSplit status bar)
+    // SpringBoard: the exclusion area every app gets (points, y > 0 -> DynamicSplit status bar)
     VDHook(@"UISDisplaySingleRectShape", NSSelectorFromString(@"sb_displayShapeForScreenType:"), YES, ^id(id self, NSInteger type) {
-        CGRect r = CGRectMake(round((VDScreenW / 2 - VDIslandW / 2) * VDScale), round(VDIslandTop * VDScale),
-                              round(VDIslandW * VDScale), round(VDIslandH * VDScale));
+        // Points, not pixels: the status bar takes _exclusionArea.rect x nativeScale / scale as points
+        // (-[_UIStatusBarVisualProvider_DynamicSplit sensorAreaRect]); px put the island at x 390 pt (phone, 2026-11-14).
+        CGRect r = CGRectMake(VDScreenW / 2 - VDIslandW / 2, VDIslandTop, VDIslandW, VDIslandH);
         id (*init)(id, SEL, CGRect) = (id (*)(id, SEL, CGRect))objc_msgSend;
         return init([NSClassFromString(@"UISDisplaySingleRectShape") alloc], @selector(initWithRect:), r);
     }, NULL);
