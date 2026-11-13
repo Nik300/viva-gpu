@@ -342,6 +342,10 @@ static const char kB2y[] =
     "fragment float4 fs(VOw i [[stage_in]]) { return float4(float(i.o), float(i.b), 15, 15); }\n"
 #define B2Y_FLOAT "  float ox = (index & 1) == 0 ? r[inst].sz.x : 0.0; float oy = (index & 2) == 0 ? r[inst].sz.y : 0.0;\n"
 static const char kB2h[] = B2Y_BODY("half2 uv;", B2Y_FLOAT, "  o.uv = half2(ox, oy);\n");
+static const char kB2k[] = B2Y_BODY("float2 uv;", B2Y_FLOAT, "  o.uv = float2(ox, oy);\n");
+#define ref_B2k ref_B2q
+static const char kB2l[] = B2Y_BODY("half uv;", B2Y_FLOAT, "  o.uv = half(ox);\n");
+#define ref_B2l ref_B2q
 static const char kB2i[] = B2Y_BODY("", B2Y_FLOAT, "  o.o = r[inst].off; o.b = r[inst].bpr;\n");
 static const char kB2j[] = B2Y_BODY("", "  half ox = (index & 1) == 0 ? half(r[inst].sz.x) : half(0); half oy = (index & 2) == 0 ? half(r[inst].sz.y) : half(0);\n", "");
 #define ref_B2h ref_B2q
@@ -1725,6 +1729,10 @@ const isa_case isa_cases[] = {
      .fs = "fs", .draw = draw_B2q, .setup = setup_B2q, .vis_hi = 128},
     {VT(B2h), .id = "B2", .title = "Diagnosi: B2y + varying half2",
      .fs = "fs", .draw = draw_B2q, .setup = setup_B2q, .vis_hi = 128},
+    {VT(B2k), .id = "B2", .title = "Diagnosi: B2y + varying float2",
+     .fs = "fs", .draw = draw_B2q, .setup = setup_B2q, .vis_hi = 128},
+    {VT(B2l), .id = "B2", .title = "Diagnosi: B2y + varying half",
+     .fs = "fs", .draw = draw_B2q, .setup = setup_B2q, .vis_hi = 128},
     {VT(B2i), .id = "B2", .title = "Diagnosi: B2y + interi flat letti dal buffer",
      .fs = "fs", .draw = draw_B2q, .setup = setup_B2q, .vis_hi = 128},
     {VT(B2j), .id = "B2", .title = "Diagnosi: B2y + angoli in half",
@@ -2160,8 +2168,9 @@ isa_result isa_run_case(id<MTLDevice> dev, const isa_case *c, int mode, uint8_t 
                     double tol2, rel2;
                     tolerance(c, &tol2, &rel2);
                     if (isnan(g) || fabs(g - e) > tol2 + rel2 * fabs(e)) {
-                        note = [NSString stringWithFormat:@"primo errore (%zu,%zu) canale %d: GPU %.9g, atteso %.9g", i % (size_t)c->w,
-                                i / (size_t)c->w, k, g, e];
+                        note = [NSString stringWithFormat:@"primo errore (%zu,%zu) canale %d: GPU %.9g, atteso %.9g; pixel GPU (%.9g %.9g %.9g %.9g) atteso (%.9g %.9g %.9g %.9g)",
+                                i % (size_t)c->w, i / (size_t)c->w, k, g, e, gpu[i * 4], gpu[i * 4 + 1], gpu[i * 4 + 2], gpu[i * 4 + 3],
+                                ref[i * 4], ref[i * 4 + 1], ref[i * 4 + 2], ref[i * 4 + 3]];
                         break;
                     }
                 }
