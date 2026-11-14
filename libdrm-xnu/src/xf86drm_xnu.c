@@ -280,6 +280,10 @@ int drmIoctl(int fd, unsigned long request, void *arg)
     // Panfrost calls it twice per BO it recycles through its cache. VGPU_MADVISE_KERNEL=1 sends it to the kernel.
     static int madv_kernel = -1;
     if (madv_kernel < 0) madv_kernel = getenv("VGPU_MADVISE_KERNEL") != NULL;
+    // GEM_CLOSE: the kept mappings go first. IOConnectUnmapMemory64 finds the mapping through the BO handle
+    // (clientMemoryForType), so after the close it fails and the mapping, with the BO's memory, stays until the
+    // process exits (backboardd: ~140 MB wired per app cycle, 2026-11-14).
+    if (sel == VGPU_SEL_GEM_CLOSE) map_cache_drop(fd, ((struct vgpu_gem_close *)arg)->handle);
     int r;
     if (sel == VGPU_SEL_MMAP_BO) r = (((struct vgpu_mmap_bo *)arg)->offset = ((struct vgpu_mmap_bo *)arg)->handle, 0);
     else if (sel == VGPU_SEL_MADVISE && !madv_kernel) r = (((struct vgpu_madvise *)arg)->retained = 1, 0);
@@ -293,7 +297,6 @@ int drmIoctl(int fd, unsigned long request, void *arg)
         bo_flags_set(fd, ((struct vgpu_create_bo *)arg)->handle,
                      (((struct vgpu_create_bo *)arg)->flags & VGPU_BO_WB_MMAP) ? BO_WB : 0, true);
     if (!r && sel == VGPU_SEL_GEM_CLOSE) bo_flags_set(fd, ((struct vgpu_gem_close *)arg)->handle, 0, true);
-    if (sel == VGPU_SEL_GEM_CLOSE && !r) map_cache_drop(fd, ((struct vgpu_gem_close *)arg)->handle);
     if (trace_bo && !r && sel == VGPU_SEL_CREATE_BO) {
         struct vgpu_create_bo *c = arg;
         fprintf(stderr, "vgpu: bo %u 0x%llx-0x%llx flags %x\n", c->handle, (unsigned long long)c->offset,
@@ -339,8 +342,9 @@ int drmCloseBufferHandle(int fd, uint32_t handle)
 {
     struct vgpu_gem_close c = { .handle = handle };
     flush_fd(fd);
+    map_cache_drop(fd, handle);     // before the close: the unmap needs the handle (see drmIoctl)
     int r = vgpu_ioctl(fd, VGPU_SEL_GEM_CLOSE, &c);
-    if (!r) { map_cache_drop(fd, handle); bo_forget(fd, handle); bo_flags_set(fd, handle, 0, true); }
+    if (!r) { bo_forget(fd, handle); bo_flags_set(fd, handle, 0, true); }
     return ret_errno(r);
 }
 
