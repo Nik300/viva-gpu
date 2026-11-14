@@ -118,6 +118,8 @@ static id VDInsets(double top, double left, double bottom, double right) {
 }
 
 static IMP VDOrigEdgeInfo, VDOrigClassicMode, VDOrigEdgeInsets, VDOrigKbRef, VDOrigMakeLayout;
+static IMP VDOrigScreenType;
+static id VDDeviceTypeProvider;     // SBHDefaultIconListLayoutProvider for the device's own type (App Library)
 static IMP VDOrigCCSpacing, VDOrigCCLayoutViews, VDOrigCCGridInsets, VDOrigCCStatusInsets, VDOrigCCLabelInsets,
     VDOrigCCSensorInsets;
 
@@ -215,15 +217,43 @@ static void VDInstall(void) {
     if (VDHomeType > 0) {
         VDHook(@"SBHDefaultIconListLayoutProvider", NSSelectorFromString(@"currentDeviceScreenType"), YES, ^unsigned long(id self) {
             return (unsigned long)VDHomeType;
-        }, NULL);
+        }, &VDOrigScreenType);
     }
 
-    // SpringBoardHome: less space above the home pages' grid
-    if (VDHomeTopShift != 0) {
+    // SpringBoardHome: less space above the home pages' grid; the App Library on the device's own screen type
+    {
         VDHook(@"SBHDefaultIconListLayoutProvider", NSSelectorFromString(@"makeLayoutForIconLocation:"), NO, ^id(id self, NSString *loc) {
-            id layout = ((id (*)(id, SEL, id))VDOrigMakeLayout)(self, NSSelectorFromString(@"makeLayoutForIconLocation:"), loc);
+            SEL mk = NSSelectorFromString(@"makeLayoutForIconLocation:");
+            // App Library: type 3's layout is 375 pt wide on the 360 pt screen (the pod list scrolled sideways and
+            // took the swipe back to the home screen): its lists come from a provider of the device's own type.
+            BOOL library = [loc isKindOfClass:NSString.class] && [loc hasPrefix:@"SBIconLocationAppLibrary"];
+            if (VDOrigScreenType && !VDDeviceTypeProvider) {
+                @try {
+                    unsigned long own = ((unsigned long (*)(id, SEL))VDOrigScreenType)([self class],
+                        NSSelectorFromString(@"currentDeviceScreenType"));
+                    id prov = [[self class] alloc];
+                    prov = ((id (*)(id, SEL, unsigned long))objc_msgSend)(prov, NSSelectorFromString(@"initWithScreenType:"), own);
+                    VDDeviceTypeProvider = prov;
+                    VDLOG("app library: provider for screen type %lu", own);
+                } @catch (NSException *e) {
+                    VDLOG("app library provider: %{public}@", e);
+                }
+            }
+            if (library && VDDeviceTypeProvider && self != VDDeviceTypeProvider) {
+                return ((id (*)(id, SEL, id))VDOrigMakeLayout)(VDDeviceTypeProvider, mk, loc);
+            }
+            id layout = ((id (*)(id, SEL, id))VDOrigMakeLayout)(self, mk, loc);
+            if (VDDeviceTypeProvider && self != VDDeviceTypeProvider) {
+                @try {      // every grid layout carries the App Library's visual configuration: the device type's one
+                    id own = ((id (*)(id, SEL, id))VDOrigMakeLayout)(VDDeviceTypeProvider, mk, loc);
+                    id lib = [own valueForKey:@"_appLibraryVisualConfiguration"];
+                    if (lib) [layout setValue:lib forKey:@"_appLibraryVisualConfiguration"];
+                } @catch (NSException *e) {
+                    VDLOG("app library config: %{public}@", e);
+                }
+            }
             @try {
-                if ([loc isKindOfClass:NSString.class] && [loc hasPrefix:@"SBIconLocationRoot"]) {
+                if (VDHomeTopShift != 0 && [loc isKindOfClass:NSString.class] && [loc hasPrefix:@"SBIconLocationRoot"]) {
                     id cfg = [layout valueForKey:@"_layoutConfiguration"];
                     UIEdgeInsets in = [[cfg valueForKey:@"portraitLayoutInsets"] UIEdgeInsetsValue];
                     in.top = MAX(0, in.top - VDHomeTopShift);
