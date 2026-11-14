@@ -20,6 +20,7 @@
 #import <objc/message.h>
 #import <os/log.h>
 #import <notify.h>
+#import <mach-o/dyld.h>
 #import <IOKit/IOKitLib.h>
 
 #define VD_DOMAIN "it.viva.display"
@@ -40,6 +41,12 @@ static long VDHomeType = 3;
 // Space above the home screen grid (points taken off the root lists' portrait top inset; user: too much space under
 // the island). And the expanded island: its content is laid out for Apple's 11.33 pt gap above the island, ours is
 // 2 pt, so titles were clipped at the top: the difference goes into the expanded content's top insets and heights.
+// Control Center (docs/PIANO-DISPLAY-NATIVO.md section 10): its tables put 360 pt in the "< 375" (iPhone SE) bucket:
+// 66 pt modules, 8 pt gutters, a 320 pt grid at x 0 with 16 pt margins (40 pt free on the right), the status strip
+// 16 pt from the edges. Gutter CCItemSpacing (14) and symmetric margins for the grid and the strip in portrait.
+static double VDCCItemSpacing = 14.0, VDCCItemEdge = 66.0;
+static BOOL VDCCPortrait;
+static double VDCCMargin;
 static double VDHomeTopShift = 16.0, VDExpandedTopExtra = 0;    // ExpandedTopExtra: untested, VivaIsland's notice was its own overlay
 static double VDSafeTop = 53.667, VDSafeBottom = 34.0, VDSafeLandscapeSide = 53.667, VDSafeLandscapeBottom = 21.0;
 static double VDScreenW = 360.0;
@@ -111,6 +118,56 @@ static id VDInsets(double top, double left, double bottom, double right) {
 }
 
 static IMP VDOrigEdgeInfo, VDOrigClassicMode, VDOrigEdgeInsets, VDOrigKbRef, VDOrigMakeLayout;
+static IMP VDOrigCCSpacing, VDOrigCCLayoutViews, VDOrigCCGridInsets, VDOrigCCStatusInsets, VDOrigCCLabelInsets,
+    VDOrigCCSensorInsets;
+
+// ControlCenterUI is loaded when Control Center is first used: these go in once its classes exist.
+static BOOL VDInstallCC(void) {
+    if (!NSClassFromString(@"CCUIOverlayStatusBarPresentationProvider") || !NSClassFromString(@"CCUILayoutOptions"))
+        return NO;
+    VDHook(@"CCUILayoutOptions", @selector(itemSpacing), NO, ^CGFloat(id self) {
+        return VDCCItemSpacing;
+    }, &VDOrigCCSpacing);
+    VDHook(@"CCUIOverlayStatusBarPresentationProvider", @selector(layoutViews), NO, ^(id self) {
+        @try {
+            id metrics = [self valueForKey:@"metricsProvider"];
+            long orient = [[metrics valueForKey:@"overlayInterfaceOrientation"] longValue];
+            CGRect frame = [[metrics valueForKey:@"overlayContainerFrame"] CGRectValue];
+            double grid = 4 * VDCCItemEdge + 3 * VDCCItemSpacing;
+            VDCCPortrait = (orient == 1 || orient == 2) && frame.size.width > grid;
+            VDCCMargin = VDCCPortrait ? floor((frame.size.width - grid) / 2) : 0;
+        } @catch (NSException *e) {
+            VDCCPortrait = NO;
+        }
+        ((void (*)(id, SEL))VDOrigCCLayoutViews)(self, @selector(layoutViews));
+        VDCCPortrait = NO;
+    }, &VDOrigCCLayoutViews);
+    // the module grid: the same margin on both sides
+    VDHook(@"CCUILayoutView", @selector(setEdgeInsets:), NO, ^(id self, UIEdgeInsets in) {
+        if (VDCCPortrait) in.left = in.right = VDCCMargin;
+        ((void (*)(id, SEL, UIEdgeInsets))VDOrigCCGridInsets)(self, @selector(setEdgeInsets:), in);
+    }, &VDOrigCCGridInsets);
+    // the status strip, its labels and the sensor attribution: aligned with the grid
+    VDHook(@"CCUIStatusBar", @selector(setExpandedEdgeInsets:), NO, ^(id self, UIEdgeInsets in) {
+        if (VDCCPortrait) in.left = in.right = VDCCMargin;
+        ((void (*)(id, SEL, UIEdgeInsets))VDOrigCCStatusInsets)(self, @selector(setExpandedEdgeInsets:), in);
+    }, &VDOrigCCStatusInsets);
+    VDHook(@"CCUIStatusLabelViewController", @selector(setEdgeInsets:), NO, ^(id self, UIEdgeInsets in) {
+        if (VDCCPortrait) in.left = in.right = VDCCMargin;
+        ((void (*)(id, SEL, UIEdgeInsets))VDOrigCCLabelInsets)(self, @selector(setEdgeInsets:), in);
+    }, &VDOrigCCLabelInsets);
+    VDHook(@"CCUIHeaderPocketView", @selector(setSensorAttributionEdgeInsets:), NO, ^(id self, UIEdgeInsets in) {
+        if (VDCCPortrait) in.left = in.right = VDCCMargin;
+        ((void (*)(id, SEL, UIEdgeInsets))VDOrigCCSensorInsets)(self, @selector(setSensorAttributionEdgeInsets:), in);
+    }, &VDOrigCCSensorInsets);
+    return YES;
+}
+
+static BOOL VDCCDone;
+static void VDImageAdded(const struct mach_header *mh, intptr_t slide) {
+    (void)mh; (void)slide;
+    if (!VDCCDone && VDInstallCC()) VDCCDone = YES;
+}
 
 static void VDInstall(void) {
     // SpringBoardUIServices: the island
@@ -307,6 +364,7 @@ __attribute__((constructor)) static void VDInit(void) {
         VDAvoidW = VDPrefNumber(p, @"StatusBarAvoidWidth", VDAvoidW);
         VDHomeType = (long)VDPrefNumber(p, @"HomeScreenType", VDHomeType);
         VDHomeTopShift = VDPrefNumber(p, @"HomeTopShift", VDHomeTopShift);
+        VDCCItemSpacing = VDPrefNumber(p, @"CCItemSpacing", VDCCItemSpacing);
         VDExpandedTopExtra = VDPrefNumber(p, @"ExpandedTopExtra", VDExpandedTopExtra);
         VDSafeTop = VDPrefNumber(p, @"SafeTop", VDSafeTop);
         VDSafeBottom = VDPrefNumber(p, @"SafeBottom", VDSafeBottom);
@@ -314,6 +372,7 @@ __attribute__((constructor)) static void VDInit(void) {
         VDSafeLandscapeBottom = VDPrefNumber(p, @"SafeLandscapeBottom", VDSafeLandscapeBottom);
         @try {
             VDInstall();
+            if (!(VDCCDone = VDInstallCC())) _dyld_register_func_for_add_image(VDImageAdded);
         } @catch (NSException *e) {
             VDLOG("install: %{public}@", e);
         }
