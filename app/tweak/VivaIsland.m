@@ -459,9 +459,17 @@ static void VIInvalidate(id assertion, NSString *reason) {
     _pill.layer.cornerRadius = MIN(f.size.height / 2, 44);
 }
 
+// The system island (sensor region) is drawn above this window: the expanded content goes below it and the pill grows
+// to island height + 52 pt (2026-11-14, native display: the island 2 pt from the top hid the title's upper half).
+- (CGFloat)sensorBottomInPill {
+    return MAX(0, CGRectGetMaxY(_island) - _island.origin.y);
+}
+
 - (CGRect)expandedFrame {
     CGFloat w = _window.bounds.size.width;
-    return CGRectMake(11, _island.origin.y, w - 22, 72);
+    CGFloat sensor = [self sensorBottomInPill];
+    CGFloat h = sensor > 30 ? MAX(72, sensor + 52) : 72;
+    return CGRectMake(11, _island.origin.y, w - 22, h);
 }
 
 - (CGRect)compactFrame {
@@ -471,12 +479,14 @@ static void VIInvalidate(id assertion, NSString *reason) {
 - (void)layoutContent:(CGRect)expanded compact:(CGRect)compact {
     // Content frames are fixed to the target pill sizes; the pill clips them while it grows.
     _expanded.frame = (CGRect){CGPointZero, expanded.size};
-    CGFloat h = expanded.size.height;
-    _bigIcon.frame = CGRectMake(22, (h - 30) / 2 + 4, 30, 30);
+    CGFloat h = expanded.size.height, sensor = [self sensorBottomInPill];
+    CGFloat top = h > 72 ? sensor : 0;          // content area: below the island when the pill grew for it
+    CGFloat ah = h - top, mid = top + ah / 2;
+    _bigIcon.frame = CGRectMake(22, mid - 15 + (top > 0 ? 0 : 4), 30, 30);
     CGFloat tx = 66, tw = expanded.size.width - tx - 20;
-    _title.frame = CGRectMake(tx, h / 2 - 17, tw, 22);
-    _subtitle.frame = CGRectMake(tx, h / 2 + 7, tw, 18);
-    if (!_subtitle.text.length) _title.frame = CGRectMake(tx, (h - 22) / 2 + 4, tw, 22);
+    _title.frame = CGRectMake(tx, mid - 21 + (top > 0 ? 0 : 4), tw, 22);
+    _subtitle.frame = CGRectMake(tx, mid + 3 + (top > 0 ? 0 : 4), tw, 18);
+    if (!_subtitle.text.length) _title.frame = CGRectMake(tx, mid - 11 + (top > 0 ? 0 : 4), tw, 22);
     _compact.frame = (CGRect){CGPointZero, compact.size};
     CGFloat ch = compact.size.height;
     _smallIcon.frame = CGRectMake(12, (ch - 18) / 2, 18, 18);
