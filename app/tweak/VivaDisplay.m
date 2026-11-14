@@ -37,6 +37,10 @@ static double VDAvoidW = 150.0;
 // type, 4 ("iPhone X zoomed", 320x693 pt) on 360x800: small icons, rows far apart. 3 = iPhone X (375x812), the closest
 // real layout (preference HomeScreenType; 0 = leave SpringBoard's).
 static long VDHomeType = 3;
+// Space above the home screen grid (points taken off the root lists' portrait top inset; user: too much space under
+// the island). And the expanded island: its content is laid out for Apple's 11.33 pt gap above the island, ours is
+// 2 pt, so titles were clipped at the top: the difference goes into the expanded content's top insets and heights.
+static double VDHomeTopShift = 16.0, VDExpandedTopExtra = 9.333;
 static double VDSafeTop = 53.667, VDSafeBottom = 34.0, VDSafeLandscapeSide = 53.667, VDSafeLandscapeBottom = 21.0;
 static double VDScreenW = 360.0;
 
@@ -106,7 +110,7 @@ static id VDInsets(double top, double left, double bottom, double right) {
     return o;
 }
 
-static IMP VDOrigEdgeInfo, VDOrigClassicMode, VDOrigEdgeInsets, VDOrigKbRef;
+static IMP VDOrigEdgeInfo, VDOrigClassicMode, VDOrigEdgeInsets, VDOrigKbRef, VDOrigMakeLayout;
 
 static void VDInstall(void) {
     // SpringBoardUIServices: the island
@@ -155,6 +159,47 @@ static void VDInstall(void) {
         VDHook(@"SBHDefaultIconListLayoutProvider", NSSelectorFromString(@"currentDeviceScreenType"), YES, ^unsigned long(id self) {
             return (unsigned long)VDHomeType;
         }, NULL);
+    }
+
+    // SpringBoardHome: less space above the home pages' grid
+    if (VDHomeTopShift != 0) {
+        VDHook(@"SBHDefaultIconListLayoutProvider", NSSelectorFromString(@"makeLayoutForIconLocation:"), NO, ^id(id self, NSString *loc) {
+            id layout = ((id (*)(id, SEL, id))VDOrigMakeLayout)(self, NSSelectorFromString(@"makeLayoutForIconLocation:"), loc);
+            @try {
+                if ([loc isKindOfClass:NSString.class] && [loc hasPrefix:@"SBIconLocationRoot"]) {
+                    id cfg = [layout valueForKey:@"_layoutConfiguration"];
+                    UIEdgeInsets in = [[cfg valueForKey:@"portraitLayoutInsets"] UIEdgeInsetsValue];
+                    in.top = MAX(0, in.top - VDHomeTopShift);
+                    [cfg setValue:[NSValue valueWithUIEdgeInsets:in] forKey:@"portraitLayoutInsets"];
+                    VDLOG("home grid %{public}@: top inset %.2f", loc, in.top);
+                }
+            } @catch (NSException *e) {
+                VDLOG("home grid: %{public}@", e);
+            }
+            return layout;
+        }, &VDOrigMakeLayout);
+    }
+
+    // SpringBoardUIServices: expanded island content below Apple's 11.33 pt line, the island taller by as much
+    if (VDExpandedTopExtra != 0) {
+        for (NSString *name in @[@"expandedLegibleAreaInsets", @"expandedControlsAreaInsets"]) {
+            SEL sel = NSSelectorFromString(name);
+            __block IMP orig = NULL;
+            VDHook(@"SBUISystemApertureLayoutMetrics", sel, NO, ^NSDirectionalEdgeInsets(id self) {
+                NSDirectionalEdgeInsets i = ((NSDirectionalEdgeInsets (*)(id, SEL))orig)(self, sel);
+                i.top += VDExpandedTopExtra;
+                return i;
+            }, &orig);
+        }
+        for (NSString *name in @[@"minimumExpandedSize", @"maximumExpandedSize"]) {
+            SEL sel = NSSelectorFromString(name);
+            __block IMP orig = NULL;
+            VDHook(@"SBUISystemApertureLayoutMetrics", sel, NO, ^CGSize(id self) {
+                CGSize sz = ((CGSize (*)(id, SEL))orig)(self, sel);
+                sz.height += VDExpandedTopExtra;
+                return sz;
+            }, &orig);
+        }
     }
 
     // UIKit inside SpringBoard (App Library search, folders' rename field): the same keyboard fix as VivaUIKit.dylib in
@@ -261,6 +306,8 @@ __attribute__((constructor)) static void VDInit(void) {
         VDInterX = VDPrefNumber(p, @"InterSensorX", VDInterX);
         VDAvoidW = VDPrefNumber(p, @"StatusBarAvoidWidth", VDAvoidW);
         VDHomeType = (long)VDPrefNumber(p, @"HomeScreenType", VDHomeType);
+        VDHomeTopShift = VDPrefNumber(p, @"HomeTopShift", VDHomeTopShift);
+        VDExpandedTopExtra = VDPrefNumber(p, @"ExpandedTopExtra", VDExpandedTopExtra);
         VDSafeTop = VDPrefNumber(p, @"SafeTop", VDSafeTop);
         VDSafeBottom = VDPrefNumber(p, @"SafeBottom", VDSafeBottom);
         VDSafeLandscapeSide = VDPrefNumber(p, @"SafeLandscapeSide", VDSafeLandscapeSide);
