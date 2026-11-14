@@ -468,7 +468,7 @@ static void VIInvalidate(id assertion, NSString *reason) {
 - (CGRect)expandedFrame {
     CGFloat w = _window.bounds.size.width;
     CGFloat sensor = [self sensorBottomInPill];
-    CGFloat h = sensor > 30 ? MAX(72, sensor + 52) : 72;
+    CGFloat h = sensor > 0 ? MAX(72, sensor + 52) : 72;     // viva's island is 29.33 pt tall
     return CGRectMake(11, _island.origin.y, w - 22, h);
 }
 
@@ -480,7 +480,7 @@ static void VIInvalidate(id assertion, NSString *reason) {
     // Content frames are fixed to the target pill sizes; the pill clips them while it grows.
     _expanded.frame = (CGRect){CGPointZero, expanded.size};
     CGFloat h = expanded.size.height, sensor = [self sensorBottomInPill];
-    CGFloat top = h > 72 ? sensor : 0;          // content area: below the island when the pill grew for it
+    CGFloat top = sensor;                       // content area: below the island
     CGFloat ah = h - top, mid = top + ah / 2;
     _bigIcon.frame = CGRectMake(22, mid - 15 + (top > 0 ? 0 : 4), 30, 30);
     CGFloat tx = 66, tw = expanded.size.width - tx - 20;
