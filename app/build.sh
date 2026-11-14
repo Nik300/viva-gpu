@@ -11,6 +11,7 @@ OUT="$HERE/out"
 SRC=("$HERE"/Sources/*.m "$HERE/../driver/tests/isa_cases.m")   # ISA test cases, shared with the isatest CLI
 CFLAGS=(-fobjc-arc -O2 -g -Wall -Wextra -Wno-unused-parameter -I"$HERE/../driver")
 TWEAK=("$HERE/tweak/VivaIsland.m" "$HERE/tweak/VivaDisplay.m")
+UIKIT_INJECT="$HERE/tweak/VivaUIKit.m"   # inserted into every app by the kernel (0205), Foundation/IOKit only
 TWEAK_FW=(-framework UIKit -framework Foundation -framework CoreGraphics -framework QuartzCore -framework IOKit)
 
 if [ "${1:-}" = check ]; then
@@ -20,7 +21,7 @@ if [ "${1:-}" = check ]; then
       "${CFLAGS[@]}" -fsyntax-only "$f"
   done
   clang -target arm64-apple-ios16.0-macabi -isysroot "$SDK" -iframework "$SDK/System/iOSSupport/System/Library/Frameworks" \
-    "${CFLAGS[@]}" -fsyntax-only "${TWEAK[@]}"
+    "${CFLAGS[@]}" -fsyntax-only "${TWEAK[@]}" "$UIKIT_INJECT"
   for f in "$HERE/tweak/inject.sh" "$HERE/tweak/vi-sb.sh" "$HERE/install.sh"; do bash -n "$f"; done
   clang -target arm64-apple-macos13 -Wall -Wextra -fsyntax-only "$HERE/helper/vmhelper.c"
   echo "check: ok"
@@ -40,6 +41,9 @@ mkdir -p "$APP"
 "$CC" "${T[@]}" "${CFLAGS[@]}" -dynamiclib -install_name /var/jb/usr/lib/VivaIsland.dylib \
   -current_version 1.0 -compatibility_version 1.0 "${TWEAK[@]}" "${TWEAK_FW[@]}" \
   -o "$APP/VivaIsland.dylib"
+"$CC" "${T[@]}" "${CFLAGS[@]}" -dynamiclib -install_name /var/jb/usr/lib/VivaUIKit.dylib \
+  -current_version 1.0 -compatibility_version 1.0 "$UIKIT_INJECT" -framework Foundation -framework IOKit \
+  -o "$APP/VivaUIKit.dylib"
 cp "$HERE/tweak/vi-sb.sh" "$APP/vi-sb.sh"
 cp "$HERE/Info.plist" "$APP/Info.plist"
 plutil -convert binary1 "$APP/Info.plist"
@@ -48,6 +52,7 @@ printf 'APPL????' > "$APP/PkgInfo"
 rm -rf "$OUT"/*.dSYM; mv "$APP"/*.dSYM "$OUT"/ 2>/dev/null || true   # clang -g puts them next to the binaries
 codesign -s - -f "$APP/vmhelper"
 codesign -s - -f "$APP/VivaIsland.dylib"
+codesign -s - -f "$APP/VivaUIKit.dylib"
 codesign -s - -f --entitlements "$HERE/VivaManager.entitlements" "$APP"
 (cd "$OUT" && rm -f VivaManager.tar && tar cf VivaManager.tar VivaManager.app)
 ls -l "$APP" "$OUT/VivaManager.tar"

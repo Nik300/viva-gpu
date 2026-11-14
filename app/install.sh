@@ -18,6 +18,9 @@ uicache -p /var/jb/Applications/VivaManager.app && ls -l VivaManager.app/vmhelpe
 A=/var/jb/Applications/VivaManager.app
 python3 "$LINK" run -- /var/jb/bin/cp $A/VivaIsland.dylib /var/jb/usr/lib/VivaIsland.dylib.new
 python3 "$LINK" run -- /var/jb/bin/mv -f /var/jb/usr/lib/VivaIsland.dylib.new /var/jb/usr/lib/VivaIsland.dylib
+# VivaUIKit.dylib: inserted into apps by the kernel (0205); a new copy is used by apps launched afterwards
+python3 "$LINK" run -- /var/jb/bin/cp $A/VivaUIKit.dylib /var/jb/usr/lib/VivaUIKit.dylib.new
+python3 "$LINK" run -- /var/jb/bin/mv -f /var/jb/usr/lib/VivaUIKit.dylib.new /var/jb/usr/lib/VivaUIKit.dylib
 python3 "$LINK" run -- /var/jb/bin/mkdir -p /var/jb/usr/libexec
 python3 "$LINK" run -- /var/jb/bin/cp $A/vi-sb.sh /var/jb/usr/libexec/vi-sb.sh
 python3 "$LINK" run -- /var/jb/bin/sh -c "PATH=/var/jb/usr/bin:/var/jb/bin chmod 755 /var/jb/usr/lib/VivaIsland.dylib /var/jb/usr/libexec/vi-sb.sh"
