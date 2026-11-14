@@ -19,6 +19,7 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <os/log.h>
+#import <notify.h>
 #import <IOKit/IOKitLib.h>
 
 #define VD_DOMAIN "it.viva.display"
@@ -161,10 +162,72 @@ static void VDInstall(void) {
     }, &VDOrigClassicMode);
 }
 
+// Diagnostics: Darwin notification it.viva.display.dump (fork/tools/vivad/vnotify) writes SpringBoard's windows with
+// their view trees and frames, the screen geometry and the keyboard's traits to /var/mobile/Library/Caches/VivaDisplay/
+// views.txt (pull it over the link). For layout bugs inside SpringBoard (keyboard 20 pt to the right, 2026-11-14).
+static void VDDump(void) {
+    NSMutableString *out = [NSMutableString string];
+    @try {
+        UIScreen *scr = UIScreen.mainScreen;
+        [out appendFormat:@"screen bounds %@ native %@ scale %.2f nativeScale %.2f\n", NSStringFromCGRect(scr.bounds),
+            NSStringFromCGRect(scr.nativeBounds), scr.scale, scr.nativeScale];
+        for (NSString *sel in @[@"_referenceBounds", @"_unjailedReferenceBounds"]) {
+            if ([scr respondsToSelector:NSSelectorFromString(sel)]) {
+                CGRect r = ((CGRect (*)(id, SEL))objc_msgSend)(scr, NSSelectorFromString(sel));
+                [out appendFormat:@"screen %@ %@\n", sel, NSStringFromCGRect(r)];
+            }
+        }
+        for (NSString *sel in @[@"_exclusionArea", @"_displayInfoProvider", @"_screenType"]) {
+            if (![scr respondsToSelector:NSSelectorFromString(sel)]) continue;
+            if ([sel isEqualToString:@"_screenType"]) {
+                [out appendFormat:@"screen _screenType %ld\n", ((long (*)(id, SEL))objc_msgSend)(scr, NSSelectorFromString(sel))];
+            } else {
+                [out appendFormat:@"screen %@ %@\n", sel, [scr valueForKey:sel]];
+            }
+        }
+        Class traits = NSClassFromString(@"UIKBScreenTraits");
+        if ([traits respondsToSelector:@selector(traitsWithScreen:orientation:)]) {
+            id t = ((id (*)(id, SEL, id, long))objc_msgSend)(traits, @selector(traitsWithScreen:orientation:), scr, 1);
+            [out appendFormat:@"UIKBScreenTraits %@\n", t];
+        }
+        id impl = [NSClassFromString(@"UIKeyboardImpl") respondsToSelector:@selector(activeInstance)] ?
+            [NSClassFromString(@"UIKeyboardImpl") performSelector:@selector(activeInstance)] : nil;
+        if (impl) {
+            [out appendFormat:@"UIKeyboardImpl %@ frame %@\n", impl, NSStringFromCGRect([(UIView *)impl frame])];
+            if ([impl respondsToSelector:NSSelectorFromString(@"_layout")]) {
+                id layout = [impl valueForKey:@"_layout"];
+                [out appendFormat:@"layout %@\n", layout];
+            }
+        }
+        NSArray *windows = nil;
+        @try {
+            windows = ((id (*)(id, SEL, BOOL, BOOL))objc_msgSend)(UIWindow.class,
+                NSSelectorFromString(@"allWindowsIncludingInternalWindows:onlyVisibleWindows:"), YES, YES);
+        } @catch (NSException *e) {
+            windows = UIApplication.sharedApplication.windows;
+        }
+        for (UIWindow *w in windows) {
+            [out appendFormat:@"\n=== %@ level %.0f frame %@\n", NSStringFromClass(w.class), w.windowLevel,
+                NSStringFromCGRect(w.frame)];
+            NSString *tree = [w respondsToSelector:NSSelectorFromString(@"recursiveDescription")] ?
+                [w valueForKey:@"recursiveDescription"] : w.description;
+            [out appendString:tree ?: @"?"];
+        }
+    } @catch (NSException *e) {
+        [out appendFormat:@"\nexception %@\n", e];
+    }
+    NSString *dir = @"/var/mobile/Library/Caches/VivaDisplay";
+    [NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    [out writeToFile:[dir stringByAppendingPathComponent:@"views.txt"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    VDLOG("dump: %lu bytes", (unsigned long)out.length);
+}
+
 __attribute__((constructor)) static void VDInit(void) {
     @autoreleasepool {
         VDLog = os_log_create("it.viva.display", "tweak");
         if (strcmp(getprogname(), "SpringBoard") != 0) return;
+        int token;
+        notify_register_dispatch("it.viva.display.dump", &token, dispatch_get_main_queue(), ^(int t) { VDDump(); });
         uint32_t canvas = VDCanvasWidth();
         NSDictionary *p = VDPrefs();
         id on = p[@"DisplayHooks"];
