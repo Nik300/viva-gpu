@@ -33,6 +33,10 @@ static double VDInterX = 193.333, VDInterW = 9.0;
 // What the status bar avoids around the island (points, centred): wider than the pill pushes the time and the icons
 // toward the screen edges (they are centred between edgeInsets and the area; user request 2026-11-14).
 static double VDAvoidW = 150.0;
+// Home screen grid, dock, folders, App Library: SBHDefaultIconListLayoutProvider is built for the device's SBH screen
+// type, 4 ("iPhone X zoomed", 320x693 pt) on 360x800: small icons, rows far apart. 3 = iPhone X (375x812), the closest
+// real layout (preference HomeScreenType; 0 = leave SpringBoard's).
+static long VDHomeType = 3;
 static double VDSafeTop = 53.667, VDSafeBottom = 34.0, VDSafeLandscapeSide = 53.667, VDSafeLandscapeBottom = 21.0;
 static double VDScreenW = 360.0;
 
@@ -102,7 +106,7 @@ static id VDInsets(double top, double left, double bottom, double right) {
     return o;
 }
 
-static IMP VDOrigEdgeInfo, VDOrigClassicMode, VDOrigEdgeInsets;
+static IMP VDOrigEdgeInfo, VDOrigClassicMode, VDOrigEdgeInsets, VDOrigKbRef;
 
 static void VDInstall(void) {
     // SpringBoardUIServices: the island
@@ -145,6 +149,22 @@ static void VDInstall(void) {
         }
         return info;
     }, &VDOrigEdgeInfo);
+
+    // SpringBoardHome: the icon layout's screen type
+    if (VDHomeType > 0) {
+        VDHook(@"SBHDefaultIconListLayoutProvider", NSSelectorFromString(@"currentDeviceScreenType"), YES, ^unsigned long(id self) {
+            return (unsigned long)VDHomeType;
+        }, NULL);
+    }
+
+    // UIKit inside SpringBoard (App Library search, folders' rename field): the same keyboard fix as VivaUIKit.dylib in
+    // apps (SpringBoard is not injected): reference size 360x800 -> 360x780, the mini's derived keyboard.
+    VDHook(@"UIKBScreenTraits", @selector(keyboardScreenReferenceSize), NO, ^CGSize(id self) {
+        CGSize sz = ((CGSize (*)(id, SEL))VDOrigKbRef)(self, @selector(keyboardScreenReferenceSize));
+        if (sz.width == 360 && sz.height == 800) return CGSizeMake(360, 780);
+        if (sz.width == 800 && sz.height == 360) return CGSizeMake(780, 360);
+        return sz;
+    }, &VDOrigKbRef);
 
     // SpringBoard: compatibility mode of third-party apps
     VDHook(@"SBApplication", NSSelectorFromString(@"_defaultClassicMode"), NO, ^NSInteger(id self) {
@@ -240,6 +260,7 @@ __attribute__((constructor)) static void VDInit(void) {
         VDIslandTop = VDPrefNumber(p, @"IslandTop", VDIslandTop);
         VDInterX = VDPrefNumber(p, @"InterSensorX", VDInterX);
         VDAvoidW = VDPrefNumber(p, @"StatusBarAvoidWidth", VDAvoidW);
+        VDHomeType = (long)VDPrefNumber(p, @"HomeScreenType", VDHomeType);
         VDSafeTop = VDPrefNumber(p, @"SafeTop", VDSafeTop);
         VDSafeBottom = VDPrefNumber(p, @"SafeBottom", VDSafeBottom);
         VDSafeLandscapeSide = VDPrefNumber(p, @"SafeLandscapeSide", VDSafeLandscapeSide);
