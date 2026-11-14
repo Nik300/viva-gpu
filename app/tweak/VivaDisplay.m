@@ -40,7 +40,7 @@ static long VDHomeType = 3;
 // Space above the home screen grid (points taken off the root lists' portrait top inset; user: too much space under
 // the island). And the expanded island: its content is laid out for Apple's 11.33 pt gap above the island, ours is
 // 2 pt, so titles were clipped at the top: the difference goes into the expanded content's top insets and heights.
-static double VDHomeTopShift = 16.0, VDExpandedTopExtra = 9.333;
+static double VDHomeTopShift = 16.0, VDExpandedTopExtra = 0;    // ExpandedTopExtra: untested, VivaIsland's notice was its own overlay
 static double VDSafeTop = 53.667, VDSafeBottom = 34.0, VDSafeLandscapeSide = 53.667, VDSafeLandscapeBottom = 21.0;
 static double VDScreenW = 360.0;
 
