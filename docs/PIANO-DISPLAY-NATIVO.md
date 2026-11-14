@@ -576,74 +576,91 @@ KBLayouts_iPhone.dat` e `KBLayouts_Dynamic.dat`, decodificati con un decoder Pyt
 4. Adattamento alla larghezza: `-[UIKeyboardLayoutStar stretchKeyboardToFitKeyplane:]` (0x18911d5b0) è vero sul
    telefono quando `keyboard.frame.width ≠ screenTraits.keyboardWidth` (falso solo per tastiera split generata,
    idioma 2, o `_shouldAttemptToAddSupplementaryControlKeys`, che vale solo per l'idioma tastiera 24 = iPad);
-   `-[UIKeyboardLayoutStar setKeyplaneName:]` (0x188ffa0b8) chiama allora `-[UIKBTree elaborateLayoutWithSize:
+   `-[UIKeyboardLayoutStar setKeyplaneName:]` (0x188ffa0b8 / 0x188ffa3a4) chiama allora `-[UIKBTree elaborateLayoutWithSize:
    (screenTraits.bounds.width / keyboard.frame.width, stretchFactorHeight) scale:]`. Con 360: fattore 1,125, **passo
    36,0 pt, riga esattamente 360 pt**.
 5. Altri ingressi controllati, irrilevanti a 360 pt: `_UIKeyboardComputeKeyboardIdiomFromScreenTraits` (0x18911e3f0,
    tabella iPhone 320×568 → 21, 375×667 → 22: 360×800 → **22**, come ogni iPhone moderno); `-[UIKBScreenTraits idiom]`
    usa `_UIScreenReferenceBoundsSizeForType` solo per l'iPad; `_UIKeyboardGetDerivedKeyboardForSpecificOrientation`
-   lavora solo per idiomi iPad/Pro; `+[UIKeyboard inputUIOOP]` richiede `os_feature UIKit/keyboard_oop` **e** idioma
+   ha invece un ramo iPhone decisivo (**corretto in §9.3**: la prima stesura lo dava solo per iPad); `+[UIKeyboard inputUIOOP]` richiede `os_feature UIKit/keyboard_oop` **e** idioma
    iPad: su iPhone la tastiera è **nel processo dell'app**.
 
-### 9.3 Cosa non torna con l'osservazione [S]
+### 9.3 Misure sul telefono e causa dello spostamento (aggiornato 2026-11-14)
 
-Per costruzione, con una finestra della tastiera larga 360 pt il risultato è `iPhone-Portrait-QWERTY-URL` stirato a
-360 (passo 36,0, nessun taglio). Un taglio a destra si ottiene solo se `keyboardWidth` (cioè i bounds della finestra
-della tastiera o di `UIScreen` nel processo dell'app) vale **≥ 375**: allora il prefisso è `iPhone-PortraitChoco`
-(375 pt, passo 37,5 pt), non serve stirare (frame = keyboardWidth) e i 15 pt a destra cadono fuori dal pannello. Il
-passo misurato (~36,7) è a metà fra 36,0 e 37,5: va rimisurato. Ipotesi, in ordine:
-- **(a)** la finestra della tastiera (`UIRemoteKeyboardWindow`/`UITextEffectsWindow`) nasce con la misura dello
-  schermo dichiarata da SpringBoard e non da `_referenceBounds` dell'app: se una parte del contesto di display
-  (`UISDisplayContext`, scena) porta ancora 375×812 (tipo SBH 4 = "iPhone X Zoomed", lo stesso che lascia il Centro di
-  Controllo impaginato per 375 pt, VIVA.md 2026-11-14), `keyboardWidth` = 375;
-- **(b)** l'app è in una modalità di compatibilità 375 non scalata (improbabile per Safari, app di sistema: §2.3);
-- **(c)** la tastiera è rimasta in cache da un avvio non nativo (`UIKBGraphCache`/`TUIKeyboardLayoutFactory`
-  sono per processo, quindi solo se l'app non è stata riavviata).
+Misure (nativo 360×800, Safari e Spotlight): passo dei tasti **36,0 pt** (= `iPhone-Portrait` 32 pt × 1,125, quindi
+lo stiramento di §9.2.4 avviene), ma tutta l'area dei tasti è **spostata a destra di ~20 pt** = (360 − 320)/2: `q` a
+x 23,3..52, `p` da 347 tagliata dal bordo; le altre righe uguali. Lato SpringBoard: `keyboardWidth` 360,
+`isKeyboardMinorEdgeWidth` 1, idioma 0, `UIScreen` bounds/referenceBounds 360×800, `UITextEffectsWindow` 360×800,
+`UIInputSetHostView` (0, 509; 360×291).
 
-**Verifica in un minuto, senza iniezione globale**: la ricerca di Spotlight è una tastiera dentro SpringBoard, dove
-il tweak c'è già. Loggare da VivaDisplay, con la tastiera aperta: `[[UIKeyboardImpl activeInstance] _layout]` →
-`keyboardName` (o `-[UIKeyboardLayoutStar keyplaneName]`), `[UIKBScreenTraits traitsWithScreen:UIScreen.mainScreen
-orientation:1]` → `description` (keyboardWidth, bounds), `UIScreen.mainScreen._referenceBounds` e i bounds della
-finestra della tastiera. Se in SpringBoard il nome è `iPhone-Portrait-…` e la tastiera è giusta, il problema è nel
-contesto di display/scena mandato alle app (ipotesi a): si corregge **in SpringBoard**. Se anche SpringBoard mostra
-`PortraitChoco`, la misura sbagliata viene da UIKit/FrontBoard nel processo stesso.
+Causa [V nel codice; la centratura finale V dall'effetto misurato]: **due larghezze diverse per la stessa tastiera.**
+1. I tasti sono stirati alla larghezza dello schermo: `-[UIKeyboardLayoutStar setKeyplaneName:]` (0x188ffa3a4..
+   0x188ffa754) calcola `w = screenTraits.bounds.width − (padding sx + dx)` (`+[UIKeyboardImpl
+   deviceSpecificPaddingForInterfaceOrientation:inputMode:]`, 0 in verticale) e chiama `-[UIKBTree
+   elaborateLayoutWithSize:(w / keyboard.frame.width, …) scale: origin:(0, 0)]` → tasti da 0 a 360 **nelle coordinate
+   della vista della tastiera**.
+2. La vista della tastiera invece è larga **320**: `-[UIKeyboard setFrame:]` (0x18911c460) impone sempre la misura di
+   `+[UIKeyboardImpl sizeForInterfaceOrientation:ignoreInputView:]` (0x18911c5cc) → `keyboardSizeForInterfaceOrientation:`
+   → `defaultSizeForInterfaceOrientation:` (0x18911ca08) → `+[UIKeyboardLayoutStar keyboardSizeForInputMode:
+   screenTraits:keyboardType:]` (0x18911cc0c) = **frame del KBStar nel .dat** (`iPhone-Portrait-…` = 320×216), salvo che
+   esista una **tastiera derivata** (`_UIKeyboardGetDerivedKeyboard`, 0x18911cd78: se `keyboardSize` ≠ −1 la sostituisce).
+   L'ospite (`UIInputSetHostView`, 360) centra la vista da 320 → origine x = 20; dentro, i tasti arrivano a 360 → fino a
+   380 sullo schermo. È esattamente lo spostamento misurato.
+3. **Chi decide la tastiera derivata** — `_UIKeyboardGetDerivedKeyboardForSpecificOrientation` (0x18975116c), ramo
+   idioma 0 (0x189751398): confronta **`-[UIKBScreenTraits keyboardScreenReferenceSize]`** (= `screen._referenceBounds`
+   della finestra della tastiera, 0x18912d804) con una **tabella esatta di 6 misure**:
 
-### 9.4 Ingressi non di codice [V salvo dove indicato]
+| Misura di riferimento (pt) | Costanti | Tastiera derivata in verticale (0x189751680..0x189751a68) |
+|---|---|---|
+| 320×693 (mini/12 con Zoom) | 320.0 imm, 693 @0x189eabd08 | `iPhone-PortraitChoco`, `keyboardSize` = (larghezza − padding, 200) |
+| **360×780** | 360 @0x189ea9570, 780 @0x189eabd10 | `iPhone-PortraitChoco`, (larghezza − padding, −1 = altezza del layout) |
+| 390×844 | @0x189eaab00/08 | `iPhone-PortraitChoco`, (larghezza − padding, −1) |
+| 393×852 | @0x189ea76e0, 0x189eabd28 | `iPhone-PortraitChoco`, idem |
+| 428×926 | @0x189eabd18/20 | `iPhone-PortraitTruffle`, idem |
+| 430×932 | @0x189eabd30/38 | `iPhone-PortraitTruffle`, idem |
 
-- **Nessuna tabella per tipo di schermo**: `_screenType` −1, `MGScreenClass` −1, `ArtworkDeviceSubType` e la
-  classe SBH **non entrano** nella scelta (verificato: nessun riferimento in `_UIKeyboardGetKBStarName`,
-  `UIKBScreenTraits`, `keyboardPrefixForWidth:andEdge:`). Conta solo la **larghezza dei bounds** della finestra della
-  tastiera (e `_referenceBounds` per il flag di bordo). Quindi l'unico ingresso esterno è la geometria che
-  l'app riceve: MobileGestalt/ADT (già nativi: `GSMainScreenPointSize`, usato da `UIRemoteKeyboardWindowHosted
-  keyboardScreenReferenceSize`, legge `__screenWidth/Height/Scale` da MobileGestalt) e il contesto di display e di scena
-  che manda SpringBoard (§2.2) — cioè **il tweak VivaDisplay** se l'ipotesi (a) è vera.
-- Preferenze: `com.apple.keyboard` **`EnableMoltoCrescendo`** (`+[TUIKeyboardLayoutFactory crescendoLayouts]`
-  0x18fc77308) aggiunge `QWERTY` ai layout "Dynamic" (di base solo Dvorak, QWERTY-Chickasaw/Choctaw/Mikmaw,
-  Osage-QWERTY, Coptic, Mandaic, Ingush). Con Crescendo il nome diventa `Dynamic-QWERTY-<suffisso>` con suffisso da
-  `min(keyboardScreenReferenceSize)` (`keyboardSuffixForPortraitWidth:` 0x18fca2f7c: < 320 Mini, < 730 Small,
-  < 815 Medium, < 1024 Large, altrimenti Grand) e layout ridimensionabili (`KBdynamic`). Ma `KBLayouts_Dynamic.dat`
-  ha solo `Dynamic-QWERTY-{Mini,Small,Medium,Large,Grand}` senza varianti URL/Email/…: è una strada iPad, **da non
-  usare** se non come esperimento. Nessun'altra preferenza (`com.apple.UIKit`, impostazioni interne) cambia la
-  larghezza.
-- Lo Zoom schermo (SE 2/3 a 320 pt, mini zoomato) non ha chiavi proprie per la tastiera: funziona perché i bounds
-  diventano 320 e la tabella dà `iPhone-Portrait`. Il nostro 360 segue la stessa strada **se i bounds sono 360**.
+   In orizzontale la stessa corrispondenza dà `iPhone-Caymen` / `iPhone-LandscapeTruffle` (0x189751548..0x1897515b4).
+   Con la derivata `_UIKeyboardGetKBStarName` usa `derivedKBStarPrefixName` (0x18911b470) e la misura della vista è
+   quella dello schermo: così un iPhone 12 (390) usa il layout da 375 stirato a 390 senza spostamenti.
+   **360×800 non è in tabella** → nessuna derivata → prefisso dalla larghezza (`iPhone-Portrait`, 320) e vista larga
+   320 centrata. (I 375×812/375×667/414×896 non ne hanno bisogno: il layout nativo ha già la loro larghezza.)
+4. Non dipende da: `_screenType`, `MGScreenClass`, `ArtworkDeviceSubType`, `isKeyboardMinorEdgeWidth`, preferenze, flag
+   nel .dat (il frame del KBStar è solo la misura di disegno, 320). `+[UIKeyboardImpl overrideNativeScreen]` e
+   `enableProKeyboard` toccano solo il ramo iPad.
 
-### 9.5 Correzione raccomandata
+### 9.4 Leve non di codice [V salvo dove indicato]
 
-1. **Prima** la verifica di §9.3 da SpringBoard. Se il nome nelle app è `PortraitChoco` mentre lo schermo è 360,
-   correggere la **sorgente della misura** (contesto di display / scena / `SBDisplayMetrics` del tipo SBH che
-   VivaDisplay manda alle app) in modo che finestra della tastiera e `UIScreen` dell'app siano 360×800: nessun hook
-   nelle app, la tastiera diventa `iPhone-Portrait` stirata a 360 (36 pt per tasto, come uno Zoom a 360).
-2. Se invece la misura giusta arriva ma qualcosa nel processo dell'app crea la finestra della tastiera più larga,
-   l'hook minimo per app (da tenere pronto per l'iniezione globale) è uno solo:
-   - `-[UIKBScreenTraits initWithScreen:orientation:allowFloating:ignoreRemoteKeyboard:]` (0x188f6c1a4): dopo
-     l'originale, se non flottante e verticale, portare `keyboardWidth` (ivar `+0x38`, e `+0x50`) e
-     `bounds.size.width` (`+0x78`) a `screen._referenceBounds.size.width` (360) e ricalcolare `+0x1b`. Tutto il resto
-     (prefisso, stiramento, dimensione della vista) segue da questi campi; è un `UIKBScreenTraits` per ogni layout, non
-     un percorso caldo.
-   - In alternativa più chirurgica ma meno completa: `-[TUIKeyboardLayoutFactory keyboardPrefixForWidth:andEdge:]`
-     → `iPhone-Portrait` per larghezze < 375 (non basta se `bounds` resta 375, perché lo stiramento usa i bounds).
-   - Da non toccare: `_UIKeyboardGetKBStarName` (funzione C privata, servirebbe una patch di codice), `_screenType`
-     (non usato dalla tastiera), MobileGestalt (già corretto).
-3. Prova rapida in SpringBoard prima dell'iniezione globale: lo stesso hook dentro VivaDisplay agisce sulla tastiera di
-   Spotlight, quindi si può validare il risultato (passo 36 pt, colonna destra a 360) senza toccare le app.
+- **Nessuna leva pulita.** L'unico ingresso è `keyboardScreenReferenceSize` = `_referenceBounds` dello schermo
+  dell'app, che deve essere **esattamente** una misura della tabella. Per 360 pt c'è **360×780** (1080×2340 = il
+  pannello del 12/13 mini, `MGScreenClass` 22 nota a MobileGestalt): presentare 1080×2340 (kernel/ADT, con 30 px neri
+  sopra e sotto o 60 px sotto) farebbe usare a UIKit la strada del mini (`PortraitChoco` stirato a 360, nessuno
+  spostamento) e probabilmente sistemerebbe anche altre tabelle (Centro di Controllo, griglia della home: [S]), al
+  prezzo di 20 pt di altezza. È una scelta di prodotto, non una correzione della tastiera.
+- `keyboardWidth` / scelta di una larghezza 375: non serve e non aiuta (anche `PortraitChoco` senza derivata avrebbe
+  la vista larga 375 e taglierebbe a destra).
+- Preferenze: nessuna (`com.apple.keyboard EnableMoltoCrescendo` porta ai layout iPad "Dynamic", vedi sotto, senza
+  varianti URL/Email; sconsigliato). MobileGestalt/ADT: non letti da questo codice (solo tramite `_referenceBounds`).
+- SpringBoard da solo non basta: `_referenceBounds` delle app viene dal contesto di display che SpringBoard manda, ma
+  cambiarlo a 360×780 accorcerebbe tutte le app.
+- Nota Crescendo (per completezza): `com.apple.keyboard` **`EnableMoltoCrescendo`** (`+[TUIKeyboardLayoutFactory
+  crescendoLayouts]` 0x18fc77308) aggiunge `QWERTY` ai layout "Dynamic" (`KBLayouts_Dynamic.dat`, suffisso da
+  `min(keyboardScreenReferenceSize)`: < 320 Mini, < 730 Small, < 815 Medium, < 1024 Large, altrimenti Grand,
+  `keyboardSuffixForPortraitWidth:` 0x18fca2f7c); esistono solo `Dynamic-QWERTY-{Mini..Grand}`, niente URL/Email.
+
+### 9.5 Correzione raccomandata (hook nel processo)
+
+**Un solo metodo ObjC**: `-[UIKBScreenTraits keyboardScreenReferenceSize]` (0x18912d804) → se idioma 0 e il valore
+originale è 360×800 (o 800×360), restituire **360×780** (rispettando l'orientamento). Il selettore ha solo 4 chiamanti
+(xref): `_UIKeyboardGetKBStarName` (solo ramo Crescendo), `_UIKeyboardGetDerivedKeyboardForSpecificOrientation`,
+`-[UIRemoteKeyboardWindowHosted keyboardWidthForCurrentDevice]` (finestra ospitata, usa già `GSMainScreenPointSize`) e
+sé stesso: nessun effetto sul resto di UIKit. Risultato atteso (stessa strada del mini a 360 pt): derivata
+`iPhone-PortraitChoco`, `keyboardSize` = 360 × altezza del layout (216 + barre), KBStar `iPhone-PortraitChoco-QWERTY-…`
+stirato a 360 (fattore 0,96, passo 36 pt, tasti 34,1 pt), vista larga 360 → origine 0, nessun taglio; in orizzontale
+`iPhone-Caymen` derivata alla larghezza.
+- Alternativa equivalente per l'effetto visibile: `+[UIKeyboardImpl keyboardSizeForInterfaceOrientation:]` (0x18911c8c8)
+  con larghezza = larghezza dello schermo meno il padding; lascia però il layout da 320 stirato (tasti più larghi del
+  normale) e salta la logica della derivata (altezze, prefisso).
+- Da non toccare: `_UIKeyboardGetDerivedKeyboardForSpecificOrientation` / `_UIKeyboardGetKBStarName` (funzioni C
+  private), `-[UIKeyboard setFrame:]` (usata anche da tastiere esterne/di estensione), `_referenceBounds`.
+- **Prova immediata**: l'hook va subito in VivaDisplay (SpringBoard) e si verifica sulla tastiera di Spotlight; per le
+  app servirà l'iniezione globale (§4.3 D3), con lo stesso codice.
