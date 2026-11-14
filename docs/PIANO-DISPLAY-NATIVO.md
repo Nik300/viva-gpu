@@ -664,3 +664,199 @@ stirato a 360 (fattore 0,96, passo 36 pt, tasti 34,1 pt), vista larga 360 → or
   private), `-[UIKeyboard setFrame:]` (usata anche da tastiere esterne/di estensione), `_referenceBounds`.
 - **Prova immediata**: l'hook va subito in VivaDisplay (SpringBoard) e si verifica sulla tastiera di Spotlight; per le
   app servirà l'iniezione globale (§4.3 D3), con lo stesso codice.
+
+## 10. Centro di Controllo (2026-11-14, solo lettura)
+
+Problema riportato (nativo 360×800 + VivaDisplay): la griglia dei moduli parte a x 16 ma finisce a ~304 pt (56 pt liberi
+a destra) e la striscia di stato del Centro di Controllo (Wi-Fi, batteria, percentuale) sta bassa (~y 125 pt) invece che
+"in alto a destra come sugli iPhone con Dynamic Island". Analisi statica della cache 20H392 (ControlCenterUI,
+ControlCenterUIKit, UIKitCore); disassemblato completo di ControlCenterUI nello scratchpad della sessione. Nessuna prova sul
+telefono.
+
+### 10.1 Da dove vengono le misure [V]
+
+- **Nessun tipo di schermo SBH, nessun `_screenType`, nessuna chiave MobileGestalt, nessuna `_exclusionArea`** nel codice di
+  layout di ControlCenterUI (0 riferimenti nel disassemblato): l'hook `HomeScreenType` = 3 di VivaDisplay non tocca il CC.
+- Unico ingresso geometrico: **`CCUIReferenceScreenBounds()`** (ControlCenterUIKit 0x1c55df1a4, blocco 0x1c55df1fc) =
+  `-[UIScreen mainScreen]._referenceBounds`, letto **una volta** (`dispatch_once`, cache `__DATA` 0x1de682ca8..). Poi
+  `UIDevice.userInterfaceIdiom`, `SBFEffectiveHomeButtonType()` (2 = senza tasto home: il nostro caso, iPhone10,3) e, per la
+  testata, `CCUIScreenSafeAreaInsets()` (0x1c55df250: `safeAreaInsets` della key window, anch'esso in cache).
+- Tutte le funzioni sono **funzioni C con tabelle a soglie sulla larghezza** (430, 428, 414, 393, 390, 375; costanti
+  0x1c55f7a90.. in ControlCenterUIKit, 0x1c5109ae0.. in ControlCenterUI): **360 cade nel ramo "< 375"**, cioè l'iPhone SE
+  di prima generazione (320 pt). Le chiamate interne alla cache sono `bl` diretti (stub eliminati): non si agganciano.
+
+| Funzione (indirizzo) | 360 pt (nostro) | X / 12 mini (375) | 14 Pro (393) |
+|---|---|---|---|
+| `CCUICompactModuleColumns` (0x1c55e00cc) | 4 | 4 | 4 |
+| `CCUIItemEdgeSize` (0x1c55df340, blocco 0x1c55df380; {66, 69} @0x1c55f7b50) | **66** | 69 | 72 |
+| `CCUILayoutGutter` (0x1c55df6c8, blocco 0x1c55df708; `fcsel 15/8` @0x1c55df954) | **8** | 15 | 15 |
+| `CCUIPortraitGridLayoutSideMargin` (ControlCenterUI, blocco 0x1c50f2600) | **16** | 27 | 30 |
+| `CCUIPortraitGridLayoutTopMargin` (blocco 0x1c50f22a0) | 21 | 28 | 30 |
+| `CCUIStatusBarBaselineHeight` (blocco 0x1c50f1ef0; < 375: 14,5, poi `max(…, 17)` senza tasto home) | 17 | 17 | 16 |
+| Larghezza griglia 4×item + 3×gutter | **288** | 321 | 333 |
+| Margini + griglia | **16+288+16 = 320** ≠ 360 | 27+321+27 = 375 | 30+333+30 = 393 |
+
+Le tabelle Apple sono costruite perché margini + griglia = larghezza dello schermo; a 360 pt la somma fa 320 (SE).
+
+### 10.2 Perché la griglia è asimmetrica [V]
+
+Il CC dell'iPhone10,3 usa `CCUIOverlayStatusBarPresentationProvider` (`+[CCUIModularControlCenterOverlayViewController
+_presentationProviderForDevice]` 0x1c50f56e8: `CCSControlCenterDefaults.presentationGesture == 1`).
+`-[CCUIOverlayStatusBarPresentationProvider layoutViews]` (0x1c50db2c4):
+1. `CCUILayoutEdgeInsetsForInterfaceOrientation(o)` (0x1c50e1788, blocco 0x1c50f300c) = (TopMargin − BaselineHeight,
+   SideMargin, SideMargin, SideMargin) = **(4, 16, 16, 16)** in verticale → `-[CCUILayoutView setEdgeInsets:]` sulla vista
+   dei moduli.
+2. `intrinsicContentSize` → `-[CCUILayoutView sizeThatFits:]` (0x1c50f33e8) = griglia + extra (doppi margini) + sinistra +
+   destra = **320 × h**.
+3. Contenitore: `x = 0` sul telefono (solo l'iPad, idioma 1, allinea a destra con `maxX − width`), larghezza = 320; scroll
+   view = `overlayContainerFrame` (360), `contentSize` 320.
+4. `_edgeInsetsForContentSize:withinBounds:contentEdgeInsets:orientation:` (0x1c50e75e4): in verticale restituisce
+   (altezza testata, **0, 0, 0**): nessuna centratura (la centra solo in orizzontale).
+5. `-[CCUILayoutView frameForLayoutRect:]` (0x1c50de8e8): x = col × (item + gutter) + extra + `_edgeInsets.left` (ivar),
+   larghezza = n × item + (n − 1) × gutter; item e gutter letti con **`objc_msgSend` a `-[CCUILayoutOptions itemEdgeSize]` /
+   `itemSpacing`** (riempiti da `-[CCUIModuleCollectionViewController _currentLayoutOptions]` 0x1c50e5c70 con
+   `CCUIItemEdgeSize()` / `CCUILayoutGutter()`).
+
+Risultato: moduli da x 16 a 304, 40 pt mancanti tutti a destra (+16 di margine = 56). È esattamente l'osservato.
+`CCUIItemEdgeSize`/`CCUILayoutGutter` dentro ControlCenterUI sono usati solo da `_currentLayoutOptions` (e il gutter per
+l'hit-test di `CCUIContentModuleContainerView pointInside:` e il pointer): **la geometria della griglia passa solo da
+`CCUILayoutOptions` (getter ObjC) e dall'ivar `_edgeInsets` di `CCUILayoutView` (impostata con il setter ObjC)**.
+
+### 10.3 Perché la striscia di stato è "bassa" [V]
+
+- Testata: `_effectiveHeaderViewHeight` (0x1c50e77f0) = `CCUIPortraitHeaderHeight()` (0x1c50de480) +
+  `_additionalHeaderHeight` (sensori/privacy, di norma 0); `CCUIPortraitHeaderHeight` =
+  `_CCUIPortraitStatusBarBaselineToTopOffsetHeight` (blocco 0x1c50f10dc) + `CCUIStatusBarBaselineHeight`.
+  BaselineToTop: ≥ 390 → 100, 375 senza tasto home → 97, < 375 → 80 poi `max(…, 97)`, e infine **se larghezza ≤ 375 e
+  `CCUIScreenSafeAreaInsets().top ≥ 50` → 103** (regola del 12/13 mini, 0x1c50f1400..0x1c50f1434). Con la nostra safe area
+  53,67 → **103 + 17 = 120 pt** (X: 114; 14 Pro: 100 + 16 = 116).
+- `CCUIStatusBarHeight()` (0x1c50dba28, blocco 0x1c50f1b48) = 44 (senza tasto home). `_effectiveTransitionHeight`
+  (0x1c50d7bfc) = testata − 44 + aggiuntiva = **76** (X 70, 14 Pro 72).
+- `layoutViews` chiama `-[CCUIHeaderPocketView setEdgeInsets:(min(76, 120 − 44), 0, 0, 0)]`; `contentBounds`
+  (0x1c50ddc08) = bounds meno edgeInsets, e `-[CCUIHeaderPocketView layoutSubviews]` (0x1c50d9ad8) mette **ogni** sottovista
+  (`CCUIStatusBar` compreso) su `contentBounds` → **`CCUIStatusBar` = (0, 76, 360, 44)**.
+- Animazione: `_headerViewTransformForTransitionState:` (0x1c50e8514) → `_transformForTransitionState:rubberBandingHeight:`
+  (0x1c50d95ac): `ty = −(1 − p) × (76 − verticalSecondaryServiceDelta) + elastico`. A p = 0 la striscia coincide con la
+  status bar di SpringBoard (y 0), a CC aperto scende a y 76; intanto la copia compatta cresce
+  (`_compactStatusBar:transformForTransitionState:` 0x1c50ded34, scala fino a `maxCompactScaleFactor`, ancorata alla
+  batteria). È il disegno Apple per notch **e Dynamic Island** in iOS 16.
+- Dentro la striscia la `UIStatusBar_Modern` espansa (`setMode:1`, stesso provider dello schermo: `DynamicSplitMedium`) mette
+  la riga alta con il fondo a `sensorHeight − baselineBottomInset` dal bordo alto
+  (`-[_UIStatusBarVisualProvider_Split _setupExpandedRegionsInContainerView:sensorHeight:constraints:regions:]`
+  0x189ab5b4c; `sensorHeight` = altezza di `sensorAreaRect` = la nostra area di esclusione, 29,33; `baselineBottomInset`
+  1,667) e la riga bassa 22 pt sotto (`lowerExpandedBaselineOffset` di DynamicSplitMedium 0x1899fd9f8). Quindi
+  **linea di base ~104 pt (riga alta) e ~126 pt (riga bassa)**: è il "~125" osservato. Sul 14 Pro le stesse formule danno
+  ~107 / ~129: in verticale siamo già come un iPhone con Dynamic Island (3 pt più in alto).
+- Ai lati: `setExpandedEdgeInsets:(0, 16, 0, 16)` (margine laterale della griglia) + `expandedEdgeInsets` di DynamicSplit
+  (0, 6, 0, 5) → batteria che finisce a x 339 mentre la griglia finisce a 304: la striscia sembra staccata/spostata a
+  destra rispetto ai moduli. Anche `CCUIStatusLabelViewController setEdgeInsets:` e `CCUIHeaderPocketView
+  setSensorAttributionEdgeInsets:` ricevono (0, 16, 0, 16).
+
+### 10.4 Hook proposti per VivaDisplay (stile `VDHook`, solo in SpringBoard, tutto ObjC)
+
+ControlCenterUI è collegato da SpringBoard (classi presenti al costruttore). Le funzioni C e le loro cache non si toccano.
+
+**(a) Griglia centrata, proporzioni X.** Scelta: modulo 66 (invariato: le viste interne dei moduli usano già
+`CCUIItemEdgeSize()` = 66, raggio degli angoli compreso), **gutter 14**, margini **27** come l'X: 4×66 + 3×14 + 2×27 = 360.
+
+```objc
+static double VDCCSpacing = 14.0;   // pref CCItemSpacing (8 = Apple a 360; 0 = non agganciare)
+static BOOL VDCCPortrait;           // vero solo dentro layoutViews in verticale
+static BOOL VDCCStatusTop = NO;     // pref CCStatusBarTop, variante (b2)
+static double VDCCWidth, VDCCMargin = -1;
+static IMP VDOrigCCLayout, VDOrigCCInsets, VDOrigCCExp, VDOrigCCLabel, VDOrigCCSensor, VDOrigCCHeadInsets, VDOrigCCHeadT;
+
+// 1. gutter (letto via objc_msgSend da frameForLayoutRect: e sizeThatFits:)
+VDHook(@"CCUILayoutOptions", @selector(itemSpacing), NO, ^double(id self) { return VDCCSpacing; }, NULL);
+
+// 2. contesto: orientamento e larghezza del contenitore
+VDHook(@"CCUIOverlayStatusBarPresentationProvider", @selector(layoutViews), NO, ^(id self) {
+    id m = ((id (*)(id, SEL))objc_msgSend)(self, NSSelectorFromString(@"metricsProvider"));
+    long o = m ? ((long (*)(id, SEL))objc_msgSend)(m, NSSelectorFromString(@"overlayInterfaceOrientation")) : 0;
+    VDCCPortrait = (o == 1 || o == 2);
+    VDCCWidth = m ? ((CGRect (*)(id, SEL))objc_msgSend)(m, NSSelectorFromString(@"overlayContainerFrame")).size.width : 0;
+    ((void (*)(id, SEL))VDOrigCCLayout)(self, @selector(layoutViews));
+    VDCCPortrait = NO;
+}, &VDOrigCCLayout);
+
+// 3. margini simmetrici: (W − griglia) / 2, griglia misurata con sizeThatFits: (comprende i doppi margini)
+VDHook(@"CCUILayoutView", @selector(setEdgeInsets:), NO, ^(UIView *self, UIEdgeInsets in) {
+    void (*orig)(id, SEL, UIEdgeInsets) = (void (*)(id, SEL, UIEdgeInsets))VDOrigCCInsets;
+    orig(self, @selector(setEdgeInsets:), in);
+    if (!VDCCPortrait || VDCCWidth <= 0) return;
+    double grid = [self sizeThatFits:CGSizeZero].width - in.left - in.right;
+    if (grid <= 0 || grid >= VDCCWidth) return;
+    VDCCMargin = floor((VDCCWidth - grid) / 2 * 3) / 3;   // @3x
+    in.left = in.right = VDCCMargin;
+    orig(self, @selector(setEdgeInsets:), in);
+}, &VDOrigCCInsets);
+```
+
+Effetto atteso: `intrinsicContentSize` 360, contenitore (0, 0, 360, h), moduli 1×1 a x 27 / 107 / 187 / 267 (66 pt), 2×2
+da 146 pt, bordo destro a 333 (margini 27/27). Con `CCItemSpacing` = 8: margini 36/36. Le chiamate fuori da `layoutViews`
+(`-[CCUIModuleCollectionViewController viewDidLoad]`) e l'orizzontale restano di Apple (in orizzontale il provider centra
+già). Facoltativo: `in.top = 11` (come l'X; oggi 4) nello stesso hook.
+
+**(b1) Striscia di stato allineata alla griglia (consigliato, resta il comportamento Dynamic Island di iOS 16).** Gli
+stessi margini a tutto ciò che `layoutViews` allinea al margine della griglia:
+
+```objc
+// CCUIStatusBar -setExpandedEdgeInsets:, CCUIStatusLabelViewController -setEdgeInsets:,
+// CCUIHeaderPocketView -setSensorAttributionEdgeInsets: — stessa forma, ciascuno con il suo IMP originale:
+VDHook(@"CCUIStatusBar", @selector(setExpandedEdgeInsets:), NO, ^(id self, UIEdgeInsets in) {
+    if (VDCCPortrait && VDCCMargin >= 0) in.left = in.right = VDCCMargin;
+    ((void (*)(id, SEL, UIEdgeInsets))VDOrigCCExp)(self, @selector(setExpandedEdgeInsets:), in);
+}, &VDOrigCCExp);
+```
+
+Effetto: operatore a x 33, batteria che finisce a 328 (bordo griglia 333; sull'X/14 Pro lo scarto è lo stesso, 5 pt di
+`expandedEdgeInsets` DynamicSplit). Verticale invariato: riga a ~104 pt, come un 14 Pro (~107).
+
+**(b2) Striscia nella riga dell'isola, in alto a destra (preferenza `CCStatusBarTop`, da provare).** Due hook:
+
+```objc
+// la striscia resta in cima alla testata (stessa altezza 44: l'inset passa da sopra a sotto)
+VDHook(@"CCUIHeaderPocketView", @selector(setEdgeInsets:), NO, ^(id self, UIEdgeInsets in) {
+    if (VDCCPortrait && VDCCStatusTop) { in.bottom += in.top; in.top = 0; }
+    ((void (*)(id, SEL, UIEdgeInsets))VDOrigCCHeadInsets)(self, @selector(setEdgeInsets:), in);
+}, &VDOrigCCHeadInsets);
+
+// niente discesa durante la presentazione, elastico conservato
+VDHook(@"CCUIOverlayStatusBarPresentationProvider", NSSelectorFromString(@"_headerViewTransformForTransitionState:"), NO,
+       ^CGAffineTransform(id self, id state) {
+    SEL s = NSSelectorFromString(@"_headerViewTransformForTransitionState:");
+    CGAffineTransform t = ((CGAffineTransform (*)(id, SEL, id))VDOrigCCHeadT)(self, s, state);
+    id m = ((id (*)(id, SEL))objc_msgSend)(self, NSSelectorFromString(@"metricsProvider"));
+    long o = m ? ((long (*)(id, SEL))objc_msgSend)(m, NSSelectorFromString(@"overlayInterfaceOrientation")) : 0;
+    if (!VDCCStatusTop || !(o == 1 || o == 2)) return t;
+    double p = ((double (*)(id, SEL))objc_msgSend)(state, NSSelectorFromString(@"clampedPresentationProgress"));
+    double T = ((double (*)(id, SEL))objc_msgSend)(self, NSSelectorFromString(@"_effectiveTransitionHeight"));
+    id head = [[self valueForKey:@"viewProvider"] valueForKey:@"overlayHeaderView"];
+    double d = [[[head valueForKey:@"statusBar"] valueForKey:@"verticalSecondaryServiceDelta"] doubleValue];
+    t.ty += (1 - p) * (T - d);   // annulla −(1−p)(T−d) di _transformForTransitionState:rubberBandingHeight:
+    return t;
+}, &VDOrigCCHeadT);
+```
+
+Effetto atteso: `CCUIStatusBar` = (0, 0, 360, 44) per tutta la presentazione; la copia compatta coincide con la status bar
+di SpringBoard e si dissolve sul posto nella espansa; riga alta con la linea di base a 27,7 pt (nella fascia dell'isola,
+y 2..31,3), voci a destra dell'isola. **Non** agganciare `_effectiveTransitionHeight` (entra in
+`transitionStateForType:interactive:translation:` per il gesto: a 0 si dividerebbe per zero). Rischi: nell'espanso le due
+regioni (`_setupExpandedRegions…`) si dividono la larghezza a metà **senza evitare l'isola** (Apple le mette sotto): con
+percentuale + 5G + Wi-Fi + batteria il gruppo a destra (~100 pt) arriva a ~x 228, a ridosso dell'isola che finisce a 230;
+resta inoltre il vuoto di ~80 pt fra la striscia (44) e i moduli (124). Per accorciarlo:
+`-[CCUIOverlayStatusBarPresentationProvider _effectiveHeaderViewHeight]` → originale − N (sposta testata e `contentInset`
+dei moduli; `transitionHeight` non cambia), da valutare dopo il primo screenshot.
+
+### 10.5 Non toccati / note
+
+- Moduli espansi (pressione lunga), slider, `CCUIDefaultExpandedContentModuleWidth`, angoli: tabelle C nel ramo < 375 (come
+  il SE); con la griglia a 360 vanno ricontrollati a vista.
+- `CCUILayoutEdgeInsets()` / `CCUILayoutEdgeInsetsForcePortrait()` di ControlCenterUIKit (0x1c55d88e0: (56, 16, 56, 16)
+  a 360, (64, 27, 64, 27) sull'X) non sono usati dal provider con status bar.
+- Alternativa scartata: scrivere nelle cache `dispatch_once` (`_CCUIItemEdgeSize.itemEdgeSize` 0x1de6824d8,
+  `_CCUILayoutGutter.gutter` 0x1de6824e8, `_CCUIPortraitGridLayoutSideMargin.margin` 0x1e2834408, …): fragile (ordine
+  d'inizializzazione, simboli privati) e inutile visto che i getter ObjC bastano. Cambiare `_referenceBounds` romperebbe il
+  resto di SpringBoard.
+- Verifica: con il CC aperto, `vnotify it.viva.display.dump` → in `views.txt` attesi `CCUIModuleCollectionView` larga 360
+  (oggi 320), `CCUIHeaderPocketView` (0, 0, 360, 120), `CCUIStatusBar` (0, 76, 360, 44) oggi / (0, 0, 360, 44) con (b2).
