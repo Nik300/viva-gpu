@@ -1,0 +1,47 @@
+# viva-gpu: one CoreAnimation frame, from encoding to the panel. Render: curl -X POST https://kroki.io/d2/svg -H 'Content-Type: text/plain' --data-binary @frame.d2 -o ../frame.svg
+vars: {
+  d2-config: {
+    theme-id: 0
+
+    pad: 24
+  }
+}
+classes: {
+  apple: {style: {fill: "#f1f3f4"; stroke: "#80868b"; border-radius: 8; font-size: 15}}
+  ours: {style: {fill: "#e8f0fe"; stroke: "#1a73e8"; stroke-width: 2; border-radius: 8; font-size: 15}}
+  mesa: {style: {fill: "#fef7e0"; stroke: "#e37400"; border-radius: 8; font-size: 15}}
+  kern: {style: {fill: "#fce8e6"; stroke: "#c5221f"; border-radius: 8; font-size: 15}}
+  hw: {style: {fill: "#e6f4ea"; stroke: "#188038"; border-radius: 8; font-size: 15}}
+  group: {style: {fill: transparent; stroke: "#9aa0a6"; stroke-dash: 3; border-radius: 12; font-size: 17; bold: true}}
+}
+shape: sequence_diagram
+
+ca: "backboardd\n(CoreAnimation)" {class: apple}
+drv: "VivaMTLDriver\n(Metal front end + vmg)" {class: ours}
+q: "GPU queue thread\n(replay, Panfrost)" {class: mesa}
+drm: "libdrm-xnu\n+ vgpu" {class: ours}
+k: "VivaGPUAccelerator\n(kernel)" {class: kern}
+mali: "Mali-G57" {class: hw}
+fb: "AppleCLCD\n(kernel)" {class: kern}
+panel: "OVL / panel" {class: hw}
+
+encode: "Encode" {
+  ca -> drv: "render passes, draws\ninto the frame's IOSurface"
+  ca -> drv: "commit"
+  drv -> q: "recorded commands\n(serial queue, user-interactive QoS)"
+}
+submit: "Submit" {
+  q -> drm: "Panfrost batches → job chains\n(vertex/tiler + fragment)"
+  drm -> k: "SUBMIT_BATCH via IOConnectTrap2\n(up to 16 submits per call)"
+  k -> k: "implicit sync: wait for the last\nfence of every BO and IOSurface"
+  k -> mali: "JS1 vertex/tiler, then JS0 fragment\n(next chain kicked from the job IRQ)"
+}
+present: "Present" {
+  ca -> fb: "SwapEnd(surface)\nright after commit"
+  fb -> fb: "swap queued (up to 4)"
+  mali -> k: "job done IRQ"
+  k -> drm: "completion page updated\n(WAIT_BO answered locally)"
+  k -> fb: "surface idle → wake display"
+  fb -> panel: "vsync tick: newest GPU-idle swap.\nContiguous BGRA → OVL scans it out directly;\notherwise CPU copy into the LK buffer"
+  fb -> ca: "SwapWait returns once the\nprevious page has retired"
+}

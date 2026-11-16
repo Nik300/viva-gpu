@@ -1,0 +1,67 @@
+# viva-gpu: driver stack. Render: curl -X POST https://kroki.io/d2/svg -H 'Content-Type: text/plain' --data-binary @architecture.d2 -o ../architecture.svg
+vars: {
+  d2-config: {
+    theme-id: 0
+    layout-engine: elk
+    pad: 24
+  }
+}
+classes: {
+  apple: {style: {fill: "#f1f3f4"; stroke: "#80868b"; border-radius: 8; font-size: 15}}
+  ours: {style: {fill: "#e8f0fe"; stroke: "#1a73e8"; stroke-width: 2; border-radius: 8; font-size: 15}}
+  mesa: {style: {fill: "#fef7e0"; stroke: "#e37400"; border-radius: 8; font-size: 15}}
+  kern: {style: {fill: "#fce8e6"; stroke: "#c5221f"; border-radius: 8; font-size: 15}}
+  hw: {style: {fill: "#e6f4ea"; stroke: "#188038"; border-radius: 8; font-size: 15}}
+  group: {style: {fill: transparent; stroke: "#9aa0a6"; stroke-dash: 3; border-radius: 12; font-size: 17; bold: true}}
+}
+direction: down
+
+user: "Userspace (every process that uses Metal)" {
+  class: group
+  apps: "Apps, SpringBoard, Safari\nbackboardd (CoreAnimation), MPS" {class: apple}
+  metal: "Metal.framework (iOS 16.7)\nmatches IOAcceleratorES, loads the bundle\nnamed by MetalPluginName" {class: apple}
+  bundle: "VivaMTLDriver.bundle" {
+    class: group
+    fe: "Metal front end  ·  driver/metal/*.m\nVMDevice : _MTLDevice, VMBuffer, VMTexture,\nVMRenderPipelineState, VMCommandQueue,\nVMCommandBuffer, VMRenderEncoder ..." {class: ours}
+    vmg: "vmg back end  ·  driver/vmg_*.c (vmg.h)\nresources, pipelines, command replay,\nshader translation and disk cache" {class: ours}
+    isa: "AIR → Valhall ISA compiler\ndriver/isa (vi_*.c)" {class: ours}
+    air: "AIR → NIR translator\ndriver/vmg_air.c" {class: ours}
+    pan: "Mesa 26.2.6 Gallium Panfrost (static)\nValhall compiler, batches, job chains\n+ mesa/patches 0001-0006" {class: mesa}
+    drm: "libdrm-xnu\nPanfrost ioctls → vgpu selectors,\nIOSurface as dma-buf, submit batching,\nlocal WAIT_BO from the completion page" {class: ours}
+    vgpu: "vgpu  ·  IOConnectCallStructMethod / IOConnectTrap2\n(mock back end on the Mac)" {class: ours}
+    fe -> vmg: "vmg_* C calls"
+    vmg -> air
+    vmg -> isa
+    air -> pan: "NIR"
+    isa -> pan: "precompiled binary\n(pan_isa_hooks.h)"
+    vmg -> pan: "pipe_context"
+    pan -> drm: "drmIoctl"
+    drm -> vgpu
+  }
+  llvm: "system libLLVM\n(shared cache)" {class: apple}
+  apps -> metal
+  metal -> bundle.fe: "+[VMDevice initWithAcceleratorPort:]"
+  bundle.air -> llvm: "parse AIR bitcode" {style.stroke-dash: 3}
+  bundle.isa -> llvm {style.stroke-dash: 3}
+}
+
+kernel: "XNU kernel (fork/xnu/patches 0100+)" {
+  class: group
+  uc: "VivaGPUUserClient\none GPU address space per connection,\nBOs, syncobjs, per-process memory limits" {class: kern}
+  acc: "VivaGPUAccelerator : IOAcceleratorES\njob manager (JS0 fragment, JS1 vertex/compute),\nimplicit sync, MMU, DVFS, fault handling" {class: kern}
+  fb: "AppleCLCD (SweetFramebuffer)\nswap queue, SwapWait, scanout or copy" {class: kern}
+  surf: "IOSurface service" {class: kern}
+  uc -> acc
+  acc -> fb: "surface idle /\nGPU done" {style.stroke-dash: 3}
+  surf -> uc: "IMPORT_IOSURFACE" {style.stroke-dash: 3}
+}
+
+hw: "MT6781 hardware" {
+  class: group
+  mali: "Mali-G57 MC2 (Valhall v9)\n300 - 950 MHz" {class: hw}
+  disp: "OVL / DSI panel\n1080×2400, 60/120 Hz" {class: hw}
+}
+
+user.bundle.vgpu -> kernel.uc: "23 selectors (uapi/viva_gpu_uapi.h)"
+kernel.acc -> hw.mali: "registers, job IRQs"
+kernel.fb -> hw.disp: "OVL address / CPU copy"

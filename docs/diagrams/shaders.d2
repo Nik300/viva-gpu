@@ -1,0 +1,48 @@
+# viva-gpu: shader compilation paths. Render: curl -X POST https://kroki.io/d2/svg -H 'Content-Type: text/plain' --data-binary @shaders.d2 -o ../shaders.svg
+vars: {
+  d2-config: {
+    theme-id: 0
+    layout-engine: elk
+    pad: 24
+  }
+}
+classes: {
+  apple: {style: {fill: "#f1f3f4"; stroke: "#80868b"; border-radius: 8; font-size: 15}}
+  ours: {style: {fill: "#e8f0fe"; stroke: "#1a73e8"; stroke-width: 2; border-radius: 8; font-size: 15}}
+  mesa: {style: {fill: "#fef7e0"; stroke: "#e37400"; border-radius: 8; font-size: 15}}
+  kern: {style: {fill: "#fce8e6"; stroke: "#c5221f"; border-radius: 8; font-size: 15}}
+  hw: {style: {fill: "#e6f4ea"; stroke: "#188038"; border-radius: 8; font-size: 15}}
+  group: {style: {fill: transparent; stroke: "#9aa0a6"; stroke-dash: 3; border-radius: 12; font-size: 17; bold: true}}
+}
+direction: down
+
+mtl: "MTLFunction\n(AIR bitcode from the\n.metallib, + linked functions)" {class: apple}
+llvm: "system libLLVM\nparse + inline, sroa,\ninstcombine, simplifycfg" {class: apple}
+a1: "Shared AIR passes (A1)\nsplit resource allocas,\nfold null textures" {class: ours}
+cache: "Disk cache\nblake3(AIR + driver UUID)\n/private/var/tmp/vmg-cache-<uid>" {shape: cylinder; class: ours}
+
+isa: "Direct ISA compiler  ·  driver/isa  (VMG_ISA=1)" {
+  class: group
+  sel: "Instruction selection\nvi_sel*.c: ALU, memory,\ntextures, I/O + FAU, subgroups" {class: ours}
+  opt: "Optimisation\nvi_opt.c, vi_fold.c: if-conversion,\nFMA fusion, 16-bit peepholes, scheduling" {class: ours}
+  ra: "Register allocation\nvi_ra.c: linear scan,\nper-word liveness, spill to TLS" {class: ours}
+  flow: "Flow + packing\nvi_flow.c, vi_pack.c: scoreboard,\nmessage slots, va_encode.c" {class: ours}
+  sel -> opt -> ra -> flow
+}
+nir: "NIR path  ·  vmg_air.c" {
+  class: group
+  tr: "AIR → NIR\nbuffers → SSBO, threadgroup → shared,\nsmall constants → push window (FAU)" {class: ours}
+  pc: "Panfrost Valhall compiler\n(pan_shader_compile)" {class: mesa}
+  tr -> pc
+}
+hooks: "Gallium Panfrost\nshell NIR + pan_isa_hooks.h\n(mesa patch 0006)" {class: mesa}
+bin: "Valhall binary\nin a GPU BO" {class: hw}
+
+mtl -> llvm -> a1
+a1 -> isa.sel: "default on the phone"
+a1 -> nir.tr: "fallback per function,\nVMG_ISA_NO_<feature>"
+isa.flow -> hooks
+nir.pc -> bin
+hooks -> bin
+cache <-> isa.flow: "ISA binaries" {style.stroke-dash: 3}
+cache <-> nir.tr: "NIR" {style.stroke-dash: 3}

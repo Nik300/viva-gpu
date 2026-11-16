@@ -1,0 +1,44 @@
+# viva-gpu: memory model. Render: curl -X POST https://kroki.io/d2/svg -H 'Content-Type: text/plain' --data-binary @memory.d2 -o ../memory.svg
+vars: {
+  d2-config: {
+    theme-id: 0
+    layout-engine: elk
+
+    pad: 24
+  }
+}
+classes: {
+  apple: {style: {fill: "#f1f3f4"; stroke: "#80868b"; border-radius: 8; font-size: 15}}
+  ours: {style: {fill: "#e8f0fe"; stroke: "#1a73e8"; stroke-width: 2; border-radius: 8; font-size: 15}}
+  mesa: {style: {fill: "#fef7e0"; stroke: "#e37400"; border-radius: 8; font-size: 15}}
+  kern: {style: {fill: "#fce8e6"; stroke: "#c5221f"; border-radius: 8; font-size: 15}}
+  hw: {style: {fill: "#e6f4ea"; stroke: "#188038"; border-radius: 8; font-size: 15}}
+  group: {style: {fill: transparent; stroke: "#9aa0a6"; stroke-dash: 3; border-radius: 12; font-size: 17; bold: true}}
+}
+direction: right
+
+proc: "Process (one Metal device = one kernel connection)" {
+  class: group
+  cpu: "CPU view\nIOConnectMapMemory64(token)\nkept until GEM_CLOSE" {class: ours}
+  va: "GPU address space\n[32 MiB, 4 GiB), 4 KiB granule\n4 PTEs per 16 KiB XNU page\nbound to a hardware AS slot on demand" {class: ours}
+}
+bos: "Buffer objects" {
+  class: group
+  bo: "CREATE_BO\nwired pages\nHEAP grows 2 MiB on fault\nNOEXEC, WB_MMAP" {class: kern}
+  surf: "IMPORT_IOSURFACE\nno copy, plane offset kept\n(64-byte pitch required)" {class: kern}
+  alias: "newBufferWithBytesNoCopy\nBO alias or tracked copy" {class: ours}
+}
+kern: "Kernel bookkeeping" {
+  class: group
+  cache: "Cache maintenance\nnon-WB: write-combined\nWB: invalidated lazily on wait\nGPU caches around each chain\n(flush-ID skipping)" {class: kern}
+  lim: "Per-process accounting\n1 GiB per process, 2 GiB total" {class: kern}
+  fault: "MMU fault\nchain fails, its AS is disabled,\nreport of the faulting VA,\nno GPU reset, never a panic" {class: kern}
+}
+proc.cpu -> bos.bo
+proc.va -> bos.bo
+proc.va -> bos.surf
+proc.cpu -> bos.alias
+bos.bo -> kern.lim
+bos.bo -> kern.cache
+bos.surf -> kern.cache
+proc.va -> kern.fault: "bad access" {style.stroke-dash: 3}
