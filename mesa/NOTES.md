@@ -40,13 +40,38 @@ were fixed. Patches live in `patches/`, applied in order by `build.sh`.
 - **Fix**: under `#ifdef __APPLE__`, inline stubs that fail with ENOSYS, so
   `panfrost_kmod_perf_create()` fails cleanly (no perf counters on XNU for now).
 
+### 0003-panfrost-xnu-bo-map.patch
+- **Problem**: Panfrost maps BOs with `os_mmap(..., dev->fd, mmap_offset)`; on XNU
+  the fd is not a DRM node and cannot be mmapped.
+- **Fix**: under `__APPLE__`, `pan_kmod_bo_mmap`/munmap go through libdrm-xnu's
+  `drmMap`/`drmUnmap`, which call `IOConnectMapMemory64` with the BO's token.
+
+### 0004-panfrost-gfx-compute.patch
+- **Problem**: with Panfrost as the only gallium driver and no GL/Vulkan front
+  end, meson leaves out parts of NIR and the gallium compute helpers that the
+  Metal driver needs (iOS has no CLC either).
+- **Fix**: build them whenever Panfrost is enabled.
+
+### 0005-panfrost-xnu-fences-idle-seq.patch
+- **Problem**: Panfrost's fences export and import sync files, emulated on XNU
+  with several kernel calls each; and `panfrost_bo_wait` always asked the kernel.
+- **Fix**: a fence is a syncobj from a pool, filled with `SYNCOBJ_TRANSFER` in one
+  call. Each BO remembers the sequence number of its last submit; when the
+  completion page shows that submit finished, the wait returns without
+  `WAIT_BO`.
+
+### 0006-panfrost-precompiled-shader.patch
+- **Problem**: shaders compiled by the driver's AIR → Valhall ISA compiler must
+  enter Gallium like any other shader.
+- **Fix**: new `src/panfrost/compiler/pan_isa_hooks.h`. The driver creates a
+  "shell" NIR shader (stage and I/O only); `pan_shader.c` asks the hooks for the
+  binary, `pan_shader_info` and varying layout instead of compiling it.
+
 ## Things that compiled without changes but matter at runtime
 
-- **BO mapping** goes through `os_mmap(NULL, size, prot, MAP_SHARED, dev->fd,
-  mmap_offset)` in `pan_kmod.h` (`pan_kmod_bo_mmap`), not through libdrm. The
-  mmap offset comes from `DRM_IOCTL_PANFROST_MMAP_BO` sent through `drmIoctl`.
-  On XNU the fd is not a DRM node: the shim must give an fd that can be mmapped
-  at those offsets, or `os_mmap` must be redirected.
+- **BO mapping** went through `os_mmap(NULL, size, prot, MAP_SHARED, dev->fd,
+  mmap_offset)` in `pan_kmod.h` (`pan_kmod_bo_mmap`), not through libdrm: patch
+  0003 redirects it.
 - `pan_kmod.c` uses `lseek(fd, 0, SEEK_END)` on dma-buf fds to get the imported
   size (`drmPrimeFDToHandle` path).
 - Every panfrost ioctl goes through `pan_kmod_ioctl()` -> `drmIoctl()`. That
@@ -56,7 +81,7 @@ were fixed. Patches live in `patches/`, applied in order by `build.sh`.
   are not needed for G57 (JM).
 - Linux uapi headers for panfrost come from Mesa's own `include/drm-uapi/`; the
   copies in libdrm-xnu/include/libdrm are for other consumers (shim, kernel side).
-- `panfrost_create_screen` was not tested: it needs a kernel.
+- `panfrost_create_screen` runs on the phone against the kernel driver and on the Mac against the mock.
 - Valhall compiler: `pan_shader_compile()` works with only a gpu_id (no
   device). G57 = `0x90930000` (GPU_ID register upper half 0x9093: arch 9.0,
   product major 3).

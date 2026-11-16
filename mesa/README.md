@@ -1,4 +1,4 @@
-# Mesa for ios-viva (Gallium llvmpipe + panfrost/Valhall, static)
+# Mesa for viva-gpu (Gallium Panfrost/Valhall, static; llvmpipe on the Mac)
 
 Pinned version: **Mesa `mesa-26.2.6`** (shallow clone from
 https://gitlab.freedesktop.org/mesa/mesa.git into `src/`, gitignored).
@@ -14,7 +14,7 @@ What the script does:
 1. Creates `gpu/.venv` (pip: meson, ninja, mako, pyyaml, packaging).
 2. Clones `mesa-26.2.6` into `src/` if it is missing, and applies `patches/*.patch` in
    order (patches already applied are skipped; one that does neither is an error).
-3. Builds `gpu/libdrm-xnu/out/libdrm-xnu.a` (stub libdrm; pkg-config file
+3. Builds `gpu/libdrm-xnu/out/libdrm-xnu.a` (libdrm on vgpu; pkg-config file
    `gpu/libdrm-xnu/pkgconfig/libdrm.pc`, used through `PKG_CONFIG_PATH`).
 4. Configures `build-macos/` (release, `-g0`, `b_ndebug=true`, static, no
    GL/EGL/GLX/GBM/Vulkan, `gallium-drivers=llvmpipe,panfrost`, brew LLVM 23
@@ -74,6 +74,10 @@ nir_builder fragment shader compiled with the Valhall compiler for a Mali-G57
 |---|---|
 | 0001-meson-darwin-libdrm.patch | Find libdrm (libdrm-xnu) on darwin when panfrost is enabled. Skip global `HAVE_LIBDRM` and `u_sync_provider.c` there |
 | 0002-panfrost-kmod-no-eventfd.patch | ENOSYS stubs for eventfd/timerfd/sched_setscheduler in panfrost_kmod.c (perf counters) |
+| 0003-panfrost-xnu-bo-map.patch | Map and unmap BOs through libdrm-xnu (`drmMap`/`drmUnmap` → `IOConnectMapMemory64`) instead of `mmap` on the device fd |
+| 0004-panfrost-gfx-compute.patch | Build full NIR and the gallium compute helpers for Panfrost alone (no GL/Vulkan front end, no CLC on iOS) |
+| 0005-panfrost-xnu-fences-idle-seq.patch | Fences in one kernel call (pooled syncobj + `SYNCOBJ_TRANSFER` instead of emulated sync files); `panfrost_bo_wait` skips `WAIT_BO` when the BO's last submit is known complete (submit sequence numbers) |
+| 0006-panfrost-precompiled-shader.patch | `pan_isa_hooks.h`: shell NIR shaders whose binary, `pan_shader_info` and varying layout come from the driver's AIR → Valhall ISA compiler |
 
 To add a patch: edit `src/`, then run
 `git -C src diff -- <files> > patches/NNNN-name.patch` and add a one-line
@@ -84,23 +88,28 @@ description at the top. Write each problem and its fix in `NOTES.md`.
 `gpu/libdrm-xnu/`: `include/xf86drm.h`, `include/xf86drmMode.h` and
 `include/libdrm/{drm,drm_mode,drm_fourcc}.h` come from libdrm 2.4.134 (MIT).
 `panfrost_drm.h` and `panthor_drm.h` come from Mesa's drm-uapi (MIT).
-`src/xf86drm_stub.c` stubs the 15 symbols in `SYMBOLS.txt` (ENOSYS or NULL).
-Regenerate the list with `collect-symbols.sh`.
+`src/xf86drm_xnu.c` implements the 23 symbols in `SYMBOLS.txt` on vgpu
+(`../vgpu`, `../uapi/viva_gpu_uapi.h`): Panfrost and syncobj ioctls become vgpu
+selectors with the same structures, a "dma-buf fd" is an IOSurface plane
+(`IMPORT_IOSURFACE`), and submits are batched (`SUBMIT_BATCH`). Anything else
+returns `-ENOSYS`. Regenerate the symbol list with `collect-symbols.sh`.
 
-## iOS arm64 build (later; not possible here, since there is no iOS SDK)
+## iOS arm64 build
 
-- Template: `cross/ios-arm64.ini` (target `arm64-apple-ios16.0`, meson
-  `system=darwin`, `subsystem=ios`; fill in the SDK path).
-- **No LLVM and no llvmpipe on iOS** (JIT is not allowed, and there is no LLVM for the target): use
-  `-Dgallium-drivers=panfrost -Dllvm=disabled -Ddraw-use-llvm=false`.
-- Panfrost still needs the precompiled libpan kernels. Use the host tools from
-  `build-macos` with `-Dmesa-clc=system -Dprecomp-compiler=system`, and put
-  `build-macos/src/compiler/clc/mesa_clc`, `.../spirv/vtn_bindgen2` and
-  `build-macos/src/panfrost/clc/panfrost_compile` on PATH. With
-  `mesa-clc=system`, CLC (and so LLVM) is not required for the target.
-- libdrm-xnu must be cross-built for arm64-apple-ios16.0 and found through
-  `pkg_config_libdir`, and its stubs replaced by the IOKit implementation.
-- The same two patches apply (they key on `darwin` / `__APPLE__`). Expect
-  more iOS-specific issues (for example `os_mmap` on the device fd, and the
-  disk cache path; consider `-Dshader-cache=disabled`).
-- Use `libtool -static` again to produce `libmesa_viva.a` for iOS.
+`../ios/build.sh mesa` (CI: `.github/workflows/build.yml`) builds Mesa for the phone
+with the iOS SDK from Xcode:
+
+- Cross file `cross/ios-arm64.ini` (target `arm64-apple-ios16.0`, meson
+  `system=darwin`, `subsystem=ios`); `ios/build.sh` fills in the SDK path and wraps
+  the compilers with ccache.
+- **Panfrost only, no LLVM** (no JIT on iOS): `-Dgallium-drivers=panfrost
+  -Dllvm=disabled -Ddraw-use-llvm=false -Dshader-cache=disabled -Dzstd=disabled
+  -Dexpat=disabled`, no GL/EGL/GBM/Vulkan.
+- The precompiled libpan kernels come from the macOS build's host tools
+  (`-Dmesa-clc=system -Dprecomp-compiler=system`, with `mesa_clc`,
+  `vtn_bindgen2` and `panfrost_compile` from `build-macos/` on PATH), so the
+  macOS build runs first.
+- Same ninja targets as macOS minus llvmpipe/gallivm/null winsys, merged with
+  `xcrun --sdk iphoneos libtool -static` into `ios/out/lib/libmesa_viva.a`.
+- libdrm-xnu and vgpu are built for iOS with the IOKit back end and linked into
+  `VivaMTLDriver.bundle` by `ios/build.sh driver`.

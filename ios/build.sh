@@ -3,7 +3,7 @@
 # (IOKit back-end), the vmg back-end and the Objective-C driver, packaged as VivaMTLDriver.bundle for
 # /System/Library/Extensions (MetalPluginName = VivaMTLDriver, MetalPluginClassName = VMDevice), plus the test
 # binaries to run on the phone. Needs an iOS SDK (Xcode): `xcrun --sdk iphoneos --show-sdk-path`.
-# Not run yet: this Mac has only the Command Line Tools.
+# CI runs it on every push to main (.github/workflows/build.yml, artifact viva-gpu-ios).
 #
 # Usage: ios/build.sh [all|mesa|driver|tests]      output: ios/out/
 set -euo pipefail
