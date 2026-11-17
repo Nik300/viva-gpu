@@ -233,7 +233,7 @@ static UIImage *VISymbol(NSString *name, CGFloat size) {
 }
 
 static void VITestSystemAlert(NSString *name);
-static BOOL VITestBio;     // it.viva.island.sys.lockscan: the padlock element behaves as if Face ID were there
+static int VITestBio;      // it.viva.island.sys.lockscan(2): bit 0 -_allowsBiometricUnlock, bit 1 -_activelyWantsMatching
 
 static id VIProvided(UIView *view) {
     return [[NSClassFromString(@"SBUISystemApertureCustomContentProvider") alloc] initWithView:view];
@@ -793,7 +793,8 @@ static void VIInvalidate(id assertion, NSString *reason) {
     //   lock                   -[SBLockScreenManager lockUIFromSource:withOptions:] (the lock element on the next wake)
     //   lockelement            the padlock element itself, closed then opening (no Face ID here: never shown otherwise)
     //   lockscan               the padlock scanning (Face ID acquiring at unlock) for 3 s, then a match
-    for (NSString *name in @[@"charging", @"lowbattery", @"charging-lpm", @"lowbattery-lpm", @"silent", @"ring", @"lock", @"lockelement", @"lockscan"]) {
+    //   lockscan2              the same, also wanting a match (-_activelyWantsMatching)
+    for (NSString *name in @[@"charging", @"lowbattery", @"charging-lpm", @"lowbattery-lpm", @"silent", @"ring", @"lock", @"lockelement", @"lockscan", @"lockscan2"]) {
         NSString *note = [@"it.viva.island.sys." stringByAppendingString:name];
         notify_register_dispatch(note.UTF8String, &t, dispatch_get_main_queue(), ^(int token) {
             @try { VITestSystemAlert(name); } @catch (NSException *e) { VILOG("sys %{public}@: %{public}@", name, e); }
@@ -827,7 +828,7 @@ static void VITestSystemAlert(NSString *name) {
         SEL sel = NSSelectorFromString(@"activateRingerHUDFromMuteSwitch:");
         if (![rc respondsToSelector:sel]) { VILOG("sys %{public}@: missing", name); return; }
         ((void (*)(id, SEL, int))objc_msgSend)(rc, sel, [name isEqualToString:@"silent"] ? 0 : 1);
-    } else if ([name isEqualToString:@"lockscan"]) {
+    } else if ([name hasPrefix:@"lockscan"]) {
         // Face ID scanning at unlock: the padlock element acquiring (the face glyph next to the lock), then a match.
         Class cls = NSClassFromString(@"SBLockElementViewProvider");
         if (!controller || !cls) { VILOG("sys lockscan: missing"); return; }
@@ -836,17 +837,18 @@ static void VITestSystemAlert(NSString *name) {
         static BOOL hooked;
         if (!hooked) {
             hooked = YES;
-            for (NSString *selName in @[@"_allowsBiometricUnlock", @"_activelyWantsMatching"]) {
-                SEL sel = NSSelectorFromString(selName);
+            NSArray *names = @[@"_allowsBiometricUnlock", @"_activelyWantsMatching"];
+            for (int bit = 0; bit < 2; bit++) {
+                SEL sel = NSSelectorFromString(names[bit]);
                 Method m = class_getInstanceMethod(cls, sel);
                 if (!m) continue;
                 __block IMP orig = NULL;
                 orig = method_setImplementation(m, imp_implementationWithBlock(^BOOL(id self) {
-                    return VITestBio || ((BOOL (*)(id, SEL))orig)(self, sel);
+                    return (VITestBio & (1 << bit)) || ((BOOL (*)(id, SEL))orig)(self, sel);
                 }));
             }
         }
-        VITestBio = YES;
+        VITestBio = [name isEqualToString:@"lockscan2"] ? 3 : 1;
         element = [cls new];
         id lockEl = element;
         SEL acq = NSSelectorFromString(@"_setAcquiring:"), auth = NSSelectorFromString(@"setAuthenticated:");
@@ -855,7 +857,7 @@ static void VITestSystemAlert(NSString *name) {
                 ((void (*)(id, SEL))objc_msgSend)(lockEl, NSSelectorFromString(u));
         }
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(6500 * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
-            VITestBio = NO;
+            VITestBio = 0;
         });
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(300 * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
             @try {
