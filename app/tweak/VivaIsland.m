@@ -233,6 +233,7 @@ static UIImage *VISymbol(NSString *name, CGFloat size) {
 }
 
 static void VITestSystemAlert(NSString *name);
+static BOOL VITestBio;     // it.viva.island.sys.lockscan: the padlock element behaves as if Face ID were there
 
 static id VIProvided(UIView *view) {
     return [[NSClassFromString(@"SBUISystemApertureCustomContentProvider") alloc] initWithView:view];
@@ -830,12 +831,38 @@ static void VITestSystemAlert(NSString *name) {
         // Face ID scanning at unlock: the padlock element acquiring (the face glyph next to the lock), then a match.
         Class cls = NSClassFromString(@"SBLockElementViewProvider");
         if (!controller || !cls) { VILOG("sys lockscan: missing"); return; }
+        // No Face ID sensor: the element hides its face glyph (-_allowsBiometricUnlock NO) and never scans
+        // (-_activelyWantsMatching NO); both answer YES while VITestBio is set (this test only, 6 s).
+        static BOOL hooked;
+        if (!hooked) {
+            hooked = YES;
+            for (NSString *selName in @[@"_allowsBiometricUnlock", @"_activelyWantsMatching"]) {
+                SEL sel = NSSelectorFromString(selName);
+                Method m = class_getInstanceMethod(cls, sel);
+                if (!m) continue;
+                __block IMP orig = NULL;
+                orig = method_setImplementation(m, imp_implementationWithBlock(^BOOL(id self) {
+                    return VITestBio || ((BOOL (*)(id, SEL))orig)(self, sel);
+                }));
+            }
+        }
+        VITestBio = YES;
         element = [cls new];
         id lockEl = element;
         SEL acq = NSSelectorFromString(@"_setAcquiring:"), auth = NSSelectorFromString(@"setAuthenticated:");
+        for (NSString *u in @[@"_updateAllowsBioUnlock", @"_updateTrailingPackageVisibility", @"_updateTrailingGlyph"]) {
+            if ([lockEl respondsToSelector:NSSelectorFromString(u)])
+                ((void (*)(id, SEL))objc_msgSend)(lockEl, NSSelectorFromString(u));
+        }
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(6500 * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
+            VITestBio = NO;
+        });
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(300 * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
             @try {
                 if ([lockEl respondsToSelector:acq]) ((void (*)(id, SEL, BOOL))objc_msgSend)(lockEl, acq, YES);
+                for (NSString *u in @[@"_updateTrailingPackageVisibility", @"_updateTrailingGlyph"])
+                    if ([lockEl respondsToSelector:NSSelectorFromString(u)])
+                        ((void (*)(id, SEL))objc_msgSend)(lockEl, NSSelectorFromString(u));
             } @catch (NSException *e) { VILOG("sys lockscan: %{public}@", e); }
         });
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3500 * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
