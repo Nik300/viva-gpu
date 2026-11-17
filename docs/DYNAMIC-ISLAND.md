@@ -154,10 +154,15 @@ spento / non caricato), stato del link, SpringBoard modificato o originale, dyli
 `vnotify it.viva.island.sys.NOME` (dal link) fa creare a VivaIsland gli avvisi di SpringBoard come li crea SpringBoard
 stesso, e 1 s dopo chiede `it.viva.display.dump`: `charging`, `lowbattery`, `charging-lpm`, `lowbattery-lpm`
 (`SBPowerAlertElement`), `silent`, `ring` (`-[SBRingerControl activateRingerHUDFromMuteSwitch:]`), `lock`
-(blocca la UI) e `lockelement` (il lucchetto di Face ID, forzato: chiuso, aperto dopo 2,5 s). Con l'isola da 100 pt di
+(blocca la UI), `lockelement` (il lucchetto di Face ID, forzato: chiuso, aperto dopo 2,5 s), `lockscan` e
+`lockscan2` (riconoscimento allo sblocco: lucchetto + glifo Face ID a destra, in scansione per 3 s, poi riuscito; il
+test scrive le ivar `_isInBloomMode` e `_allowsBioUnlock`, che `-_updateUnlockModeForState` legge e che senza sensore
+restano NO, e per 6 s aggancia `-_allowsBiometricUnlock` (`lockscan2` anche `-_activelyWantsMatching`)). Con l'isola da 100 pt di
 VivaDisplay tutti hanno il contenuto fuori dall'isola, dopo l'hook di `-[SBPowerAlertElement _trailingViewWidth]`
 (tabella solo per i tipi di schermo 21-24, 0 altrove: la percentuale finiva sotto l'isola). Non provati (nessuna
-sorgente sul telefono): attività live (timer, musica), pillola di chiamata/registrazione, pallino privacy.
+sorgente sul telefono): attività live (timer, musica), pillola di chiamata/registrazione, pallino privacy, Face ID
+richiesto da un'app (scena di `com.apple.BiometricKitUI` in `SBSystemApertureSceneElement`, la presenta solo
+`biometrickitd` con il sensore).
 
 ## 3. Iniezione
 
