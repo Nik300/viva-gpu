@@ -12,6 +12,7 @@
 //  - the exclusion area: +[UISDisplaySingleRectShape sb_displayShapeForScreenType:] -> rect in points, y > 0, so every
 //    app's status bar is _UIStatusBarVisualProvider_DynamicSplitMedium, laid out on that rect (no size tables);
 //  - safe areas: +[UISApplicationSupportDisplayEdgeInfo _sbh_displayEdgeInfoForScreenType:];
+//  - the charging alert's trailing width: -[SBPowerAlertElement _trailingViewWidth] (a table for 14 Pro types only);
 //  - compatibility: -[SBApplication _defaultClassicMode] -> 0 (native) for apps with a launch storyboard /
 //    UILaunchScreen / SwiftUI (usesSplashBoard), unchanged for the others (letterboxed 375x667 / 375x812 windows).
 // Geometry from fork/tools/viva-display-geometry.py with the camera hole and corners measured on the phone.
@@ -50,6 +51,7 @@ static double VDCCMargin;
 static double VDHomeTopShift = 16.0, VDExpandedTopExtra = 0;    // ExpandedTopExtra: untested, VivaIsland's notice was its own overlay
 static double VDSafeTop = 53.667, VDSafeBottom = 34.0, VDSafeLandscapeSide = 53.667, VDSafeLandscapeBottom = 21.0;
 static double VDScreenW = 360.0;
+static double VDPowerTrailingW = 85.0;      // SBPowerAlertElement's trailing view on the 14 Pro (types 21/22)
 
 static double VDPrefNumber(NSDictionary *d, NSString *key, double def) {
     id v = d[key];
@@ -184,6 +186,17 @@ static void VDInstall(void) {
     VDHook(@"SBUISystemApertureLayoutMetrics", @selector(interSensorRegionInWindowSpace), NO, ^CGRect(id self) {
         return CGRectMake(VDInterX, VDIslandTop, VDInterW, VDIslandH);
     }, NULL);
+
+    // SpringBoard: the "Charging" / low battery alert sizes its trailing view (percentage + battery) from a table for
+    // SBH screen types 21-24 only (85 pt on the 14 Pro, 97 pt on the Pro Max) and returns 0 for any other type: the
+    // island then made no room for it and the percentage sat under the sensor region (2026-11-17).
+    {
+        __block IMP orig = NULL;
+        VDHook(@"SBPowerAlertElement", NSSelectorFromString(@"_trailingViewWidth"), NO, ^CGFloat(id self) {
+            CGFloat w = ((CGFloat (*)(id, SEL))orig)(self, NSSelectorFromString(@"_trailingViewWidth"));
+            return w > 0 ? w : VDPowerTrailingW;
+        }, &orig);
+    }
 
     // SpringBoard: the exclusion area every app gets (points, y > 0 -> DynamicSplit status bar)
     VDHook(@"UISDisplaySingleRectShape", NSSelectorFromString(@"sb_displayShapeForScreenType:"), YES, ^id(id self, NSInteger type) {
@@ -395,6 +408,7 @@ __attribute__((constructor)) static void VDInit(void) {
         VDHomeType = (long)VDPrefNumber(p, @"HomeScreenType", VDHomeType);
         VDHomeTopShift = VDPrefNumber(p, @"HomeTopShift", VDHomeTopShift);
         VDCCItemSpacing = VDPrefNumber(p, @"CCItemSpacing", VDCCItemSpacing);
+        VDPowerTrailingW = VDPrefNumber(p, @"PowerTrailingWidth", VDPowerTrailingW);
         VDExpandedTopExtra = VDPrefNumber(p, @"ExpandedTopExtra", VDExpandedTopExtra);
         VDSafeTop = VDPrefNumber(p, @"SafeTop", VDSafeTop);
         VDSafeBottom = VDPrefNumber(p, @"SafeBottom", VDSafeBottom);
