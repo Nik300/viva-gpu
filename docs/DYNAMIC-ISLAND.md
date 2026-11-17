@@ -149,6 +149,16 @@ spento / non caricato), stato del link, SpringBoard modificato o originale, dyli
 *Test isola*, *Riavvia SpringBoard*. L'entitlement `com.apple.security.exception.shared-preference.read-write` include
 `it.viva.island`.
 
+### Prova degli avvisi di sistema (2026-11-17)
+
+`vnotify it.viva.island.sys.NOME` (dal link) fa creare a VivaIsland gli avvisi di SpringBoard come li crea SpringBoard
+stesso, e 1 s dopo chiede `it.viva.display.dump`: `charging`, `lowbattery`, `charging-lpm`, `lowbattery-lpm`
+(`SBPowerAlertElement`), `silent`, `ring` (`-[SBRingerControl activateRingerHUDFromMuteSwitch:]`), `lock`
+(blocca la UI) e `lockelement` (il lucchetto di Face ID, forzato: chiuso, aperto dopo 2,5 s). Con l'isola da 100 pt di
+VivaDisplay tutti hanno il contenuto fuori dall'isola, dopo l'hook di `-[SBPowerAlertElement _trailingViewWidth]`
+(tabella solo per i tipi di schermo 21-24, 0 altrove: la percentuale finiva sotto l'isola). Non provati (nessuna
+sorgente sul telefono): attività live (timer, musica), pillola di chiamata/registrazione, pallino privacy.
+
 ## 3. Iniezione
 
 Niente Substrate/ElleKit, e niente `DYLD_INSERT_LIBRARIES`: dyld chiede la policy con `amfi_check_dyld_policy_self`
