@@ -782,6 +782,29 @@ static void VIInvalidate(id assertion, NSString *reason) {
     notify_register_dispatch(VI_NOTIFY_TEST, &t, dispatch_get_main_queue(), ^(int token) {
         @try { [ws test]; } @catch (NSException *e) { VILOG("test: %{public}@", e); }
     });
+    // Debug: SpringBoard's own "Charging" alert, as -[SBStatusBarStateAggregator setBatteryChargingState:] registers it
+    // when a charger is plugged in; 1 s later it.viva.display.dump writes the view trees (layout checks without
+    // replugging the cable).
+    notify_register_dispatch("it.viva.island.charging", &t, dispatch_get_main_queue(), ^(int token) {
+        @try {
+            id controller = [VIElementPresenter controller];
+            id prov = [NSClassFromString(@"SBChargingSystemApertureElementProvider") new];
+            SEL mk = NSSelectorFromString(@"powerElementWithBatteryCapacity:");
+            if (!controller || ![prov respondsToSelector:mk]) { VILOG("charging: missing"); return; }
+            id el = ((id (*)(id, SEL, double))objc_msgSend)(prov, mk, 0.53);     /* fraction: percentCharge / 100 */
+            __block id assertion = [controller registerElement:el];
+            VILOG("charging: element %{public}@ assertion %{public}@", el, assertion);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                notify_post("it.viva.display.dump");
+            });
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                @try { [assertion invalidateWithReason:@"viva test"]; } @catch (NSException *e) {}
+                assertion = nil;
+            });
+        } @catch (NSException *e) {
+            VILOG("charging: %{public}@", e);
+        }
+    });
     notify_register_dispatch(VI_NOTIFY_PREFS, &t, dispatch_get_main_queue(), ^(int token) {
         @try { [ws prefsChanged]; } @catch (NSException *e) { VILOG("prefs: %{public}@", e); }
     });
