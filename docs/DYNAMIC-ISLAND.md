@@ -119,10 +119,12 @@ grigio "USB · standard" di 3 s senza indicatore.
 `VIOverlayPresenter`, usato se manca una classe o un selettore, se `registerElement:` fallisce o solleva, se la
 protezione crash è scattata, o se l'utente sceglie "Forza overlay". Finestra `VIPassThroughWindow` (`hitTest:` → nil,
 `userInteractionEnabled = NO`, mai key) nella scena della finestra dell'isola (`SBSystemApertureController._window`,
-livello + 1; altrimenti la scena principale a livello status bar + 100). Pillola nera con `cornerCurve` continua alla
+livello − 1: sopra app e status bar, **sotto** l'isola di sistema, così un avviso di sistema come "In carica" copre la
+pillola invece di esserne coperto; altrimenti la scena principale a livello status bar + 100). Pillola nera con `cornerCurve` continua alla
 cornice dell'isola letta da SpringBoard (o dalla geometria sopra), espansione con animazione a molla (larghezza schermo -
-22 pt, alta 72 pt, icona + "Viva Link · USB" + "Strumento di debug collegato"), dopo 3 s si stringe all'isola + 30 pt per
-lato (icona a sinistra, "USB" a destra), si richiude nell'isola e sparisce a fine link.
+22 pt, alta 72 pt, icona + "Viva Link · USB" + "Strumento di debug collegato"), dopo 3 s si stringe all'isola allargata
+per lato del contenuto più largo (icona a sinistra, "USB" a destra, ciascuno a 8 pt dall'isola e 12 pt dal bordo: con
+30 pt fissi la "U" finiva sotto l'isola da 100 pt di viva), si richiude nell'isola e sparisce a fine link.
 
 ### Polling, preferenze, notifiche
 

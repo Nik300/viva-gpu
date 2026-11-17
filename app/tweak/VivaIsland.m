@@ -391,13 +391,15 @@ static void VIInvalidate(id assertion, NSString *reason) {
 - (UIWindowScene *)scene:(CGFloat *)level {
     id app = UIApplication.sharedApplication;
     *level = UIWindowLevelStatusBar + 100;
-    // Above the island: the window of SBSystemApertureController lives in its own high-level scene.
+    // In the island's own high-level scene (SBSystemApertureController's window), just below that window: above the
+    // apps and the status bar, under the system island, so a system element (charging, silent mode) covers the pill
+    // instead of being covered by it (the pill hid the battery percentage of the charging alert, 2026-11-17).
     @try {
         id c = [VIElementPresenter controller];
         Ivar iv = c ? class_getInstanceVariable(object_getClass(c), "_window") : NULL;
         id w = iv ? object_getIvar(c, iv) : nil;
         if ([w isKindOfClass:UIWindow.class] && [w windowScene]) {
-            *level = [(UIWindow *)w windowLevel] + 1;
+            *level = [(UIWindow *)w windowLevel] - 1;
             return [w windowScene];
         }
     } @catch (NSException *e) {
@@ -449,7 +451,7 @@ static void VIInvalidate(id assertion, NSString *reason) {
     _smallIcon.contentMode = UIViewContentModeScaleAspectFit;
     _compactLabel = [UILabel new];
     _compactLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
-    _compactLabel.textAlignment = NSTextAlignmentRight;
+    _compactLabel.textAlignment = NSTextAlignmentLeft;
     for (UIView *v in @[_smallIcon, _compactLabel]) [_compact addSubview:v];
     return YES;
 }
@@ -472,8 +474,16 @@ static void VIInvalidate(id assertion, NSString *reason) {
     return CGRectMake(11, _island.origin.y, w - 22, h);
 }
 
+// Compact: the island widened on both sides by the wider of the two contents (icon on the left, text on the right),
+// each 8 pt from the island and 12 pt from the pill's edge. A fixed 30 pt left "USB" partly under the island (only "SB"
+// visible on viva's 100 pt island).
+- (CGFloat)compactSide {
+    CGFloat text = ceil([_compactLabel sizeThatFits:CGSizeMake(200, 18)].width);
+    return MAX(12 + 18 + 8, 8 + text + 12);
+}
+
 - (CGRect)compactFrame {
-    return CGRectInset(_island, -30, 0);
+    return CGRectInset(_island, -[self compactSide], 0);
 }
 
 - (void)layoutContent:(CGRect)expanded compact:(CGRect)compact {
@@ -490,7 +500,8 @@ static void VIInvalidate(id assertion, NSString *reason) {
     _compact.frame = (CGRect){CGPointZero, compact.size};
     CGFloat ch = compact.size.height;
     _smallIcon.frame = CGRectMake(12, (ch - 18) / 2, 18, 18);
-    _compactLabel.frame = CGRectMake(compact.size.width - 12 - 40, (ch - 18) / 2, 40, 18);
+    CGFloat side = [self compactSide];
+    _compactLabel.frame = CGRectMake(compact.size.width - side + 8, (ch - 18) / 2, side - 20, 18);
 }
 
 - (BOOL)show:(VINotice *)n {
