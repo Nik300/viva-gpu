@@ -791,7 +791,8 @@ static void VIInvalidate(id assertion, NSString *reason) {
     //   silent / ring          -[SBRingerControl activateRingerHUDFromMuteSwitch:] (the ring/silent switch)
     //   lock                   -[SBLockScreenManager lockUIFromSource:withOptions:] (the lock element on the next wake)
     //   lockelement            the padlock element itself, closed then opening (no Face ID here: never shown otherwise)
-    for (NSString *name in @[@"charging", @"lowbattery", @"charging-lpm", @"lowbattery-lpm", @"silent", @"ring", @"lock", @"lockelement"]) {
+    //   lockscan               the padlock scanning (Face ID acquiring at unlock) for 3 s, then a match
+    for (NSString *name in @[@"charging", @"lowbattery", @"charging-lpm", @"lowbattery-lpm", @"silent", @"ring", @"lock", @"lockelement", @"lockscan"]) {
         NSString *note = [@"it.viva.island.sys." stringByAppendingString:name];
         notify_register_dispatch(note.UTF8String, &t, dispatch_get_main_queue(), ^(int token) {
             @try { VITestSystemAlert(name); } @catch (NSException *e) { VILOG("sys %{public}@: %{public}@", name, e); }
@@ -825,6 +826,24 @@ static void VITestSystemAlert(NSString *name) {
         SEL sel = NSSelectorFromString(@"activateRingerHUDFromMuteSwitch:");
         if (![rc respondsToSelector:sel]) { VILOG("sys %{public}@: missing", name); return; }
         ((void (*)(id, SEL, int))objc_msgSend)(rc, sel, [name isEqualToString:@"silent"] ? 0 : 1);
+    } else if ([name isEqualToString:@"lockscan"]) {
+        // Face ID scanning at unlock: the padlock element acquiring (the face glyph next to the lock), then a match.
+        Class cls = NSClassFromString(@"SBLockElementViewProvider");
+        if (!controller || !cls) { VILOG("sys lockscan: missing"); return; }
+        element = [cls new];
+        id lockEl = element;
+        SEL acq = NSSelectorFromString(@"_setAcquiring:"), auth = NSSelectorFromString(@"setAuthenticated:");
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(300 * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
+            @try {
+                if ([lockEl respondsToSelector:acq]) ((void (*)(id, SEL, BOOL))objc_msgSend)(lockEl, acq, YES);
+            } @catch (NSException *e) { VILOG("sys lockscan: %{public}@", e); }
+        });
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3500 * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
+            @try {
+                if ([lockEl respondsToSelector:acq]) ((void (*)(id, SEL, BOOL))objc_msgSend)(lockEl, acq, NO);
+                if ([lockEl respondsToSelector:auth]) ((void (*)(id, SEL, BOOL))objc_msgSend)(lockEl, auth, YES);
+            } @catch (NSException *e) { VILOG("sys lockscan: %{public}@", e); }
+        });
     } else if ([name isEqualToString:@"lockelement"]) {
         // The padlock (Face ID devices, normally on the lock screen): registered by hand, past
         // +[SBLockElementViewProvider deviceSupportsElement]; 2.5 s later it opens (setAuthenticated:).
