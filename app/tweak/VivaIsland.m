@@ -790,7 +790,8 @@ static void VIInvalidate(id assertion, NSString *reason) {
     //                                                          setBatteryChargingState:] and the low battery alert)
     //   silent / ring          -[SBRingerControl activateRingerHUDFromMuteSwitch:] (the ring/silent switch)
     //   lock                   -[SBLockScreenManager lockUIFromSource:withOptions:] (the lock element on the next wake)
-    for (NSString *name in @[@"charging", @"lowbattery", @"charging-lpm", @"lowbattery-lpm", @"silent", @"ring", @"lock"]) {
+    //   lockelement            the padlock element itself, closed then opening (no Face ID here: never shown otherwise)
+    for (NSString *name in @[@"charging", @"lowbattery", @"charging-lpm", @"lowbattery-lpm", @"silent", @"ring", @"lock", @"lockelement"]) {
         NSString *note = [@"it.viva.island.sys." stringByAppendingString:name];
         notify_register_dispatch(note.UTF8String, &t, dispatch_get_main_queue(), ^(int token) {
             @try { VITestSystemAlert(name); } @catch (NSException *e) { VILOG("sys %{public}@: %{public}@", name, e); }
@@ -824,6 +825,21 @@ static void VITestSystemAlert(NSString *name) {
         SEL sel = NSSelectorFromString(@"activateRingerHUDFromMuteSwitch:");
         if (![rc respondsToSelector:sel]) { VILOG("sys %{public}@: missing", name); return; }
         ((void (*)(id, SEL, int))objc_msgSend)(rc, sel, [name isEqualToString:@"silent"] ? 0 : 1);
+    } else if ([name isEqualToString:@"lockelement"]) {
+        // The padlock (Face ID devices, normally on the lock screen): registered by hand, past
+        // +[SBLockElementViewProvider deviceSupportsElement]; 2.5 s later it opens (setAuthenticated:).
+        Class cls = NSClassFromString(@"SBLockElementViewProvider");
+        if (!controller || !cls) { VILOG("sys lockelement: missing"); return; }
+        element = [cls new];
+        id lockEl = element;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2500 * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
+            @try {
+                if ([lockEl respondsToSelector:NSSelectorFromString(@"setAuthenticated:")])
+                    ((void (*)(id, SEL, BOOL))objc_msgSend)(lockEl, NSSelectorFromString(@"setAuthenticated:"), YES);
+            } @catch (NSException *e) {
+                VILOG("sys lockelement: %{public}@", e);
+            }
+        });
     } else if ([name isEqualToString:@"lock"]) {
         id lsm = [NSClassFromString(@"SBLockScreenManager") valueForKey:@"sharedInstance"];
         SEL sel = NSSelectorFromString(@"lockUIFromSource:withOptions:");
