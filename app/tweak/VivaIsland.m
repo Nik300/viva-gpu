@@ -232,6 +232,8 @@ static UIImage *VISymbol(NSString *name, CGFloat size) {
     return (cls && [c isKindOfClass:cls] && [c respondsToSelector:@selector(registerElement:)]) ? c : nil;
 }
 
+static void VITestSystemAlert(NSString *name);
+
 static id VIProvided(UIView *view) {
     return [[NSClassFromString(@"SBUISystemApertureCustomContentProvider") alloc] initWithView:view];
 }
@@ -782,29 +784,18 @@ static void VIInvalidate(id assertion, NSString *reason) {
     notify_register_dispatch(VI_NOTIFY_TEST, &t, dispatch_get_main_queue(), ^(int token) {
         @try { [ws test]; } @catch (NSException *e) { VILOG("test: %{public}@", e); }
     });
-    // Debug: SpringBoard's own "Charging" alert, as -[SBStatusBarStateAggregator setBatteryChargingState:] registers it
-    // when a charger is plugged in; 1 s later it.viva.display.dump writes the view trees (layout checks without
-    // replugging the cable).
-    notify_register_dispatch("it.viva.island.charging", &t, dispatch_get_main_queue(), ^(int token) {
-        @try {
-            id controller = [VIElementPresenter controller];
-            id prov = [NSClassFromString(@"SBChargingSystemApertureElementProvider") new];
-            SEL mk = NSSelectorFromString(@"powerElementWithBatteryCapacity:");
-            if (!controller || ![prov respondsToSelector:mk]) { VILOG("charging: missing"); return; }
-            id el = ((id (*)(id, SEL, double))objc_msgSend)(prov, mk, 0.53);     /* fraction: percentCharge / 100 */
-            __block id assertion = [controller registerElement:el];
-            VILOG("charging: element %{public}@ assertion %{public}@", el, assertion);
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                notify_post("it.viva.display.dump");
-            });
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                @try { [assertion invalidateWithReason:@"viva test"]; } @catch (NSException *e) {}
-                assertion = nil;
-            });
-        } @catch (NSException *e) {
-            VILOG("charging: %{public}@", e);
-        }
-    });
+    // Debug: SpringBoard's own island alerts, built the way SpringBoard builds them, to check their layout on viva's
+    // island without the real event; 1 s later it.viva.display.dump writes the view trees. it.viva.island.sys.NAME:
+    //   charging / lowbattery / charging-lpm / lowbattery-lpm  SBPowerAlertElement (as -[SBStatusBarStateAggregator
+    //                                                          setBatteryChargingState:] and the low battery alert)
+    //   silent / ring          -[SBRingerControl activateRingerHUDFromMuteSwitch:] (the ring/silent switch)
+    //   lock                   -[SBLockScreenManager lockUIFromSource:withOptions:] (the lock element on the next wake)
+    for (NSString *name in @[@"charging", @"lowbattery", @"charging-lpm", @"lowbattery-lpm", @"silent", @"ring", @"lock"]) {
+        NSString *note = [@"it.viva.island.sys." stringByAppendingString:name];
+        notify_register_dispatch(note.UTF8String, &t, dispatch_get_main_queue(), ^(int token) {
+            @try { VITestSystemAlert(name); } @catch (NSException *e) { VILOG("sys %{public}@: %{public}@", name, e); }
+        });
+    }
     notify_register_dispatch(VI_NOTIFY_PREFS, &t, dispatch_get_main_queue(), ^(int token) {
         @try { [ws prefsChanged]; } @catch (NSException *e) { VILOG("prefs: %{public}@", e); }
     });
@@ -815,6 +806,43 @@ static void VIInvalidate(id assertion, NSString *reason) {
 }
 
 @end
+
+static void VITestSystemAlert(NSString *name) {
+    id app = UIApplication.sharedApplication;
+    id controller = [VIElementPresenter controller];
+    id element = nil;
+    if ([name hasPrefix:@"charging"] || [name hasPrefix:@"lowbattery"]) {
+        Class cls = NSClassFromString(@"SBPowerAlertElement");
+        SEL init = NSSelectorFromString(@"initWithIdentifier:style:batteryPercentage:lowPowerModeEnabled:action:");
+        id ident = [NSClassFromString(@"SBChargingSystemApertureElementProvider") new];
+        if (!controller || !ident || ![cls instancesRespondToSelector:init]) { VILOG("sys %{public}@: missing", name); return; }
+        BOOL low = [name hasPrefix:@"lowbattery"], lpm = [name hasSuffix:@"-lpm"];
+        element = ((id (*)(id, SEL, id, long long, double, BOOL, id))objc_msgSend)([cls alloc], init, ident,
+            low ? 1 : 0, low ? 0.10 : 0.53, lpm, nil);       /* style 0 CHARGING_COMPACT, 1 LOW_BATT_TITLE_COMPACT */
+    } else if ([name isEqualToString:@"silent"] || [name isEqualToString:@"ring"]) {
+        id rc = [app respondsToSelector:NSSelectorFromString(@"ringerControl")] ? [app valueForKey:@"ringerControl"] : nil;
+        SEL sel = NSSelectorFromString(@"activateRingerHUDFromMuteSwitch:");
+        if (![rc respondsToSelector:sel]) { VILOG("sys %{public}@: missing", name); return; }
+        ((void (*)(id, SEL, int))objc_msgSend)(rc, sel, [name isEqualToString:@"silent"] ? 0 : 1);
+    } else if ([name isEqualToString:@"lock"]) {
+        id lsm = [NSClassFromString(@"SBLockScreenManager") valueForKey:@"sharedInstance"];
+        SEL sel = NSSelectorFromString(@"lockUIFromSource:withOptions:");
+        if (![lsm respondsToSelector:sel]) { VILOG("sys lock: missing"); return; }
+        ((void (*)(id, SEL, int, id))objc_msgSend)(lsm, sel, 1, nil);
+        return;
+    }
+    __block id assertion = element ? [controller registerElement:element] : nil;
+    VILOG("sys %{public}@: element %{public}@ assertion %{public}@", name, element, assertion);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        notify_post("it.viva.display.dump");
+    });
+    if (assertion) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            @try { [assertion invalidateWithReason:@"viva test"]; } @catch (NSException *e) {}
+            assertion = nil;
+        });
+    }
+}
 
 // ---- Entry point -----------------------------------------------------------------------------------------------------
 
