@@ -851,8 +851,14 @@ static void VITestSystemAlert(NSString *name) {
         VITestBio = [name isEqualToString:@"lockscan2"] ? 3 : 1;
         element = [cls new];
         id lockEl = element;
+        // -_updateUnlockModeForState reads the ivars, not the methods: unlock mode 2/3 (the "bloom", Face ID glyph,
+        // scanning while _isAcquiring) needs _isInBloomMode and _allowsBioUnlock, which no sensor ever sets here.
+        for (NSString *ivName in @[@"_isInBloomMode", @"_allowsBioUnlock"]) {
+            Ivar iv = class_getInstanceVariable(cls, ivName.UTF8String);
+            if (iv) *(BOOL *)((uint8_t *)(__bridge void *)lockEl + ivar_getOffset(iv)) = YES;
+        }
         SEL acq = NSSelectorFromString(@"_setAcquiring:"), auth = NSSelectorFromString(@"setAuthenticated:");
-        for (NSString *u in @[@"_updateAllowsBioUnlock", @"_updateTrailingPackageVisibility", @"_updateTrailingGlyph"]) {
+        for (NSString *u in @[@"_updateUnlockModeForState", @"_updateTrailingPackageVisibility", @"_updateTrailingGlyph"]) {
             if ([lockEl respondsToSelector:NSSelectorFromString(u)])
                 ((void (*)(id, SEL))objc_msgSend)(lockEl, NSSelectorFromString(u));
         }
@@ -862,7 +868,7 @@ static void VITestSystemAlert(NSString *name) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(300 * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
             @try {
                 if ([lockEl respondsToSelector:acq]) ((void (*)(id, SEL, BOOL))objc_msgSend)(lockEl, acq, YES);
-                for (NSString *u in @[@"_updateTrailingPackageVisibility", @"_updateTrailingGlyph"])
+                for (NSString *u in @[@"_updateUnlockModeForState", @"_updateTrailingPackageVisibility", @"_updateTrailingGlyph"])
                     if ([lockEl respondsToSelector:NSSelectorFromString(u)])
                         ((void (*)(id, SEL))objc_msgSend)(lockEl, NSSelectorFromString(u));
             } @catch (NSException *e) { VILOG("sys lockscan: %{public}@", e); }
