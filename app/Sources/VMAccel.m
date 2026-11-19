@@ -1,7 +1,8 @@
 // Acceleratori: MaliMetal subpage for the hardware services that stand in for the iPhone's accelerators
 // (docs/ANALISI-ACCELERATORI-2026-11-04.md): the scaler (AppleM2ScalerCSCDriver, kernel VivaScaler.cpp), the JPEG
-// encoder (AppleJPEGDriver, VivaJPEG.cpp), MetalPerformanceShaders on MaliMetal (mpstest) and video (not possible:
-// MediaTek's decoder is driven by the proprietary vpud daemon). Shows what the running kernel publishes, edits the
+// encoder (AppleJPEGDriver, VivaJPEG.cpp), MetalPerformanceShaders on MaliMetal (mpstest) and the hardware video
+// decoder (kernel VivaVDEC, fork 0213; the clean-room VideoToolbox decoder vivavt from the vdec repo, loaded into
+// mediaserverd where iOS runs every VTDecompressionSession). Shows what the running kernel publishes, edits the
 // boot-args that turn the services on at the next boot, and runs tests: the scaler test draws a source, the CPU
 // reference and the service's result side by side.
 #import "VMApp.h"
@@ -289,6 +290,149 @@ static VMAccelTestResult *VMRunJpegTest(void) {
     return r;
 }
 
+// ---- Video decoder test: .vtclip files (vdec tools/mkvtclip.py) through a VTDecompressionSession -------------------------
+
+static NSString *const VMVivaVTLog = @"/private/var/mobile/Library/Logs/VivaVT.log";
+
+// Lines of the vivavt log (written by the decoder inside mediaserverd).
+static NSArray<NSString *> *VMVivaVTLines(void) {
+    NSString *t = [NSString stringWithContentsOfFile:VMVivaVTLog encoding:NSUTF8StringEncoding error:nil];
+    return t ? [t componentsSeparatedByString:@"\n"] : @[];
+}
+
+static NSUInteger VMCount(NSArray<NSString *> *lines, NSString *needle) {
+    NSUInteger n = 0;
+    for (NSString *l in lines) if ([l containsString:needle]) n++;
+    return n;
+}
+
+typedef struct { int64_t pts; uint64_t hash; OSStatus status; } VMFrame;
+typedef struct { VMFrame frames[64]; int n; } VMFrames;
+
+static void VMOnFrame(void *ref, void *src, OSStatus status, VTDecodeInfoFlags flags, CVImageBufferRef img, CMTime pts, CMTime dur) {
+    VMFrames *f = ref;
+    if (f->n >= 64) return;
+    VMFrame *o = &f->frames[f->n++];
+    o->pts = pts.value;
+    o->status = status;
+    o->hash = 0;
+    if (status || !img) return;
+    CVPixelBufferRef pb = (CVPixelBufferRef)img;
+    OSType fmt = CVPixelBufferGetPixelFormatType(pb);
+    int ten = fmt == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange || fmt == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange;
+    size_t w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb);
+    uint64_t hh = 0xcbf29ce484222325ull;
+    CVPixelBufferLockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
+    for (size_t p = 0; p < 2 && CVPixelBufferGetPlaneCount(pb) == 2; p++) {
+        const uint8_t *b = CVPixelBufferGetBaseAddressOfPlane(pb, p);
+        size_t st = CVPixelBufferGetBytesPerRowOfPlane(pb, p), rows = p ? h / 2 : h;
+        for (size_t r = 0; r < rows; r++)
+            for (size_t x = 0; x < w * (ten ? 2 : 1); x++) hh = (hh ^ b[r * st + x]) * 0x100000001b3ull;
+    }
+    CVPixelBufferUnlockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
+    o->hash = hh;
+}
+
+static int VMByPts(const void *a, const void *b) {
+    const VMFrame *x = a, *y = b;
+    return x->pts < y->pts ? -1 : x->pts > y->pts;
+}
+
+// One clip: "nome: N/N bit-exact, X ms/frame, hardware|software"
+static NSString *VMRunVideoClip(NSString *name, NSString *label) {
+    NSData *d = [NSData dataWithContentsOfFile:[NSBundle.mainBundle pathForResource:name ofType:@"vtclip"]];
+    if (d.length < 16) return [NSString stringWithFormat:@"%@: clip mancante", label];
+    const uint8_t *p = d.bytes, *end = p + d.length;
+#define RD32(v) do { if (p + 4 > end) return [NSString stringWithFormat:@"%@: clip troncata", label]; memcpy(&(v), p, 4); p += 4; } while (0)
+    uint32_t magic, codec, nps, ns;
+    RD32(magic); RD32(codec); RD32(nps); RD32(ns);
+    if (magic != 0x4c435456u || nps > 16 || ns > 64) return [NSString stringWithFormat:@"%@: clip non valida", label];
+    const uint8_t *ps[16];
+    size_t psl[16];
+    for (uint32_t i = 0; i < nps; i++) { uint32_t l; RD32(l); if (p + l > end) return @"?"; ps[i] = p; psl[i] = l; p += l; }
+    CMVideoFormatDescriptionRef fd = NULL;
+    OSStatus err = codec == 0x68766331u
+        ? CMVideoFormatDescriptionCreateFromHEVCParameterSets(NULL, nps, ps, psl, 4, NULL, &fd)
+        : CMVideoFormatDescriptionCreateFromH264ParameterSets(NULL, nps, ps, psl, 4, &fd);
+    if (err) return [NSString stringWithFormat:@"%@: format description %d", label, (int)err];
+    NSUInteger creates0 = VMCount(VMVivaVTLines(), @"] create ");
+    VMFrames *fr = calloc(1, sizeof *fr);
+    VTDecompressionOutputCallbackRecord cb = { VMOnFrame, fr };
+    VTDecompressionSessionRef session = NULL;
+    err = VTDecompressionSessionCreate(NULL, fd, NULL, NULL, &cb, &session);
+    if (err) { CFRelease(fd); free(fr); return [NSString stringWithFormat:@"%@: sessione VideoToolbox %d", label, (int)err]; }
+    CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
+    for (uint32_t k = 0; k < ns; k++) {
+        int32_t poc; uint32_t l;
+        RD32(poc); RD32(l);
+        if (p + l > end) break;
+        CMBlockBufferRef bb = NULL;
+        CMSampleBufferRef sb = NULL;
+        err = CMBlockBufferCreateWithMemoryBlock(NULL, NULL, l, NULL, NULL, 0, l, 0, &bb);
+        if (!err) err = CMBlockBufferReplaceDataBytes(p, bb, 0, l);
+        CMSampleTimingInfo ti = { CMTimeMake(1, 30), CMTimeMake(poc, 30), CMTimeMake(k, 30) };
+        size_t ssz = l;
+        if (!err) err = CMSampleBufferCreateReady(NULL, bb, fd, 1, 1, &ti, 1, &ssz, &sb);
+        if (!err) VTDecompressionSessionDecodeFrame(session, sb, 0, NULL, NULL);
+        if (sb) CFRelease(sb);
+        if (bb) CFRelease(bb);
+        p += l;
+    }
+    VTDecompressionSessionWaitForAsynchronousFrames(session);
+    double ms = (CFAbsoluteTimeGetCurrent() - t0) * 1000.0 / MAX(ns, 1u);
+    VTDecompressionSessionInvalidate(session);
+    CFRelease(session);
+    CFRelease(fd);
+    uint32_t nh = 0;
+    RD32(nh);
+    qsort(fr->frames, fr->n, sizeof fr->frames[0], VMByPts);
+    int ok = 0;
+    for (uint32_t i = 0; i < nh && i < (uint32_t)fr->n && p + 8 <= end; i++, p += 8) {
+        uint64_t h;
+        memcpy(&h, p, 8);
+        ok += !fr->frames[i].status && fr->frames[i].hash == h;
+    }
+    uint32_t w = 0, hgt = 0;
+    if (p + (nh > (uint32_t)fr->n ? (nh - fr->n) * 8 : 0) + 8 <= end) {
+        p += nh > (uint32_t)fr->n ? (nh - fr->n) * 8 : 0;
+        RD32(w); RD32(hgt);
+    }
+#undef RD32
+    free(fr);
+    BOOL hw = VMCount(VMVivaVTLines(), @"] create ") > creates0;
+    return [NSString stringWithFormat:@"%@ %ux%u: %d/%u bit-exact, %.1f ms/frame, %@", label, w, hgt, ok, nh, ms,
+            hw ? @"hardware (VDEC)" : @"software (decoder di iOS)"];
+}
+
+static NSString *VMRunVideoTest(void) {
+    NSArray *clips = @[@[@"h264-320", @"H.264 High, B a piramide"], @[@"h264-720p", @"H.264 High 720p"],
+                       @[@"hevc-320", @"HEVC Main, B a piramide"], @[@"hevc10-320", @"HEVC Main 10"]];
+    NSMutableArray *lines = [NSMutableArray array];
+    for (NSArray *c in clips) [lines addObject:VMRunVideoClip(c[0], c[1])];
+    return [lines componentsJoinedByString:@"\n"];
+}
+
+// "Attivo in mediaserverd (pid N, dalle hh:mm:ss)" from the vivavt log, plus whether the binary loads it.
+static NSString *VMVideoState(void) {
+    NSData *msd = [NSData dataWithContentsOfFile:@"/usr/sbin/mediaserverd" options:NSDataReadingMappedIfSafe error:nil];
+    BOOL patched = msd && [msd rangeOfData:[@"/var/jb/usr/lib/libvivavt.dylib" dataUsingEncoding:NSUTF8StringEncoding]
+                                   options:0 range:NSMakeRange(0, msd.length)].location != NSNotFound;
+    BOOL dylib = [NSFileManager.defaultManager fileExistsAtPath:@"/var/jb/usr/lib/libvivavt.dylib"];
+    if (!patched) return @"mediaserverd originale: VideoToolbox decodifica in software (vdec vt/msd.sh per installarlo)";
+    if (!dylib) return @"mediaserverd modificato ma libvivavt.dylib è spenta (vt-msd.sh on)";
+    NSString *loaded = nil;
+    NSUInteger creates = 0, errors = 0;
+    for (NSString *l in VMVivaVTLines()) {
+        if ([l containsString:@"loaded into mediaserverd"]) { loaded = l; creates = 0; errors = 0; }
+        if ([l containsString:@"] create "]) creates++;
+        if ([l containsString:@"error"]) errors++;
+    }
+    if (!loaded) return @"libvivavt installata, non ancora caricata da mediaserverd (log vuoto)";
+    NSArray *w = [loaded componentsSeparatedByString:@" "];
+    return [NSString stringWithFormat:@"Attivo in mediaserverd %@ dalle %@: %lu sessioni, %lu errori", w.count > 1 ? w[1] : @"",
+            w.firstObject, (unsigned long)creates, (unsigned long)errors];
+}
+
 // ---- Screen -------------------------------------------------------------------------------------------------------------
 
 enum { SecState, SecNext, SecScaler, SecJpeg, SecMPS, SecVideo, SecCount };
@@ -299,7 +443,8 @@ enum { SecState, SecNext, SecScaler, SecJpeg, SecMPS, SecVideo, SecCount };
     NSMutableArray<NSString *> *_next;              // next boot tokens
     NSString *_nextSource, *_nextSaved;
     VMAccelTestResult *_scalerTest, *_jpegTest;
-    NSString *_mpsOutput;
+    NSString *_mpsOutput, *_videoOutput;
+    NSDictionary *_vdec;                            // VivaVDEC registry properties (nil: not published)
     BOOL _running;
 }
 
@@ -323,6 +468,7 @@ enum { SecState, SecNext, SecScaler, SecJpeg, SecMPS, SecVideo, SecCount };
 - (void)reload {
     _scaler = VMServiceProperties("AppleM2ScalerCSCDriver");
     _jpeg = VMServiceProperties("AppleJPEGDriver");
+    _vdec = VMServiceProperties("VivaVDEC");
     _bootargs = [VMSystem sysctlString:"kern.bootargs"] ?: @"";
     VMRunHelper(@[@"bootargs-get"], nil, ^(int status, NSString *out) {
         NSArray *lines = [out componentsSeparatedByString:@"\n"];
@@ -376,14 +522,14 @@ static NSString *VMArg(NSArray<NSString *> *tokens, NSString *key) {
     case SecScaler: return @"Test scaler (sorgente · riferimento CPU · servizio)";
     case SecJpeg: return @"Test JPEG (sorgente · JPEG decodificato)";
     case SecMPS: return @"MetalPerformanceShaders su MaliMetal";
-    default: return @"Video";
+    default: return @"Video (VDEC, decodifica hardware)";
     }
 }
 
 - (NSString *)tableView:(UITableView *)tv titleForFooterInSection:(NSInteger)s {
     switch (s) {
     case SecNext: return @"Scaler: 1 = CPU nel kernel, 2 = motori MDP (con ripiego CPU). Con lo scaler pubblicato VideoToolbox gli manda tutte le sue conversioni: i formati spenti vengono rifiutati e lui ripiega da solo. Le modifiche valgono dopo il riavvio.";
-    case SecVideo: return @"Il decoder/encoder video di MT6781 è programmato dal demone proprietario vpud di Android (il kernel Linux gli inoltra solo messaggi): senza quel codice non c'è un driver possibile. VideoToolbox continua a decodificare in software.";
+    case SecVideo: return @"Decoder clean-room (repo vdec): la libreria genera il programma di registri di ogni immagine, il kernel (VivaVDEC) lo esegue sul VDEC. iOS decodifica ogni sessione VideoToolbox dentro mediaserverd: lì è caricato il nostro decoder, scelto per H.264 e HEVC (Main, Main 10). Quello che il VDEC non sa fare resta al decoder software di iOS. L'encoder video (venc) non è ancora fatto.";
     default: return nil;
     }
 }
@@ -395,7 +541,7 @@ static NSString *VMArg(NSArray<NSString *> *tokens, NSString *key) {
     case SecScaler: return _scalerTest ? 3 : 2;
     case SecJpeg: return _jpegTest ? 2 : 1;
     case SecMPS: return _mpsOutput ? 2 : 1;
-    default: return 1;
+    default: return _videoOutput ? 4 : 3;
     }
 }
 
@@ -520,7 +666,20 @@ static NSString *VMStatsLine(NSDictionary *stats, NSArray<NSString *> *keys) {
         c.detailTextLabel.font = VMMono(11);
         return c;
     }
-    return [self subtitleCell:@"Decoder/encoder video (AppleAVD/AVE2)" detail:@"Non disponibile su MT6781"];
+    if (ip.row == 0)
+        return [self subtitleCell:@"Decoder video hardware (VivaVDEC)"
+                           detail:_vdec ? @"Pubblicato: H.264 (High, fino a 4:2:0 8 bit) e HEVC (Main, Main 10)"
+                                        : @"Non pubblicato (kernel senza la patch 0213)"];
+    if (ip.row == 1) return [self subtitleCell:@"VideoToolbox" detail:VMVideoState()];
+    if (ip.row == 2) {
+        UITableViewCell *c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+        c.textLabel.text = _running ? @"In esecuzione…" : @"Prova di decodifica (H.264, HEVC, HEVC 10 bit)";
+        c.textLabel.textColor = self.view.tintColor;
+        return c;
+    }
+    UITableViewCell *c = [self subtitleCell:@"Risultato" detail:_videoOutput];
+    c.detailTextLabel.font = VMMono(11);
+    return c;
 }
 
 - (void)scalerMode:(UISegmentedControl *)seg {
@@ -529,7 +688,8 @@ static NSString *VMStatsLine(NSDictionary *stats, NSArray<NSString *> *keys) {
 
 - (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
     [tv deselectRowAtIndexPath:ip animated:YES];
-    if (_running || ip.row > (ip.section == SecScaler ? 1 : 0)) return;
+    if (_running || ip.row > (ip.section == SecScaler ? 1 : ip.section == SecVideo ? 2 : 0)) return;
+    if (ip.section == SecVideo && ip.row != 2) return;
     if (ip.section == SecScaler) {
         _running = YES;
         BOOL nv12 = ip.row == 1;
@@ -552,6 +712,17 @@ static NSString *VMStatsLine(NSDictionary *stats, NSArray<NSString *> *keys) {
                 self->_running = NO;
                 self->_jpegTest = r;
                 self->_jpeg = VMServiceProperties("AppleJPEGDriver");
+                [tv reloadData];
+            });
+        });
+    } else if (ip.section == SecVideo) {
+        _running = YES;
+        [tv reloadSections:[NSIndexSet indexSetWithIndex:SecVideo] withRowAnimation:UITableViewRowAnimationNone];
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            NSString *r = VMRunVideoTest();
+            dispatch_async(dispatch_get_main_queue(), ^{
+                self->_running = NO;
+                self->_videoOutput = r;
                 [tv reloadData];
             });
         });

@@ -48,6 +48,7 @@ cp "$HERE/tweak/vi-sb.sh" "$APP/vi-sb.sh"
 cp "$HERE/Info.plist" "$APP/Info.plist"
 plutil -convert binary1 "$APP/Info.plist"
 cp "$HERE"/Resources/*.json "$HERE"/Resources/icons/*.png "$APP/"
+cp "$HERE"/Resources/video/*.vtclip "$APP/"     # Acceleratori: video decoder test clips (vdec tools/mkvtclip.py)
 printf 'APPL????' > "$APP/PkgInfo"
 rm -rf "$OUT"/*.dSYM; mv "$APP"/*.dSYM "$OUT"/ 2>/dev/null || true   # clang -g puts them next to the binaries
 codesign -s - -f "$APP/vmhelper"
