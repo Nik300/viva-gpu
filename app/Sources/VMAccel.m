@@ -355,7 +355,7 @@ static NSString *VMRunVideoClip(NSString *name, NSString *label) {
         ? CMVideoFormatDescriptionCreateFromHEVCParameterSets(NULL, nps, ps, psl, 4, NULL, &fd)
         : CMVideoFormatDescriptionCreateFromH264ParameterSets(NULL, nps, ps, psl, 4, &fd);
     if (err) return [NSString stringWithFormat:@"%@: format description %d", label, (int)err];
-    NSUInteger creates0 = VMCount(VMVivaVTLines(), @"] create ");
+    NSUInteger creates0 = VMCount(VMVivaVTLines(), @"] layout 0:");
     VMFrames *fr = calloc(1, sizeof *fr);
     VTDecompressionOutputCallbackRecord cb = { VMOnFrame, fr };
     VTDecompressionSessionRef session = NULL;
@@ -399,7 +399,7 @@ static NSString *VMRunVideoClip(NSString *name, NSString *label) {
     }
 #undef RD32
     free(fr);
-    BOOL hw = VMCount(VMVivaVTLines(), @"] create ") > creates0;
+    BOOL hw = VMCount(VMVivaVTLines(), @"] layout 0:") > creates0;
     return [NSString stringWithFormat:@"%@ %ux%u: %d/%u bit-exact, %.1f ms/frame, %@", label, w, hgt, ok, nh, ms,
             hw ? @"hardware (VDEC)" : @"software (decoder di iOS)"];
 }
@@ -424,7 +424,7 @@ static NSString *VMVideoState(void) {
     NSUInteger creates = 0, errors = 0;
     for (NSString *l in VMVivaVTLines()) {
         if ([l containsString:@"loaded into mediaserverd"]) { loaded = l; creates = 0; errors = 0; }
-        if ([l containsString:@"] create "]) creates++;
+        if ([l containsString:@"] layout 0:"]) creates++;      // a session the VDEC accepted
         if ([l containsString:@"error"]) errors++;
     }
     if (!loaded) return @"libvivavt installata, non ancora caricata da mediaserverd (log vuoto)";
