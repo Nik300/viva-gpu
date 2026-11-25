@@ -593,9 +593,10 @@ static const char kB9a[] = FS_VS
     "  Cov o; o.c = half2(7.0h, in ? half(k.x) : half(k.y)); return o; }\n"
     "struct Out { float4 c0 [[color(0)]]; half2 c1 [[color(1)]]; };\n"
     "fragment Out fs(V v [[stage_in]], half2 cov [[color(1)]]) { Out o; o.c0 = float4(cov.y, cov.x, 0, 1); o.c1 = half2(0); return o; }\n";
-// variants: 0 = ADD one+one mask G (RenderBox), 1 = ADD mask RG, 2 = ADD on RGBA16Float mask G, 3 = MAX mask G, 4 = no blending
+// variants: 0 = ADD one+one mask G (RenderBox), 1 = ADD mask RG, 2 = ADD on RGBA16Float mask G, 3 = MAX mask G, 4 = no blending,
+// 5 = no blending into RGBA8Unorm (CoreAnimation's clip mask format), 6 = as 4 with a private (not memoryless) colour 1
 static int g_b9_variant;
-static MTLPixelFormat b9_format(void) { return g_b9_variant == 2 ? MTLPixelFormatRGBA16Float : MTLPixelFormatRG16Float; }
+static MTLPixelFormat b9_format(void) { return g_b9_variant == 2 ? MTLPixelFormatRGBA16Float : g_b9_variant == 5 ? MTLPixelFormatRGBA8Unorm : MTLPixelFormatRG16Float; }
 static id extra_B9v(ISAInputs *in, NSError **err) {
     MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
     d.vertexFunction = [in.library newFunctionWithName:@"vs"];
@@ -604,7 +605,7 @@ static id extra_B9v(ISAInputs *in, NSError **err) {
     d.colorAttachments[0].writeMask = MTLColorWriteMaskNone;
     d.colorAttachments[1].pixelFormat = b9_format();
     d.colorAttachments[1].writeMask = g_b9_variant == 1 ? (MTLColorWriteMaskRed | MTLColorWriteMaskGreen) : MTLColorWriteMaskGreen;
-    d.colorAttachments[1].blendingEnabled = g_b9_variant != 4;
+    d.colorAttachments[1].blendingEnabled = g_b9_variant < 4;
     MTLBlendOperation op = g_b9_variant == 3 ? MTLBlendOperationMax : MTLBlendOperationAdd;
     d.colorAttachments[1].rgbBlendOperation = d.colorAttachments[1].alphaBlendOperation = op;
     d.colorAttachments[1].sourceRGBBlendFactor = d.colorAttachments[1].destinationRGBBlendFactor = MTLBlendFactorOne;
@@ -616,12 +617,14 @@ static id extra_B9b(ISAInputs *in, NSError **err) { g_b9_variant = 1; return ext
 static id extra_B9c(ISAInputs *in, NSError **err) { g_b9_variant = 2; return extra_B9v(in, err); }
 static id extra_B9d(ISAInputs *in, NSError **err) { g_b9_variant = 3; return extra_B9v(in, err); }
 static id extra_B9e(ISAInputs *in, NSError **err) { g_b9_variant = 4; return extra_B9v(in, err); }
+static id extra_B9f(ISAInputs *in, NSError **err) { g_b9_variant = 5; return extra_B9v(in, err); }
+static id extra_B9g(ISAInputs *in, NSError **err) { g_b9_variant = 6; return extra_B9v(in, err); }
 static void pipe_B9a(MTLRenderPipelineDescriptor *d) { d.colorAttachments[1].pixelFormat = b9_format(); }
 static void pass_B9a(MTLRenderPassDescriptor *p, ISAInputs *in) {
     MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:b9_format() width:64 height:64 mipmapped:NO];
     td.usage = MTLTextureUsageRenderTarget;
 #if TARGET_OS_IPHONE
-    td.storageMode = MTLStorageModeMemoryless;
+    td.storageMode = g_b9_variant == 6 ? MTLStorageModePrivate : MTLStorageModeMemoryless;
 #else
     td.storageMode = MTLStorageModePrivate;
 #endif
@@ -633,6 +636,10 @@ static void pass_B9a(MTLRenderPassDescriptor *p, ISAInputs *in) {
 static void draw_B9a(id<MTLRenderCommandEncoder> e, ISAInputs *in, const isa_case *c, int n) {
     for (int i = 0; i < n; i++) {
         float k[3][4] = { { 0.25f, 0.25f, 0, 64 }, { 0.75f, 0, 0, 40 }, { -0.5f, 0, 1, 32 } };
+        if (g_b9_variant >= 4) {   // no blending: the last draw wins, make it a positive one
+            float r[3][4] = { { -0.5f, 0, 1, 32 }, { 0.25f, 0.25f, 0, 64 }, { 0.75f, 0, 0, 40 } };
+            memcpy(k, r, sizeof k);
+        }
         [e setRenderPipelineState:in.extra];
         for (int j = 0; j < 3; j++) {
             [e setFragmentBytes:k[j] length:sizeof k[j] atIndex:0];
@@ -652,13 +659,17 @@ static void ref_B9d(const isa_case *c, const double *g, double *out) {   // MAX 
     PIX(c) set4(OUT(x, y), x < 40 ? 0.75 : 0.25, 0, 0, 1);
 }
 static void ref_B9e(const isa_case *c, const double *g, double *out) {   // the last draw wins
-    PIX(c) set4(OUT(x, y), y < 32 ? -0.5 : 0, 0, 0, 1);
+    PIX(c) set4(OUT(x, y), x < 40 ? 0.75 : 0, 0, 0, 1);
 }
 #define kB9b kB9a
 #define kB9c kB9a
 #define kB9d kB9a
 #define kB9e kB9a
 #define ref_B9c ref_B9a
+#define kB9f kB9a
+#define kB9g kB9a
+#define ref_B9g ref_B9e
+#define ref_B9f ref_B9e
 
 // ==== C: memory ===========================================================================================================
 
@@ -1953,6 +1964,10 @@ const isa_case isa_cases[] = {
      .feats = "E5,B7", .tol = 2e-3, .vis_hi = 1},
     {FR(B9e), .id = "B9", .title = "Diagnosi B9a: senza blending", .extra = extra_B9e, .pipe = pipe_B9a, .pass = pass_B9a, .draw = draw_B9a,
      .feats = "E5,B7", .tol = 2e-3, .vis_hi = 1},
+    {FR(B9f), .id = "B9", .title = "Diagnosi B9a: RGBA8Unorm senza blending", .extra = extra_B9f, .pipe = pipe_B9a, .pass = pass_B9a,
+     .draw = draw_B9a, .feats = "E5,B7", .tol = 1e-2, .vis_hi = 1},
+    {FR(B9g), .id = "B9", .title = "Diagnosi B9a: colour 1 privato (non memoryless), senza blending", .extra = extra_B9g, .pipe = pipe_B9a,
+     .pass = pass_B9a, .draw = draw_B9a, .feats = "E5,B7", .tol = 2e-3, .vis_hi = 1},
     {CS(B10, ISA_OUT_U32), .title = "Valori di sistema compute (griglia, gruppi, simdgroup, quad)", .groups = true},
     {CS(B11, ISA_OUT_F32), .title = "dispatchThreads non uniforme (guardia) 61×59", .gw = 61, .gh = 59, .vis_hi = 64},
     // C: memory
