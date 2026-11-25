@@ -291,6 +291,45 @@ static sv *half_native(S *t, int op, unsigned n, unsigned nargs, sv **args)
     return r;
 }
 
+// half a / b in packed form: FRCP.f16 per lane of b (16-bit result, upper half zero), the two lanes put together,
+// one FMUL.v2f16 per word. Before: F16_TO_F32 + FRCP.f32 + FMA + V2F32_TO_V2F16 per component (CoreAnimation's
+// fixed_frag_lph_cph unpremultiplies with it). Mesa's 16-bit frcp is FRCP.f16 too. VMG_ISA_NO_HALF_DIV=1: the f32 way.
+static vi_ref frcp16(S *t, vi_ref x, unsigned lane)
+{
+    vi_ref d = sel_tmp(t);
+    vi_instr *I = E(t, VA_FRCP_F16);
+    I->dest = d; I->src[0] = x; vi_set(I, VAF_lane0, lane);
+    return d;
+}
+
+static sv *half_div(S *t, unsigned n, sv **args)
+{
+    sv *a = args[0], *b = args[1];
+    if (a->bits != 16 || b->bits != 16 || getenv("VMG_ISA_NO_HALF_DIV")) return NULL;
+    sel_use(t, VMG_ISA_E5);
+    sv *r = sv_val(t, 16, n);
+    for (unsigned w = 0; w < (n + 1) / 2; w++) {
+        bool bcast = b->ncomp == 1, two = 2 * w + 1 < n;
+        vi_ref bw = sv_word(t, b, bcast ? 0 : w);
+        vi_ref rc = frcp16(t, bw, 0);
+        bool rc_pair = false;
+        if (two && !bcast) {
+            vi_ref r1 = frcp16(t, bw, 1);
+            vi_ref m = sel_tmp(t);
+            vi_instr *M = E(t, VA_MKVEC_V2I16);
+            M->dest = m; M->src[0] = rc; M->src[1] = r1; vi_set(M, VAF_lane0, 0); vi_set(M, VAF_lane1, 0);
+            rc = m; rc_pair = true;
+        }
+        vi_instr *I = E(t, VA_FMUL_V2F16);
+        I->dest = vi_vreg(r->vreg, w, 1);
+        I->src[0] = sv_word(t, a, a->ncomp == 1 ? 0 : w);
+        vi_set(I, VAF_swz0, a->ncomp == 1 ? VA_SWIZ_M_H00 : VA_SWIZ_M_H01);
+        I->src[1] = rc;
+        vi_set(I, VAF_swz1, rc_pair ? VA_SWIZ_M_H01 : VA_SWIZ_M_H00);
+    }
+    return r;
+}
+
 static sv *float_op(S *t, int op, unsigned nargs, sv **args)
 {
     unsigned bits = args[0]->bits, n = 1;
@@ -298,7 +337,7 @@ static sv *float_op(S *t, int op, unsigned nargs, sv **args)
     if (bits == 64) SFAIL(t, "double precision arithmetic");
     if (bits == 16) {
         USE(t, E5);
-        sv *r = half_native(t, op, n, nargs, args);
+        sv *r = op == OP_FDIV ? half_div(t, n, args) : half_native(t, op, n, nargs, args);
         if (r || t->error) return r;
     }
     return map32(t, bits, true, n, nargs, args, X_F32, fop, op);
@@ -854,6 +893,19 @@ static vi_ref comp_raw(S *t, sv *v, unsigned c)
     return sv_comp32(t, v, c, X_ZEXT);
 }
 
+// A vector whose words were just put together from separate halves (MKVEC in this block): the per-element CSEL chain
+// reads the halves directly (the MKVECs then go away), choosing whole words would keep them.
+static bool built_by_mkvec(S *t, sv *v)
+{
+    unsigned nw = (v->ncomp + 1) / 2, seen = 0;
+    vi_foreach_instr_rev(t->b.block, I) {
+        if (I->dest.kind != VI_VREG || I->dest.value != v->vreg) continue;
+        if (I->op == VA_MKVEC_V2I16) return true;
+        if (++seen >= nw) break;
+    }
+    return false;
+}
+
 sv *sel_extract_element(S *t, LLVMValueRef inst)
 {
     USE(t, E4);
@@ -865,6 +917,22 @@ sv *sel_extract_element(S *t, LLVMValueRef inst)
         return sv_scalar(t, v, c);
     }
     if (v->bits == 64) SFAIL(t, "dynamic extract of a 64-bit vector");
+    if (v->bits == 16 && !getenv("VMG_ISA_NO_SEL16") && !v->is_const && !built_by_mkvec(t, v)) {
+        // 16-bit elements: choose the word (index >> 1) with a CSEL chain on whole words, then shift the half down by
+        // (index & 1) * 16. Before: a U16_TO_U32 per element and a CSEL per element. VMG_ISA_NO_SEL16=1: that way.
+        vi_ref idx = i->bits == 64 ? sv_word(t, i, 0) : sv_comp32(t, i, 0, X_ZEXT);
+        unsigned nw = (v->ncomp + 1) / 2;
+        vi_ref w = sv_word(t, v, 0);
+        if (nw > 1) {
+            vi_ref wi = shift(t, VA_RSHIFT_OR_I32, idx, vi_imm(1));
+            for (unsigned k = 1; k < nw; k++) w = sel_csel(t, VA_CMPF_M_EQ, VA_CSEL_U32, wi, vi_imm(k), sv_word(t, v, k), w);
+        }
+        vi_ref sh = sel_tmp(t);
+        vi_instr *I = E(t, VA_LSHIFT_AND_I32);
+        I->dest = sh; I->src[0] = idx; I->src[1] = vi_imm(4); I->src[2] = vi_imm(0x10);
+        vi_ref r = shift(t, VA_RSHIFT_OR_I32, w, sh);
+        return sv_from_comps32(t, 16, 1, &r);
+    }
     // CSEL chain on the index
     vi_ref r = comp_raw(t, v, 0);
     for (unsigned c = 1; c < v->ncomp; c++)

@@ -204,7 +204,12 @@ typedef struct LLVMOpaqueAttributeRef *LLVMAttributeRef;
     X(LLVMValueRef, LLVMBuildNeg, (LLVMBuilderRef, LLVMValueRef, const char *)) \
     X(LLVMTypeRef, LLVMInt8TypeInContext, (LLVMContextRef)) \
     X(LLVMTypeRef, LLVMPointerType, (LLVMTypeRef, unsigned)) \
-    X(LLVMValueRef, LLVMConstNull, (LLVMTypeRef))
+    X(LLVMValueRef, LLVMConstNull, (LLVMTypeRef)) \
+    /* split_sincos: a declaration and a call (iOS 16: LLVMBuildCall; newer LLVMs: LLVMBuildCall2) */ \
+    X(LLVMTypeRef, LLVMFunctionType, (LLVMTypeRef, LLVMTypeRef *, unsigned, LLVMBool)) \
+    X(LLVMValueRef, LLVMAddFunction, (LLVMModuleRef, const char *, LLVMTypeRef)) \
+    X(LLVMValueRef, LLVMBuildCall, (LLVMBuilderRef, LLVMValueRef, LLVMValueRef *, unsigned, const char *)) \
+    X(LLVMValueRef, LLVMBuildCall2, (LLVMBuilderRef, LLVMTypeRef, LLVMValueRef, LLVMValueRef *, unsigned, const char *))
 
 #define TS_LLVM_DECLARE(ret, name, args) extern ret (*ts_##name) args;
 TS_LLVM_FUNCS(TS_LLVM_DECLARE)

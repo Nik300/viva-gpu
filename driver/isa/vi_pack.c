@@ -29,19 +29,57 @@ static int fau_slot(const vi_ref *r)
 
 // Immediates: hardware table, else a register (IADD_IMM / MOV_IMM before the instruction). An instruction reads at
 // most one 64-bit FAU slot (user pair or special entry, one page): other FAU sources are moved to registers.
+// Buffer loads (LD_PKA) take a constant from the FAU too, as Mesa's do (the buffer handle: `LD_PKA ..., u4.w1`);
+// VMG_ISA_NO_MSG_FAU=1 keeps them on registers. A constant moved to a register is moved once per block and reused
+// (VMG_ISA_NO_CSE=1: once per use).
+static bool msg_fau_ok(const vi_instr *I)
+{
+    static int off = -1;
+    if (off < 0) off = getenv("VMG_ISA_NO_MSG_FAU") != NULL;
+    return !off && I->op >= VA_LD_PKA_I128 && I->op <= VA_LD_PKA_I96;
+}
+
+// 32-bit shifts whose amount (src1) is read through a byte lane. VMG_ISA_NO_SHIFT_LUT=1: amounts in registers.
+static bool shift_lut_ok(const vi_instr *I)
+{
+    static int off = -1;
+    if (off < 0) off = getenv("VMG_ISA_NO_SHIFT_LUT") != NULL;
+    if (off) return false;
+    switch (I->op) {
+    case VA_LSHIFT_OR_I32: case VA_LSHIFT_AND_I32: case VA_LSHIFT_XOR_I32: case VA_RSHIFT_OR_I32: case VA_RSHIFT_AND_I32:
+    case VA_RSHIFT_XOR_I32: case VA_ARSHIFT_OR_I32: case VA_ARSHIFT_AND_I32: case VA_ARSHIFT_XOR_I32:
+        return !I->f.set[VAF_lanes1] || I->f.v[VAF_lanes1] == VA_SHIFT_BITWISE_I32_LANES_M_B0;
+    default:
+        return false;
+    }
+}
+
 bool vi_lower_constants(vi_shader *s)
 {
+    static int no_reuse = -1;
+    if (no_reuse < 0) no_reuse = getenv("VMG_ISA_NO_CSE") != NULL;
+    enum { NCACHE = 64 };
+    uint32_t cval[NCACHE], cvreg[NCACHE];
+    unsigned ncache = 0;
+    vi_block *cblk = NULL;
     vi_foreach_block(s, blk) vi_foreach_instr_safe(blk, I) {
+        if (blk != cblk) { cblk = blk; ncache = 0; }
         if (I->op == VA_IADD_IMM_I32 || I->op == VA_MOV_IMM_I32) continue;
         int slot = -1;
         vi_ref *refs[5] = { &I->src[0], &I->src[1], &I->src[2], &I->src[3], &I->sr };
         for (unsigned k = 0; k < 4; k++) {
             vi_ref *r = refs[k];
             if (r->kind == VI_IMM) {
+                // shift amounts 0-31: a byte of the table entries 0x03020100..0x1F1E1D1C (Mesa: `0x7060504.b00`)
+                if (k == 1 && shift_lut_ok(I) && r->value < 32) {
+                    vi_set(I, VAF_lanes1, VA_SHIFT_BITWISE_I32_LANES_M_B0 + (r->value & 3));
+                    r->kind = VI_TABLE; r->value = 8 + r->value / 4;
+                    continue;
+                }
                 int t = vi_table_index(r->value);
                 if (t >= 0 && r->count <= 1) { r->kind = VI_TABLE; r->value = (uint32_t)t; continue; }
                 // a uniform constant (FAU), when this ALU instruction reads no other uniform (one 64-bit slot each)
-                if (s->fau && !vi_is_msg(I) && I->op != VA_BLEND && slot < 0 && r->count <= 1) {
+                if (s->fau && (!vi_is_msg(I) || msg_fau_ok(I)) && I->op != VA_BLEND && slot < 0 && r->count <= 1) {
                     bool other = false;
                     for (unsigned q = k + 1; q < 4; q++) if (fau_slot(refs[q]) >= 0 || refs[q]->kind == VI_IMM) other = true;
                     if (!other) {
@@ -52,11 +90,15 @@ bool vi_lower_constants(vi_shader *s)
                         if (w >= 0) { *r = vi_fau((unsigned)w); slot = fau_slot(r); continue; }
                     }
                 }
+                int hit = -1;
+                if (!no_reuse) for (unsigned i = 0; i < ncache; i++) if (cval[i] == r->value) { hit = (int)i; break; }
+                if (hit >= 0) { *r = vi_vreg(cvreg[hit], 0, 1); continue; }
                 vi_builder b = { s, blk, I };
                 uint32_t v = vi_new_vreg(s, 1);
                 vi_instr *M = vi_emit(&b, VA_MOV_IMM_I32);
                 M->dest = vi_vreg(v, 0, 1);
                 vi_set(M, VAF_imm1w, r->value);
+                if (ncache < NCACHE) { cval[ncache] = r->value; cvreg[ncache] = v; ncache++; }
                 *r = vi_vreg(v, 0, 1);
                 continue;
             }

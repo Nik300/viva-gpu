@@ -202,3 +202,28 @@ Rigenerare il file dopo un giro di test: `driver/tests/gen_isa_verified.py`.
 Bug del driver esistente trovati lungo la strada: texture buffer dimensionati in texel invece che in byte (overflow
 dell'heap a ogni copia: corretto in `texture_template`); puntatori a sampler/texture/buffer liberati rimasti legati tra un
 command buffer e l'altro (corretto: `vmg_unbind_object` al rilascio); `phase3`/`translate` crashano già a HEAD con llvmpipe sul Mac.
+
+## Prestazioni (2026-11-25): CSE, costanti, load vettoriali, half
+
+Misura: corpus reale di 190 input catturati sul telefono (`VMG_DUMP_AIR`, home, App Library, Centro di Controllo,
+cartelle, app) più QuartzCore e RenderBox di iOS 16 (function constant a zero), istruzioni ISA contro le statistiche
+shaderdb di Mesa sugli stessi input. Lo shader dominante è `fixed_frag_lph_cph` (107 varianti).
+
+| Modifica | File | Toggle (comportamento vecchio) |
+|---|---|---|
+| CSE a dominanza (anche dentro `simplify`); stesso blocco anche su registri phi; load di descrittori, pool e push window sempre, load di buffer solo se lo shader non scrive buffer | `vi_opt.c` | `VMG_ISA_NO_CSE=1` |
+| Costanti in registro una volta per blocco | `vi_pack.c` | `VMG_ISA_NO_CSE=1` |
+| Costante (handle del buffer) dalla FAU anche per LD_PKA, come Mesa | `vi_pack.c` | `VMG_ISA_NO_MSG_FAU=1` |
+| Quantità di shift 0-31 come byte della tabella costanti (`0x3020100.b1`) | `vi_pack.c` | `VMG_ISA_NO_SHIFT_LUT=1` |
+| LD_PKA consecutivi a offset costanti → un LD_PKA.i64/i96/i128 | `vi_opt.c` | `VMG_ISA_NO_VECLOAD=1` |
+| Divisione half: FRCP.f16 per lane + FMUL.v2f16 (test `isatest` E5 "Divisione half") | `vi_sel_alu.c` | `VMG_ISA_NO_HALF_DIV=1` |
+| Indice dinamico su vettori a 16 bit impacchettati: CSEL sulle parole + shift della metà (test E4 "Indice dinamico") | `vi_sel_alu.c` | `VMG_ISA_NO_SEL16=1` |
+| Catene a 8 bit (MKVEC.v2i8 / v2i16 / U8_TO_U32), estensioni di valori già estesi, x + -0, x * 1 + -0, CSEL con rami uguali o confronto costante, confronti e conversioni di costanti, lane di FRCP/FRSQ.f16 | `vi_fold.c` | `VMG_ISA_NO_FOLD=1` |
+| `air.sincos` / `air.fast_sincos` (seno restituito, coseno per puntatore) divisi in sin + cos + store in A1: prima falliva su entrambi i percorsi (3 shader su 190, pipeline non creata) (test E6 "sincos") | `vmg_air.c` | – |
+
+Risultati (istruzioni ISA / Mesa): corpus reale **1,193 → 1,061** (`fixed_frag_lph_cph` 1,30 → 1,13), QuartzCore
+**1,189 → 1,007**, RenderBox **1,783 → 1,485**; 190/190, 141/141, 47/47 compilati con `VMG_ISA_STRICT=1`, anche sotto
+AddressSanitizer; `isatest -mode nir` 110 casi, 0 falliti. I toggle sono nella chiave della cache delle traduzioni.
+Da verificare sul telefono (`isatest` E4/E5/E6 con e senza toggle, giro di misure). Resta sopra Mesa RenderBox: copie
+ai punti di giunzione dei phi e spill di `uber_vertex` (allocatore lineare). `VMG_ISA_CHECK=1` segnala già prima di
+queste modifiche una lettura prima della definizione in `uber_vertex` (v30/v31).

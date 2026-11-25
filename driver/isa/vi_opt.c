@@ -256,6 +256,7 @@ static void demote_phis(vi_shader *s)
 }
 
 static bool dce_words(vi_shader *s);
+bool vi_cse(vi_shader *s);
 
 // Copy propagation, folding and dead code elimination until nothing changes.
 static void simplify(vi_shader *s)
@@ -271,6 +272,7 @@ static void simplify(vi_shader *s)
         count(s, vi, &wi);
         p |= dce(s, vi);
         if (!vi_fold_disabled()) p |= dce_words(s);
+        if (vi_cse(s)) p = true;
         if (!p) break;
     }
     free(vi); free(wi.base); free(wi.wdefs); free(wi.wdef);
@@ -377,6 +379,362 @@ static bool coalesce_copies(vi_shader *s)
     return progress;
 }
 
+// ---- Common subexpressions -------------------------------------------------------------------------------------------
+// An instruction equal to one in a dominating position (same opcode, fields and sources; sources that hold the same
+// value wherever they are read) is dropped and its readers take the earlier result. The selector emits one constant
+// move, one descriptor read, one 1/x per use (texture sizes in a blur: the same LD_PKA + conversions + FRCP twelve
+// times; buffer handles and offsets before every load), and LLVM cannot merge the AIR intrinsics behind them.
+// Loads: descriptors, the constant pool and the push window are read-only (LD_PKA without `memory`); buffer and global
+// loads only in shaders that write no buffer (stores other than the IDVS varying streams, atomics, image stores).
+// VMG_ISA_NO_CSE=1 turns it off.
+
+// Dominators (dom) and post-dominators (pdom) as bit sets over block indices.
+typedef struct domtree { unsigned n; BITSET_WORD *dom, *pdom; vi_block **blk; } domtree;
+static void compute_dom(vi_shader *s, domtree *d);
+
+static bool buffer_write(const vi_instr *I)
+{
+    switch (I->op) {
+    case VA_STORE_I8: case VA_STORE_I16: case VA_STORE_I24: case VA_STORE_I32: case VA_STORE_I48: case VA_STORE_I64:
+    case VA_STORE_I96: case VA_STORE_I128: {
+        int64_t a = I->f.set[VAF_access] ? I->f.v[VAF_access] : -1;
+        return a != VA_ACCESS_STORE_M_ISTREAM && a != VA_ACCESS_STORE_M_ESTREAM;
+    }
+    case VA_ST_CVT: case VA_ATOM_I32: case VA_ATOM_I64: case VA_ATOM_RETURN_I32: case VA_ATOM_RETURN_I64:
+    case VA_ATOM1_I32: case VA_ATOM1_I64: case VA_ATOM1_RETURN_I32: case VA_ATOM1_RETURN_I64: case VA_AXCHG_I32:
+    case VA_AXCHG_I64: case VA_ACMPXCHG_I32: case VA_ACMPXCHG_I64:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool is_load(enum va_op op)
+{
+    return (op >= VA_LD_PKA_I128 && op <= VA_LD_PKA_I96) || op == VA_LOAD_I8 || op == VA_LOAD_I16 || op == VA_LOAD_I24 ||
+           op == VA_LOAD_I32 || op == VA_LOAD_I48 || op == VA_LOAD_I64 || op == VA_LOAD_I96 || op == VA_LOAD_I128;
+}
+
+// The whole result of I as one register (dest or staging write covering every word), or ~0u.
+static uint32_t cse_result(vi_shader *s, const vi_instr *I, const vinfo *vi)
+{
+    const vi_ref *w;
+    if (I->dest.kind == VI_VREG && !I->sw.kind) w = &I->dest;
+    else if (I->sw.kind == VI_VREG && !I->dest.kind) w = &I->sw;
+    else return ~0u;
+    vi_vreg_info *info = vi_vreg_get(s, w->value);
+    if (w->word != 0 || (w->count ? w->count : 1) != info->nwords) return ~0u;
+    if (info->multi_def || info->fixed >= 0 || info->spill_temp || vi[w->value].defs != 1) return ~0u;
+    return w->value;
+}
+
+static bool cse_candidate(vi_shader *s, const vi_instr *I, bool loads_ok)
+{
+    if (side_effects(I) || I->varying || I->helpers || I->blend || I->clobber || I->target) return false;
+    if (I->op == VA_CLPER || I->op == VA_WMASK || I->f.set[VAF_dest_width]) return false;
+    if (vi_is_msg(I)) {
+        if (!is_load(I->op)) return false;
+        if (I->memory && !loads_ok) return false;
+        if (I->f.set[VAF_access]) return false;   // scratch (forced access)
+    } else if (I->memory) return false;
+    (void)s;
+    return true;
+}
+
+// Sources that hold the same value wherever they are read (1): constants, uniforms, single-definition registers. 2:
+// registers written more than once (phi variables, words written one by one): the same value only within a block
+// while nothing writes them in between. 0: fixed physical registers (preloads, blend ABI).
+static int cse_src_kind(vi_shader *s, const winfo *wi, vi_ref r)
+{
+    switch (r.kind) {
+    case VI_NONE: case VI_IMM: case VI_FAU: case VI_TABLE: case VI_SPECIAL: return 1;
+    case VI_VREG: {
+        vi_vreg_info *info = vi_vreg_get(s, r.value);
+        if (info->fixed >= 0) return 0;
+        if (info->multi_def) return 2;
+        unsigned c = r.count ? r.count : 1;
+        for (unsigned q = 0; q < c; q++) if (r.word + q >= info->nwords || wi->wdefs[wi->base[r.value] + r.word + q] != 1) return 2;
+        return 1;
+    }
+    default: return 0;
+    }
+}
+
+static bool same_ref(vi_ref a, vi_ref b)
+{
+    return a.kind == b.kind && a.value == b.value && a.word == b.word && (a.count ? a.count : 1) == (b.count ? b.count : 1);
+}
+
+static bool cse_equal(const vi_instr *a, const vi_instr *b)
+{
+    if (a->op != b->op || a->flow != b->flow || a->memory != b->memory) return false;
+    for (unsigned k = 0; k < 4; k++) if (!same_ref(a->src[k], b->src[k])) return false;
+    if (!same_ref(a->sr, b->sr)) return false;
+    if ((a->dest.kind != 0) != (b->dest.kind != 0) || (a->sw.kind != 0) != (b->sw.kind != 0)) return false;
+    if ((a->dest.count ? a->dest.count : 1) != (b->dest.count ? b->dest.count : 1)) return false;
+    if ((a->sw.count ? a->sw.count : 1) != (b->sw.count ? b->sw.count : 1)) return false;
+    for (unsigned f = 0; f < VAF_COUNT; f++) {
+        if (a->f.set[f] != b->f.set[f]) return false;
+        if (a->f.set[f] && a->f.v[f] != b->f.v[f]) return false;
+    }
+    return true;
+}
+
+static uint32_t cse_hash(const vi_instr *I)
+{
+    uint32_t h = 2166136261u;
+#define MIX(x) (h = (h ^ (uint32_t)(x)) * 16777619u)
+    MIX(I->op);
+    for (unsigned k = 0; k < 4; k++) { MIX(I->src[k].kind); MIX(I->src[k].value); MIX(I->src[k].word); }
+    MIX(I->sr.kind); MIX(I->sr.value);
+    for (unsigned f = 0; f < VAF_COUNT; f++) if (I->f.set[f]) { MIX(f); MIX(I->f.v[f]); }
+#undef MIX
+    return h;
+}
+
+static void cse_rename(vi_ref *r, const uint32_t *map, unsigned n)
+{
+    if (r->kind == VI_VREG && r->value < n && map[r->value] != r->value) r->value = map[r->value];
+}
+
+bool vi_cse(vi_shader *s);
+bool vi_cse(vi_shader *s)
+{
+    if (getenv("VMG_ISA_NO_CSE")) return false;
+    unsigned n = vi_num_vregs(s), words = 0;
+    for (unsigned v = 0; v < n; v++) words += vi_vreg_get(s, v)->nwords;
+    vinfo *vi = malloc((n ? n : 1) * sizeof *vi);
+    winfo wi = { malloc((n ? n : 1) * sizeof(unsigned)), malloc((words ? words : 1) * sizeof(unsigned)), malloc((words ? words : 1) * sizeof(vi_instr *)) };
+    count(s, vi, &wi);
+    bool loads_ok = true;
+    vi_foreach_block(s, blk) vi_foreach_instr(blk, I) if (buffer_write(I)) loads_ok = false;
+
+    // reverse post-order from the entry: every dominator comes before the blocks it dominates
+    unsigned nb = 0;
+    vi_foreach_block(s, b) nb = MAX2(nb, b->index + 1);
+    vi_block **order = malloc((nb + 1) * sizeof *order), **stack = malloc((nb + 1) * sizeof *stack);
+    unsigned *next = calloc(nb + 1, sizeof *next);
+    bool *seen = calloc(nb + 1, 1);
+    unsigned norder = nb, sp = 0;
+    vi_block *entry = list_first_entry(&s->blocks, vi_block, link);
+    stack[sp++] = entry; seen[entry->index] = true;
+    while (sp) {
+        vi_block *b = stack[sp - 1];
+        if (next[b->index] < 2) {
+            vi_block *c = b->succ[next[b->index]++];
+            if (c && !seen[c->index]) { seen[c->index] = true; stack[sp++] = c; }
+            continue;
+        }
+        order[--norder] = b;
+        sp--;
+    }
+    domtree *d = calloc(1, sizeof *d);
+    compute_dom(s, d);
+    unsigned dw = BITSET_WORDS(d->n);
+
+    uint32_t *map = malloc((n ? n : 1) * sizeof *map);
+    for (unsigned v = 0; v < n; v++) map[v] = v;
+    // available instructions: hash buckets of indices into a list (instruction, hash)
+    unsigned cap = 1024, cnt = 0, nbuckets = 4096;
+    vi_instr **avail = malloc(cap * sizeof *avail);
+    int *chain = malloc(cap * sizeof *chain), *bucket = malloc(nbuckets * sizeof *bucket);
+    for (unsigned i = 0; i < nbuckets; i++) bucket[i] = -1;
+    vi_block **ablk = malloc(cap * sizeof *ablk);
+    bool progress = false;
+
+    // same-block matches over registers written more than once: position of the last write to each register
+    unsigned *lastw = calloc(n ? n : 1, sizeof *lastw), *lastw_blk = malloc((n ? n : 1) * sizeof *lastw_blk);
+    for (unsigned v = 0; v < n; v++) lastw_blk[v] = ~0u;
+    unsigned *apos = malloc(cap * sizeof *apos);
+    unsigned pos = 0;
+    for (unsigned oi = norder; oi < nb; oi++) {
+        vi_block *b = order[oi];
+        vi_foreach_instr_safe(b, I) {
+            pos++;
+            for (unsigned k = 0; k < 4; k++) cse_rename(&I->src[k], map, n);
+            cse_rename(&I->sr, map, n);
+            bool keep = false;
+            uint32_t res = ~0u;
+            int local = 0;
+            uint32_t lsrc[5]; unsigned nl = 0;
+            if (cse_candidate(s, I, loads_ok) && (res = cse_result(s, I, vi)) != ~0u) {
+                keep = true;
+                vi_ref *rs[5] = { &I->src[0], &I->src[1], &I->src[2], &I->src[3], &I->sr };
+                for (unsigned k = 0; k < 5 && keep; k++) {
+                    int kind = cse_src_kind(s, &wi, *rs[k]);
+                    if (!kind) keep = false;
+                    else if (kind == 2) { local = 1; lsrc[nl++] = rs[k]->value; }
+                }
+            }
+            if (keep) {
+                uint32_t h = cse_hash(I);
+                vi_instr *found = NULL;
+                for (int e = bucket[h % nbuckets]; e >= 0 && !found; e = chain[e]) {
+                    vi_instr *A = avail[e];
+                    if (!cse_equal(A, I)) continue;
+                    if (ablk[e] != b && (local || !BITSET_TEST(d->dom + b->index * dw, ablk[e]->index))) continue;
+                    bool clobbered = false;
+                    for (unsigned q = 0; q < nl && !clobbered; q++) clobbered = lastw_blk[lsrc[q]] == b->index && lastw[lsrc[q]] > apos[e];
+                    if (clobbered) continue;
+                    uint32_t ar = cse_result(s, A, vi);
+                    if (ar == ~0u || vi_vreg_get(s, ar)->nwords != vi_vreg_get(s, res)->nwords) continue;
+                    found = A;
+                }
+                if (found) {
+                    map[res] = cse_result(s, found, vi);
+                    list_del(&I->link);
+                    progress = true;
+                    continue;
+                }
+                if (cnt == cap) {
+                    cap *= 2;
+                    avail = realloc(avail, cap * sizeof *avail); chain = realloc(chain, cap * sizeof *chain);
+                    ablk = realloc(ablk, cap * sizeof *ablk); apos = realloc(apos, cap * sizeof *apos);
+                }
+                avail[cnt] = I; ablk[cnt] = b; apos[cnt] = pos; chain[cnt] = bucket[h % nbuckets]; bucket[h % nbuckets] = (int)cnt; cnt++;
+            }
+            vi_ref *w[2] = { &I->dest, &I->sw };
+            for (unsigned k = 0; k < 2; k++) if (w[k]->kind == VI_VREG && w[k]->value < n) { lastw[w[k]->value] = pos; lastw_blk[w[k]->value] = b->index; }
+        }
+    }
+    free(lastw); free(lastw_blk); free(apos);
+    // readers in blocks visited earlier (loop back edges) or unreachable
+    if (progress) vi_foreach_block(s, b) vi_foreach_instr(b, I) {
+        for (unsigned k = 0; k < 4; k++) cse_rename(&I->src[k], map, n);
+        cse_rename(&I->sr, map, n);
+    }
+    free(avail); free(chain); free(bucket); free(ablk); free(map);
+    free(d->dom); free(d->pdom); free(d->blk); free(d);
+    free(order); free(stack); free(next); free(seen);
+    free(vi); free(wi.base); free(wi.wdefs); free(wi.wdef);
+    return progress;
+}
+
+// ---- Load vectorization ---------------------------------------------------------------------------------------------
+// LD_PKA of consecutive words of one buffer at constant offsets in a block (a struct read field by field: RenderBox's
+// uber shaders read 7 scalars at 0x0..0x18 with 7 loads) become one LD_PKA.i64/i96/i128, as Mesa's
+// nir_opt_load_store_vectorize does. The same bytes are read; vector LD_PKA at 4-byte alignment is what the selector
+// already emits for LLVM vector loads. Buffer loads (`memory`) only in shaders that write no buffer. Readers take the
+// words of the new register; a 64-bit or wider part keeps an even word offset. VMG_ISA_NO_VECLOAD=1 turns it off.
+
+static const enum va_op kPka[5] = { 0, VA_LD_PKA_I32, VA_LD_PKA_I64, VA_LD_PKA_I96, VA_LD_PKA_I128 };
+
+static unsigned pka_words(enum va_op op)
+{
+    return op == VA_LD_PKA_I32 ? 1 : op == VA_LD_PKA_I64 ? 2 : op == VA_LD_PKA_I96 ? 3 : op == VA_LD_PKA_I128 ? 4 : 0;
+}
+
+// Constant offset of a load: an immediate or a register defined once by a constant move.
+static bool vl_offset(vi_shader *s, const winfo *wi, vi_ref r, uint32_t *x)
+{
+    if (r.kind == VI_IMM) { *x = r.value; return true; }
+    if (r.kind != VI_VREG || vi_vreg_get(s, r.value)->multi_def || vi_vreg_get(s, r.value)->nwords != 1) return false;
+    if (wi->wdefs[wi->base[r.value]] != 1) return false;
+    vi_instr *D = wi->wdef[wi->base[r.value]];
+    if (D->op == VA_MOV_IMM_I32 && D->f.set[VAF_imm1w]) { *x = (uint32_t)D->f.v[VAF_imm1w]; return true; }
+    if (D->op == VA_MOV_I32 && D->src[0].kind == VI_IMM) { *x = D->src[0].value; return true; }
+    return false;
+}
+
+typedef struct { vi_instr *I; uint32_t off, v; unsigned n, order; } vl_load;
+
+static int vl_cmp(const void *a, const void *b)
+{
+    const vl_load *x = a, *y = b;
+    return x->off < y->off ? -1 : x->off > y->off ? 1 : 0;
+}
+
+bool vi_vectorize_loads(vi_shader *s);
+bool vi_vectorize_loads(vi_shader *s)
+{
+    if (getenv("VMG_ISA_NO_VECLOAD")) return false;
+    unsigned n = vi_num_vregs(s), words = 0;
+    for (unsigned v = 0; v < n; v++) words += vi_vreg_get(s, v)->nwords;
+    vinfo *vi = malloc((n ? n : 1) * sizeof *vi);
+    winfo wi = { malloc((n ? n : 1) * sizeof(unsigned)), malloc((words ? words : 1) * sizeof(unsigned)), malloc((words ? words : 1) * sizeof(vi_instr *)) };
+    count(s, vi, &wi);
+    bool writes = false;
+    vi_foreach_block(s, blk) vi_foreach_instr(blk, I) if (buffer_write(I)) writes = true;
+    uint32_t *newv = malloc((n ? n : 1) * sizeof *newv);
+    uint8_t *neww = malloc(n ? n : 1);
+    for (unsigned v = 0; v < n; v++) newv[v] = v, neww[v] = 0;
+    bool progress = false;
+    vl_load *L = NULL;
+    unsigned cap = 0;
+    vi_foreach_block(s, blk) {
+        unsigned nl = 0, order = 0;
+        vi_foreach_instr(blk, I) {
+            order++;
+            unsigned w = pka_words(I->op);
+            if (!w || w > 3 || I->dest.kind || I->sw.kind != VI_VREG || I->flow || I->sr.kind) continue;
+            if (I->memory && writes) continue;
+            bool ok = true;
+            for (unsigned f = 0; f < VAF_COUNT && ok; f++) if (I->f.set[f] && f != VAF_lane && f != VAF_extend) ok = false;
+            if (!ok) continue;
+            uint32_t v = I->sw.value;
+            vi_vreg_info *info = vi_vreg_get(s, v);
+            if (I->sw.word || (I->sw.count ? I->sw.count : 1) != w || info->nwords != w || info->multi_def || info->fixed >= 0 || vi[v].defs != 1) continue;
+            uint32_t off;
+            if (!vl_offset(s, &wi, I->src[0], &off) || (off & 3)) continue;
+            if (nl == cap) { cap = cap ? 2 * cap : 64; L = realloc(L, cap * sizeof *L); }
+            L[nl++] = (vl_load){ I, off, v, w, order };
+        }
+        if (nl < 2) continue;
+        qsort(L, nl, sizeof *L, vl_cmp);
+        bool *used = calloc(nl, 1);
+        for (unsigned i = 0; i < nl; i++) {
+            if (used[i]) continue;
+            // a run of loads from the same buffer, each starting where the previous one ends, at most 4 words
+            unsigned run[4], nr = 1, total = L[i].n;
+            run[0] = i;
+            uint32_t end = L[i].off + 4 * L[i].n;
+            for (unsigned j = i + 1; j < nl && total < 4; j++) {
+                if (used[j]) continue;
+                vi_instr *A = L[i].I, *B = L[j].I;
+                if (L[j].off < end) continue;
+                if (L[j].off > end) break;
+                if (A->memory != B->memory || !same_ref(A->src[1], B->src[1]) || total + L[j].n > 4) break;
+                if (L[j].n >= 2 && ((L[j].off - L[i].off) / 4) % 2) break;
+                run[nr++] = j; total += L[j].n; end += 4 * L[j].n;
+            }
+            if (nr < 2) continue;
+            // constant buffer handles only (a handle chosen at run time keeps its loads)
+            vi_ref h = L[i].I->src[1];
+            if (h.kind != VI_IMM) continue;
+            unsigned first = run[0];
+            for (unsigned k = 1; k < nr; k++) if (L[run[k]].order < L[first].order) first = run[k];
+            uint32_t D = vi_new_vreg(s, total);
+            vi_builder b = { s, blk, L[first].I };
+            vi_instr *M = vi_emit(&b, kPka[total]);
+            M->sw = vi_vreg(D, 0, total);
+            M->src[0] = vi_imm(L[i].off);
+            M->src[1] = h;
+            M->memory = L[i].I->memory;
+            for (unsigned k = 0; k < nr; k++) if (L[run[k]].I->f.set[VAF_extend] && va_has_field(M->op, VAF_extend)) vi_set(M, VAF_extend, L[run[k]].I->f.v[VAF_extend]);
+            if (total == 1) vi_set(M, VAF_lane, VA_LOAD_LANE_32_M_NONE);
+            for (unsigned k = 0; k < nr; k++) {
+                vl_load *x = &L[run[k]];
+                newv[x->v] = D; neww[x->v] = (uint8_t)((x->off - L[i].off) / 4);
+                list_del(&x->I->link);
+                used[run[k]] = true;
+            }
+            progress = true;
+        }
+        free(used);
+    }
+    if (progress) vi_foreach_block(s, blk) vi_foreach_instr(blk, I) {
+        vi_ref *r[5] = { &I->src[0], &I->src[1], &I->src[2], &I->src[3], &I->sr };
+        for (unsigned k = 0; k < 5; k++)
+            if (r[k]->kind == VI_VREG && r[k]->value < n && newv[r[k]->value] != r[k]->value) {
+                uint32_t v = r[k]->value;
+                r[k]->value = newv[v]; r[k]->word += neww[v];
+            }
+    }
+    free(L); free(newv); free(neww);
+    free(vi); free(wi.base); free(wi.wdefs); free(wi.wdef);
+    return progress;
+}
+
 void vi_optimize(vi_shader *s)
 {
     // constants first, so that branches on function-constant conditions fold before if-conversion sees them
@@ -393,6 +751,8 @@ void vi_optimize(vi_shader *s)
     demote_phis(s);
     simplify(s);
     vi_fuse_fma(s);
+    if (vi_cse(s)) simplify(s);
+    if (vi_vectorize_loads(s)) simplify(s);
     vi_remat(s);
     if (!vi_fold_disabled()) for (unsigned i = 0; i < 64 && coalesce_copies(s); i++) {}
 }
@@ -439,9 +799,6 @@ static bool reads_vreg_of(const vi_instr *U, const vi_instr *I)
         if (w[a]->kind == VI_VREG && uw[b]->kind == VI_VREG && uw[b]->value == w[a]->value) return true;
     return false;
 }
-
-// Dominators (dom) and post-dominators (pdom) as bit sets over block indices.
-typedef struct { unsigned n; BITSET_WORD *dom, *pdom; vi_block **blk; } domtree;
 
 static void compute_dom(vi_shader *s, domtree *d)
 {

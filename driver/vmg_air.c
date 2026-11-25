@@ -2895,6 +2895,53 @@ static bool fold_uniform_hints(LLVMModuleRef mod)
     return changed;
 }
 
+// air.sincos / air.fast_sincos / air.precise_sincos (x, cos_out): sin returned, cos written through a pointer (an
+// alloca). Neither translator had them (the pipeline failed on both paths: 3 shaders of 190 captured on the phone).
+// Split into air.<p>sin + air.<p>cos + a store; SROA then removes the alloca.
+static bool split_sincos(LLVMModuleRef mod)
+{
+    if (!ts_LLVMCreateBuilderInContext || !ts_LLVMGetModuleContext || !ts_LLVMPositionBuilderBefore || !ts_LLVMBuildStore ||
+        !ts_LLVMInstructionEraseFromParent || !ts_LLVMFunctionType || !ts_LLVMAddFunction || (!ts_LLVMBuildCall && !ts_LLVMBuildCall2))
+        return false;
+    bool changed = false;
+    LLVMBuilderRef b = NULL;
+    for (LLVMValueRef f = ts_LLVMGetFirstFunction(mod); f; f = ts_LLVMGetNextFunction(f)) {
+        size_t len = 0;
+        const char *n = ts_LLVMGetValueName2(f, &len);
+        if (!n || len < 8 || strncmp(n, "air.", 4)) continue;
+        const char *q = n + 4, *pre = "";
+        if (!strncmp(q, "fast_", 5)) { pre = "fast_"; q += 5; }
+        else if (!strncmp(q, "precise_", 8)) { pre = "precise_"; q += 8; }
+        if (strncmp(q, "sincos.", 7)) continue;
+        const char *suffix = q + 7;
+        char sname[96], cname[96];
+        snprintf(sname, sizeof sname, "air.%ssin.%s", pre, suffix);
+        snprintf(cname, sizeof cname, "air.%scos.%s", pre, suffix);
+        void *u = ts_LLVMGetFirstUse(f);
+        while (u) {
+            LLVMValueRef call = ts_LLVMGetUser(u);
+            u = ts_LLVMGetNextUse(u);
+            if (!ts_LLVMIsAInstruction(call) || ts_LLVMGetInstructionOpcode(call) != LLVMCall || ts_LLVMGetCalledValue(call) != f) continue;
+            LLVMTypeRef ty = ts_LLVMTypeOf(call);
+            LLVMTypeRef fty = ts_LLVMFunctionType(ty, &ty, 1, 0);
+            LLVMValueRef sf = ts_LLVMGetNamedFunction(mod, sname), cf = ts_LLVMGetNamedFunction(mod, cname);
+            if (!sf) sf = ts_LLVMAddFunction(mod, sname, fty);
+            if (!cf) cf = ts_LLVMAddFunction(mod, cname, fty);
+            if (!b) b = ts_LLVMCreateBuilderInContext(ts_LLVMGetModuleContext(mod));
+            ts_LLVMPositionBuilderBefore(b, call);
+            LLVMValueRef x = ts_LLVMGetOperand(call, 0), ptr = ts_LLVMGetOperand(call, 1);
+            LLVMValueRef sv = ts_LLVMBuildCall2 ? ts_LLVMBuildCall2(b, fty, sf, &x, 1, "") : ts_LLVMBuildCall(b, sf, &x, 1, "");
+            LLVMValueRef cv = ts_LLVMBuildCall2 ? ts_LLVMBuildCall2(b, fty, cf, &x, 1, "") : ts_LLVMBuildCall(b, cf, &x, 1, "");
+            ts_LLVMBuildStore(b, cv, ptr);
+            ts_LLVMReplaceAllUsesWith(call, sv);
+            ts_LLVMInstructionEraseFromParent(call);
+            changed = true;
+        }
+    }
+    if (b && ts_LLVMDisposeBuilder) ts_LLVMDisposeBuilder(b);
+    return changed;
+}
+
 static nir_shader *translate_module(const nir_shader_compiler_options *options, LLVMModuleRef mod, const vmg_air_input *in,
                                     vmg_reflection *refl, struct util_dynarray *pool, bool push, char **error)
 {
@@ -3077,7 +3124,7 @@ bool vmg_air_module_load(const vmg_air_input *in, LLVMContextRef *ctx_out, LLVMM
     // Again while it splits something: once a struct is split, an array whose address was stored in it can be too.
     for (int round = 0; round < 4 && !err && split_resource_allocas(mod, entry_function(mod)); round++)
         err = run_passes(mod, kCleanupPasses);
-    if (!err && (fold_null_textures(mod) | fold_uniform_hints(mod))) err = run_passes(mod, kCleanupPasses);
+    if (!err && ((int)fold_null_textures(mod) | (int)fold_uniform_hints(mod) | (int)split_sincos(mod))) err = run_passes(mod, kCleanupPasses);
     if (err) {
         *error = err;
         ts_LLVMDisposeModule(mod);

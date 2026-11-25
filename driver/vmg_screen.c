@@ -195,6 +195,11 @@ static void air_cache_key(vmg_device *dev, const char *kind, const vmg_air_input
     blob_write_uint8(&b, getenv("VMG_ISA_NO_FOLD") != NULL);
     blob_write_uint8(&b, getenv("VMG_ISA_PUSH_LD") != NULL);
     blob_write_uint8(&b, getenv("VMG_ISA_PUSH_FAU_COMPUTE") != NULL);
+    // ISA compiler optimizations with an off switch (driver/isa): a binary made with one setting is not the other's
+    static const char *const kIsaOpts[] = { "VMG_ISA_NO_CSE", "VMG_ISA_NO_MSG_FAU", "VMG_ISA_NO_SHIFT_LUT", "VMG_ISA_NO_HALF_DIV",
+                                            "VMG_ISA_NO_SEL16", "VMG_ISA_NO_VECLOAD", "VMG_ISA_NO_TEX16", "VMG_ISA_NO_HALF_NATIVE",
+                                            "VMG_ISA_NO_COALESCE", "VMG_ISA_NO_VHINT", "VMG_ISA_NO_SINK" };
+    for (unsigned i = 0; i < sizeof kIsaOpts / sizeof kIsaOpts[0]; i++) blob_write_uint8(&b, getenv(kIsaOpts[i]) != NULL);
     blob_write_uint64(&b, in->bitcode_size);
     blob_write_bytes(&b, in->bitcode, in->bitcode_size);
     blob_write_uint32(&b, in->linked_count);

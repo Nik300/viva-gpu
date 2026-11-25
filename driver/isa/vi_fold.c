@@ -239,7 +239,7 @@ static bool fold_value(vi_shader *s, defmap *m, vi_instr *I, uint32_t *out)
 static bool lane0_reader(enum va_op op)
 {
     return op == VA_U16_TO_U32 || op == VA_S16_TO_S32 || op == VA_F16_TO_F32 || op == VA_U16_TO_F32 || op == VA_S16_TO_F32 ||
-           op == VA_F16_TO_S32 || op == VA_F16_TO_U32;
+           op == VA_F16_TO_S32 || op == VA_F16_TO_U32 || op == VA_FRCP_F16 || op == VA_FRSQ_F16;
 }
 
 static bool v2f16_alu(enum va_op op)
@@ -366,6 +366,217 @@ static bool peephole(vi_shader *s, defmap *m, vi_instr *I)
     return false;
 }
 
+// ---- 8-bit lanes, zero extensions, identities, constant compares ------------------------------------------------------
+// RenderBox's enums (uchar) arrive as `MKVEC.v2i8 x.b0, #0, #0` (zero extension) + `MKVEC.v2i16 .h0, #0` + `U8_TO_U32
+// .b0`: three instructions for one AND. Byte readers read the original byte; extensions of values whose upper bits are
+// already zero become copies. Float identities that hold for every input (x + -0, x * 1 + -0), CSELs whose arms are
+// the same value or whose comparison is constant, compares and conversions of constants.
+
+// Where byte `byte` of source r comes from (through MKVEC.v2i8 / v2i16, U8/U16_TO_U32); a constant byte as *imm.
+static bool byte_origin(vi_shader *s, defmap *m, vi_ref r, unsigned byte, vi_ref *x, unsigned *xb, int depth)
+{
+    if (r.kind == VI_IMM) { *x = vi_imm((r.value >> (8 * byte)) & 0xff); *xb = 0; return true; }
+    vi_instr *D = def_of(s, m, r);
+    if (!D || depth > 4) return false;
+    static const enum va_field l0[] = { VAF_lane0, VAF_COUNT };
+    static const enum va_field l01[] = { VAF_lane0, VAF_lane1, VAF_COUNT };
+    vi_ref src;
+    unsigned sb;
+    if (D->op == VA_MKVEC_V2I8 && only_fields(D, l01)) {
+        if (byte == 0) { src = D->src[0]; sb = (unsigned)fval(D, VAF_lane0, 0) & 3; }
+        else if (byte == 1) { src = D->src[1]; sb = (unsigned)fval(D, VAF_lane1, 0) & 3; }
+        else { src = D->src[2]; sb = byte - 2; }
+    } else if (D->op == VA_MKVEC_V2I16 && only_fields(D, l01)) {
+        unsigned k = byte / 2;
+        src = D->src[k]; sb = 2 * ((unsigned)fval(D, k ? VAF_lane1 : VAF_lane0, 0) & 1) + (byte & 1);
+    } else if (D->op == VA_U16_TO_U32 && only_fields(D, l0)) {
+        if (byte >= 2) { *x = vi_imm(0); *xb = 0; return true; }
+        src = D->src[0]; sb = 2 * ((unsigned)fval(D, VAF_lane0, 0) & 1) + byte;
+    } else if (D->op == VA_U8_TO_U32 && only_fields(D, l0)) {
+        if (byte >= 1) { *x = vi_imm(0); *xb = 0; return true; }
+        src = D->src[0]; sb = (unsigned)fval(D, VAF_lane0, 0) & 3;
+    } else return false;
+    if (src.kind == VI_NONE || src.kind == VI_SPECIAL || !stable(s, m, src) || (src.kind == VI_VREG && src.count > 1)) return false;
+    if (src.kind == VI_IMM) { *x = vi_imm((src.value >> (8 * sb)) & 0xff); *xb = 0; return true; }
+    vi_ref deeper; unsigned db;
+    if (byte_origin(s, m, src, sb, &deeper, &db, depth + 1)) { *x = deeper; *xb = db; return true; }
+    *x = src; x->last = false; if (x->kind == VI_VREG) x->count = 1;
+    *xb = sb;
+    return true;
+}
+
+// Number of high bits known to be zero (0, 16 or 24).
+static unsigned zero_high(vi_shader *s, defmap *m, vi_ref r)
+{
+    if (r.kind == VI_IMM) return r.value <= 0xff ? 24 : r.value <= 0xffff ? 16 : 0;
+    vi_instr *D = def_of(s, m, r);
+    if (!D) return 0;
+    uint32_t c, c2;
+    static const enum va_field l0[] = { VAF_lane0, VAF_COUNT };
+    static const enum va_field l01[] = { VAF_lane0, VAF_lane1, VAF_COUNT };
+    switch (D->op) {
+    case VA_U8_TO_U32: return only_fields(D, l0) ? 24 : 0;
+    case VA_U16_TO_U32: return only_fields(D, l0) ? 16 : 0;
+    case VA_MKVEC_V2I8:
+        if (!only_fields(D, l01) || !cval(s, m, D->src[2], &c) || (c & 0xffff)) return 0;
+        return cval(s, m, D->src[1], &c2) && ((c2 >> (8 * (fval(D, VAF_lane1, 0) & 3))) & 0xff) == 0 ? 24 : 16;
+    case VA_MKVEC_V2I16:
+        if (!only_fields(D, l01) || !cval(s, m, D->src[1], &c)) return 0;
+        return lane16(c, (unsigned)fval(D, VAF_lane1, 0)) == 0 ? 16 : 0;
+    case VA_AND_I32: case VA_LSHIFT_AND_I32: case VA_RSHIFT_AND_I32: {
+        static const enum va_field ok[] = { VAF_lanes1, VAF_COUNT };
+        if (!only_fields(D, ok) || fval(D, VAF_lanes1, 0) != 0 || !cval(s, m, D->src[2], &c)) return 0;
+        if (D->op != VA_AND_I32 && D->op != VA_RSHIFT_AND_I32 && !(D->src[1].kind == VI_NONE || (cval(s, m, D->src[1], &c2) && c2 == 0))) return 0;
+        return c <= 0xff ? 24 : c <= 0xffff ? 16 : 0;
+    }
+    default: return 0;
+    }
+}
+
+static bool cmp_const(int cmpf, int kind, uint32_t a, uint32_t b, bool *res)
+{
+    // kind: 0 unsigned, 1 signed, 2 float
+    if (kind == 2) {
+        float x = f32(a), y = f32(b);
+        if (!normal_or_zero(x) || !normal_or_zero(y)) return false;
+        switch (cmpf) {
+        case VA_CMPF_M_EQ: *res = x == y; return true;
+        case VA_CMPF_M_NE: *res = x != y; return true;
+        case VA_CMPF_M_GT: *res = x > y; return true;
+        case VA_CMPF_M_GE: *res = x >= y; return true;
+        case VA_CMPF_M_LT: *res = x < y; return true;
+        case VA_CMPF_M_LE: *res = x <= y; return true;
+        default: return false;
+        }
+    }
+    int64_t x = kind ? (int64_t)(int32_t)a : (int64_t)a, y = kind ? (int64_t)(int32_t)b : (int64_t)b;
+    switch (cmpf) {
+    case VA_CMPF_M_EQ: *res = x == y; return true;
+    case VA_CMPF_M_NE: *res = x != y; return true;
+    case VA_CMPF_M_GT: *res = x > y; return true;
+    case VA_CMPF_M_GE: *res = x >= y; return true;
+    case VA_CMPF_M_LT: *res = x < y; return true;
+    case VA_CMPF_M_LE: *res = x <= y; return true;
+    default: return false;
+    }
+}
+
+static int csel_kind(enum va_op op)
+{
+    switch (op) {
+    case VA_CSEL_U32: return 0;
+    case VA_CSEL_S32: return 1;
+    case VA_CSEL_F32: return 2;
+    default: return -1;
+    }
+}
+
+static bool byte_reader(enum va_op op)
+{
+    return op == VA_U8_TO_U32 || op == VA_S8_TO_S32 || op == VA_U8_TO_F32 || op == VA_S8_TO_F32;
+}
+
+static bool more_peepholes(vi_shader *s, defmap *m, vi_instr *I)
+{
+    if (I->flow || I->target || I->dest.kind != VI_VREG || I->f.set[VAF_dest_width] || I->sw.kind) return false;
+    static const enum va_field none[] = { VAF_COUNT };
+    static const enum va_field l0[] = { VAF_lane0, VAF_COUNT };
+    static const enum va_field l01[] = { VAF_lane0, VAF_lane1, VAF_COUNT };
+    uint32_t a, b;
+    vi_ref x;
+    unsigned xb;
+
+    // single-byte readers: the original byte
+    if (byte_reader(I->op) && only_fields(I, l0)) {
+        unsigned lane = (unsigned)fval(I, VAF_lane0, 0) & 3;
+        if (I->op == VA_U8_TO_U32 && lane == 0 && zero_high(s, m, I->src[0]) >= 24) { make_mov(I, I->src[0]); return true; }
+        if (byte_origin(s, m, I->src[0], lane, &x, &xb, 0) && !same_word(x, I->src[0])) {
+            if (x.kind == VI_IMM) { uint32_t v = x.value; bool sg = I->op == VA_S8_TO_S32 || I->op == VA_S8_TO_F32;
+                if (I->op == VA_U8_TO_U32 || I->op == VA_S8_TO_S32) { make_mov(I, vi_imm(sg ? (uint32_t)(int32_t)(int8_t)v : v)); return true; }
+                I->src[0] = vi_imm(v); va_set(&I->f, VAF_lane0, 0); return true; }
+            I->src[0] = x; va_set(&I->f, VAF_lane0, xb);
+            return true;
+        }
+        return false;
+    }
+    if (I->op == VA_U16_TO_U32 && only_fields(I, l0) && fval(I, VAF_lane0, 0) == 0 && zero_high(s, m, I->src[0]) >= 16) {
+        make_mov(I, I->src[0]);
+        return true;
+    }
+    // MKVEC.v2i8: byte sources read through other extensions; a zero extension of a byte that is already one
+    if (I->op == VA_MKVEC_V2I8 && only_fields(I, l01)) {
+        bool progress = false;
+        for (unsigned k = 0; k < 2; k++) {
+            enum va_field lf = k ? VAF_lane1 : VAF_lane0;
+            unsigned lane = (unsigned)fval(I, lf, 0) & 3;
+            if (!byte_origin(s, m, I->src[k], lane, &x, &xb, 0) || same_word(x, I->src[k])) continue;
+            if (x.kind == VI_IMM) { I->src[k] = x; va_set(&I->f, lf, 0); }
+            else { I->src[k] = x; va_set(&I->f, lf, xb); }
+            progress = true;
+        }
+        if (fval(I, VAF_lane0, 0) == 0 && cval(s, m, I->src[1], &a) && cval(s, m, I->src[2], &b) &&
+            ((a >> (8 * (fval(I, VAF_lane1, 0) & 3))) & 0xff) == 0 && (b & 0xffff) == 0 && zero_high(s, m, I->src[0]) >= 24) {
+            make_mov(I, I->src[0]);
+            return true;
+        }
+        return progress;
+    }
+    // MKVEC.v2i16(x.h0, #0) of a value whose upper half is zero
+    if (I->op == VA_MKVEC_V2I16 && only_fields(I, l01) && fval(I, VAF_lane0, 0) == 0 && cval(s, m, I->src[1], &a) &&
+        lane16(a, (unsigned)fval(I, VAF_lane1, 0)) == 0 && I->src[0].kind == VI_VREG && zero_high(s, m, I->src[0]) >= 16) {
+        make_mov(I, I->src[0]);
+        return true;
+    }
+    // x + -0 = x; x * 1 + -0 = x (exact for every x, signed zeros and NaNs included)
+    if (I->op == VA_FADD_F32 && I->src[0].kind == VI_VREG) {
+        static const enum va_field n1[] = { VAF_neg1, VAF_COUNT };
+        if (only_fields(I, n1) && cval(s, m, I->src[1], &b) && (fval(I, VAF_neg1, 0) ? b ^ 0x80000000u : b) == 0x80000000u) {
+            make_mov(I, I->src[0]);
+            return true;
+        }
+    }
+    if (I->op == VA_FMA_F32) {
+        static const enum va_field n2[] = { VAF_neg2, VAF_COUNT };
+        if (only_fields(I, n2) && cval(s, m, I->src[2], &b) && (fval(I, VAF_neg2, 0) ? b ^ 0x80000000u : b) == 0x80000000u) {
+            for (unsigned k = 0; k < 2; k++)
+                if (I->src[1 - k].kind == VI_VREG && cval(s, m, I->src[k], &a) && a == 0x3f800000u) { make_mov(I, I->src[1 - k]); return true; }
+        }
+    }
+    // CSEL: both arms the same value; constant comparison
+    int ck = csel_kind(I->op);
+    if (ck >= 0) {
+        static const enum va_field cm[] = { VAF_cmpf, VAF_COUNT };
+        if (!only_fields(I, cm)) return false;
+        if (same_word(I->src[2], I->src[3]) && (I->src[2].kind != VI_VREG || stable(s, m, I->src[2]))) { make_mov(I, I->src[2]); return true; }
+        bool r;
+        if (cval(s, m, I->src[0], &a) && cval(s, m, I->src[1], &b) && cmp_const((int)fval(I, VAF_cmpf, 0), ck, a, b, &r)) {
+            make_mov(I, r ? I->src[2] : I->src[3]);
+            return true;
+        }
+        return false;
+    }
+    // compares of constants (0/1 results)
+    if (I->op == VA_FCMP_OR_F32 || I->op == VA_ICMP_OR_U32 || I->op == VA_ICMP_OR_S32) {
+        static const enum va_field cm[] = { VAF_cmpf, VAF_result_type, VAF_COUNT };
+        if (!only_fields(I, cm) || fval(I, VAF_result_type, VA_CMP_RESULT_TYPE_M_I1) != VA_CMP_RESULT_TYPE_M_I1) return false;
+        uint32_t c = 0;
+        bool r;
+        if (!cval(s, m, I->src[0], &a) || !cval(s, m, I->src[1], &b) || (I->src[2].kind != VI_NONE && !cval(s, m, I->src[2], &c))) return false;
+        if (!cmp_const((int)fval(I, VAF_cmpf, 0), I->op == VA_FCMP_OR_F32 ? 2 : I->op == VA_ICMP_OR_S32, a, b, &r)) return false;
+        make_mov(I, vi_imm((uint32_t)r | c));
+        return true;
+    }
+    // integer -> float of small constants (exact)
+    if ((I->op == VA_S32_TO_F32 || I->op == VA_U32_TO_F32) && only_fields(I, none) && cval(s, m, I->src[0], &a)) {
+        int64_t v = I->op == VA_S32_TO_F32 ? (int64_t)(int32_t)a : (int64_t)a;
+        if (v < -(1 << 24) || v > (1 << 24)) return false;
+        make_mov(I, vi_imm(u32((float)v)));
+        return true;
+    }
+    (void)l0;
+    return false;
+}
+
 // fabs / fneg feeding a float instruction that has abs/neg modifiers on that source: the modifier instead (Mesa's
 // bi_opt_mod_prop). Valhall applies abs before neg.
 static bool mod_consumer(enum va_op op)
@@ -416,6 +627,7 @@ bool vi_fold(vi_shader *s)
         // (the def map stays valid: peepholes only change sources and opcodes, never which words are written)
         if (peephole(s, &m, I)) progress = true;
         if (mod_prop(s, &m, I)) progress = true;
+        if (I->op != VA_MOV_I32 && more_peepholes(s, &m, I)) progress = true;
     }
     defmap_free(&m);
     return progress;

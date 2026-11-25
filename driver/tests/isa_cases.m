@@ -1178,6 +1178,59 @@ static void ref_E5(const isa_case *c, const double *g, double *out) {
     }
 }
 
+// half division in packed form (FRCP.f16 per lane + FMUL.v2f16; VMG_ISA_NO_HALF_DIV=1 for the f32 way): vector / vector,
+// scalar / scalar, vector / scalar.
+static const char kE5d[] =
+    "kernel void k(device float4 *o [[buffer(0)]], uint2 p [[thread_position_in_grid]]) {\n"
+    "  half4 a = half4(half(p.x) + 1.0h, half(p.y) * 0.5h + 0.25h, half(p.x) * 0.125h - 2.0h, 3.0h);\n"
+    "  half4 b = half4(half(p.y) + 1.0h, half(p.x) * 0.25h + 0.5h, 2.0h, half(p.x + p.y) + 1.0h);\n"
+    "  half4 q = a / b;\n"
+    "  half s = a.x / b.w;\n"
+    "  half3 t = a.xyz / b.y;\n"
+    "  o[p.y * 64 + p.x] = float4(q.x, q.y, s, t.z); }\n";
+static void ref_E5d(const isa_case *c, const double *g, double *out) {
+    PIX(c) {
+        float ax = h_round(x + 1.0f), ay = h_round(y * 0.5f + 0.25f), az = h_round(h_round(x * 0.125f) - 2.0f);
+        float bx = h_round(y + 1.0f), by = h_round(h_round(x * 0.25f) + 0.5f), bw = h_round(x + y + 1.0f);
+        set4(OUT(x, y), h_round(ax / bx), h_round(ay / by), h_round(ax / bw), h_round(az / by));
+    }
+}
+
+// dynamic index into 16-bit vectors held as packed words (as from a load: word chosen by CSEL, half shifted down;
+// VMG_ISA_NO_SEL16=1 for the per-element CSEL chain): half4, half2, ushort4.
+static const char kE4h[] =
+    "kernel void k(device float4 *o [[buffer(0)]], uint2 p [[thread_position_in_grid]]) {\n"
+    "  uint w0 = (0x3C00u + p.x) | ((0x4000u + p.y) << 16), w1 = (0x4400u + p.x * 3) | ((0x4800u + p.y * 5) << 16);\n"
+    "  half4 h = as_type<half4>(uint2(w0, w1));\n"
+    "  half2 h2 = as_type<half2>(w1 ^ 0x00010001u);\n"
+    "  ushort4 u = as_type<ushort4>(uint2(p.x * 7 + (p.y << 16), 0x00090000u + p.y));\n"
+    "  uint i = (p.x + 2 * p.y) & 3;\n"
+    "  o[p.y * 64 + p.x] = float4(h[i], h2[p.y & 1], float(u[(i + 1) & 3]), float(h[3 - i])); }\n";
+static double half_bits(unsigned b) { _Float16 h; uint16_t v = (uint16_t)b; memcpy(&h, &v, 2); return (double)h; }
+static void ref_E4h(const isa_case *c, const double *g, double *out) {
+    PIX(c) {
+        double h[4] = {half_bits(0x3C00u + x), half_bits(0x4000u + y), half_bits(0x4400u + x * 3), half_bits(0x4800u + y * 5)};
+        double h2[2] = {half_bits((0x4400u + x * 3) ^ 1), half_bits((0x4800u + y * 5) ^ 1)};
+        double u[4] = {x * 7, y, y, 9};
+        unsigned i = (unsigned)(x + 2 * y) & 3;
+        set4(OUT(x, y), h[i], h2[y & 1], u[(i + 1) & 3], h[3 - i]);
+    }
+}
+
+// sincos (sin returned, cos through a reference): air.fast_sincos.f32 and air.sincos.f16, split into sin + cos in A1.
+static const char kE6s[] =
+    "kernel void k(device float4 *o [[buffer(0)]], uint2 p [[thread_position_in_grid]]) {\n"
+    "  float t = (float(p.x) - 32.0) / 8.0 + float(p.y) / 64.0;\n"
+    "  float c; float s = sincos(t, c);\n"
+    "  half hc; half hs = sincos(half(t * 0.5), hc);\n"
+    "  o[p.y * 64 + p.x] = float4(s, c, hs, hc); }\n";
+static void ref_E6s(const isa_case *c, const double *g, double *out) {
+    PIX(c) {
+        float t = (x - 32.0f) / 8.0f + y / 64.0f, th = h_round(t * 0.5f);
+        set4(OUT(x, y), sin(t), cos(t), sin(th), cos(th));
+    }
+}
+
 #define E6_TS "float t = (floor(v.p.x) - 32.0) / 8.0, s = (floor(v.p.y) - 32.0) / 10.0, u = (floor(v.p.x) + 0.5) / 32.0 - 1.0;\n" \
     "  float w = (floor(v.p.x) + 1.0) * (floor(v.p.y) + 1.0) / 64.0;\n"
 #define E6_REF double t = (x - 32) / 8.0, s = (y - 32) / 10.0, u = (x + 0.5) / 32 - 1, w = (x + 1.0) * (y + 1.0) / 64; (void)t; (void)s; (void)u; (void)w;
@@ -1816,8 +1869,14 @@ const isa_case isa_cases[] = {
     {CS(E2s, ISA_OUT_U32), .id = "E2", .title = "switch su x & 31 (intero a 5 bit se LLVM lo restringe)", .feats = "A2"},
     {CS(E3, ISA_OUT_U32), .title = "Cast: trunc/sext/zext, fp↔int, f32→f16→f32, bitcast"},
     {CS(E4, ISA_OUT_F32), .title = "Vettori: extract/insert dinamici, swizzle, lane a 16 bit", .feats = "E5", .vis_lo = -100, .vis_hi = 1000},
+    {CS(E4h, ISA_OUT_F32), .id = "E4", .title = "Indice dinamico su vettori a 16 bit: parola + shift (VMG_ISA_NO_SEL16)", .feats = "E3,E5,E10",
+     .vis_hi = 20},
     {CS(E5, ISA_OUT_F32), .title = "half nativo (v2f16), arrotondamento", .tol = 1e-3, .rel = 2e-3, .vis_hi = 50},
+    {CS(E5d, ISA_OUT_F32), .id = "E5", .title = "Divisione half: FRCP.f16 + FMUL.v2f16 (VMG_ISA_NO_HALF_DIV)", .tol = 1e-3, .rel = 2e-3,
+     .vis_lo = -2, .vis_hi = 8},
     {FR(E6a), .id = "E6", .title = "sin, cos, tan, atan2", TRIG},
+    {CS(E6s, ISA_OUT_F32), .id = "E6", .title = "sincos float e half (coseno per riferimento)", .feats = "E5", .tol = 4e-3, .rel = 3e-3,
+     .vis_lo = -1, .vis_hi = 1},
     {FR(E6b), .id = "E6", .title = "asin, acos, atan, acosh", TRIG},
     {FR(E6c), .id = "E6", .title = "sinh, cosh, tanh, atanh", TRIG},
     {FR(E6d), .id = "E6", .title = "exp, exp2, exp10, asinh", TRIG},
