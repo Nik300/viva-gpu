@@ -237,7 +237,10 @@ static bool fetch_attrib(eval_ctx *e, unsigned attr, unsigned vertex, uint32_t o
 static inline float F(uint32_t u) { float f; memcpy(&f, &u, 4); return f; }
 static inline uint32_t U(float f) { uint32_t u; memcpy(&u, &f, 4); return u; }
 
-static uint32_t mask_bits(uint32_t v, unsigned bits) { return bits >= 32 ? v : bits == 1 ? (v != 0) : v & ((1u << bits) - 1); }
+// 1-bit values are 0/1, and the low bit is the value: inot of a boolean is ~x, and (~x != 0) made it always true
+// (RenderBox's plane__vertex picks its corners with inot(vid == 0 || vid == 3): every plane collapsed to one edge,
+// the scissor cut Settings > Battery's bars, grid and labels).
+static uint32_t mask_bits(uint32_t v, unsigned bits) { return bits >= 32 ? v : v & ((1u << bits) - 1); }
 static int32_t sext(uint32_t v, unsigned bits) { return bits >= 32 ? (int32_t)v : (int32_t)(v << (32 - bits)) >> (32 - bits); }
 
 static bool eval_alu(eval_ctx *e, nir_alu_instr *alu)

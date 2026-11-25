@@ -1,6 +1,6 @@
 // Draw bounds (vmg_bounds.c, P4/P5): small quads drawn the ways CoreAnimation draws them (a matrix in a constant
 // buffer times a vertex attribute, as fixed_vert_lph_spc; corners chosen by vertex_id from a storage buffer, as
-// path_blit_vert_lph; indexed strips; an off-screen and a partly off-screen quad) and a first-draw constant clear, on
+// path_blit_vert_lph; corners from negated booleans, as RenderBox's plane__vertex; indexed strips; an off-screen and a partly off-screen quad) and a first-draw constant clear, on
 // our device and on the Mac's GPU. The two images must match: a wrong box cuts pixels. Run with VMG_DRAW_BOUNDS=1 on
 // llvmpipe (Panfrost has it on by default); VMG_TRACE_DRAW=1 shows each draw's box.
 #import <Metal/Metal.h>
@@ -22,6 +22,9 @@ static NSString *const kMSL = @
     "vertex VOut id_vert(uint v [[vertex_id]], device const Rect &r [[buffer(2)]], device const float2 *c [[buffer(1)]]) {\n"
     "  float a = (v & 1) ? c[1].x : c[0].x, b = (v & 2) ? c[1].y : c[0].y;\n"
     "  VOut o; o.pos = float4(a * r.x.x + b * r.y.x + r.t.x, a * r.x.y + b * r.y.y + r.t.y, 0, 1); o.col = float4(0.2, 0.8, 0.3, 1); return o; }\n"
+    "vertex VOut plane_vert(ushort v [[vertex_id]], constant Rect &r [[buffer(2)]]) {\n"
+    "  float a = (v == 0 || v == 3) ? 0.0 : 1.0, b = v > 1 ? 1.0 : 0.0;\n"
+    "  VOut o; o.pos = float4(a * r.x.x + b * r.y.x + r.t.x, a * r.x.y + b * r.y.y + r.t.y, 0, 1); o.col = float4(0.9, 0.4, 0.2, 1); return o; }\n"
     "fragment float4 col_frag(VOut i [[stage_in]]) { return i.col; }\n"
     "struct Two { float4 c0 [[color(0)]]; };\n"
     "fragment Two clear_frag() { Two o; o.c0 = float4(0.1, 0.2, 0.3, 1); return o; }\n";
@@ -49,10 +52,13 @@ static uint8_t *render(id<MTLDevice> dev)
     pd.vertexDescriptor = nil;
     pd.vertexFunction = [lib newFunctionWithName:@"id_vert"];
     id<MTLRenderPipelineState> idp = [dev newRenderPipelineStateWithDescriptor:pd error:&err];
+    pd.vertexFunction = [lib newFunctionWithName:@"plane_vert"];
+    id<MTLRenderPipelineState> plane = [dev newRenderPipelineStateWithDescriptor:pd error:&err];
+    pd.vertexFunction = [lib newFunctionWithName:@"id_vert"];
     pd.colorAttachments[0].blendingEnabled = NO;
     pd.fragmentFunction = [lib newFunctionWithName:@"clear_frag"];
     id<MTLRenderPipelineState> clr = [dev newRenderPipelineStateWithDescriptor:pd error:&err];
-    if (!mat || !idp || !clr) { fprintf(stderr, "pipeline: %s\n", err.localizedDescription.UTF8String); exit(1); }
+    if (!mat || !idp || !clr || !plane) { fprintf(stderr, "pipeline: %s\n", err.localizedDescription.UTF8String); exit(1); }
 
     MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:W height:H mipmapped:NO];
     td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
@@ -100,6 +106,13 @@ static uint8_t *render(id<MTLDevice> dev)
             id<MTLBuffer> ib = [dev newBufferWithBytes:idx length:sizeof idx options:MTLResourceStorageModeShared];
             [e drawIndexedPrimitives:MTLPrimitiveTypeTriangleStrip indexCount:4 indexType:MTLIndexTypeUInt16 indexBuffer:ib indexBufferOffset:0];
         } else [e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+    }
+    // RenderBox's plane__vertex: corners from (v == 0 || v == 3) and v > 1 (booleans negated: inot in NIR)
+    [e setRenderPipelineState:plane];
+    for (int k = 0; k < 4; k++) {
+        struct { float x[4], y[4], t[4]; } r = { { 0.5f - 0.1f * k, 0, 0, 0 }, { 0, 0.04f + 0.05f * k, 0, 0 }, { -0.8f + 0.2f * k, 0.3f - 0.2f * k, 0, 0 } };
+        [e setVertexBytes:&r length:sizeof r atIndex:2];
+        [e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
     }
     [e endEncoding];
     [cb commit];
