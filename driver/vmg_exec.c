@@ -627,11 +627,12 @@ static void bind_stage(vmg_device *dev, enum vmg_stage stage, vmg_shader *sh, co
         for (unsigned i = 0; i < count; i++)
             fprintf(stderr, "vmg: stage %d ssbo %u res %p off %u size %u base %u\n", stage, i, (void *)ssbo[i].buffer,
                     ssbo[i].buffer_offset, ssbo[i].buffer_size, header[16 + i]);
-    // Uploaded per draw: drivers keep a user_buffer pointer and may read it after the next draw rewrote dev->sysvals
-    // (llvmpipe's fragment constants; every draw then saw the last draw's setBytes: RenderBox's path fills, whose
-    // per-draw parameters come through setFragmentBytes, lost their coverage). VMG_CB0_USER_BUFFER=1: the pointer.
+    // llvmpipe keeps a user_buffer pointer and reads its fragment constants after the next draw rewrote dev->sysvals
+    // (every draw saw the last draw's setFragmentBytes): uploaded per draw there. Panfrost copies user buffers at the
+    // draw; an uploaded buffer emptied its fragment push constants on the phone (Settings > Battery charts lost their
+    // grid too), so Panfrost keeps the pointer. VMG_CB0_USER_BUFFER=0/1 forces either way.
     static int user_cb = -1;
-    if (user_cb < 0) user_cb = getenv("VMG_CB0_USER_BUFFER") != NULL;
+    if (user_cb < 0) { const char *e = getenv("VMG_CB0_USER_BUFFER"); user_cb = e && *e ? *e != '0' : dev->panfrost; }
     unsigned cb_size = VMG_SYSVAL_HEADER + (r->push_slots ? VMG_PUSH_WINDOW : 0);
     struct pipe_constant_buffer cb = { .buffer = NULL, .buffer_offset = 0, .buffer_size = cb_size, .user_buffer = header };
     if (!user_cb && pipe->const_uploader) {
