@@ -802,6 +802,11 @@ void vmg_cmd_draw(vmg_device *dev, const vmg_draw_info *d)
                 d->instance_count, c->enabled, c->src_rgb, c->dst_rgb, c->src_alpha, c->dst_alpha, c->rgb_op, c->alpha_op,
                 c->write_mask, dev->scissor.minx, dev->scissor.miny, dev->scissor.maxx, dev->scissor.maxy,
                 dev->dsa ? " dsa" : "", p->fs_variant ? " variant" : "");
+        for (unsigned i = 1; i < VMG_MAX_COLOR; i++) {
+            const vmg_color_attachment *ci = &p->desc.color[i];
+            if (ci->format) fprintf(stderr, " c%u fmt %u blend %d %u,%u,%u,%u op %u,%u mask %x", i, ci->format, ci->enabled, ci->src_rgb,
+                                    ci->dst_rgb, ci->src_alpha, ci->dst_alpha, ci->rgb_op, ci->alpha_op, ci->write_mask);
+        }
         if (bounded) fprintf(stderr, " bounds %u,%u-%u,%u", bounds.minx, bounds.miny, bounds.maxx, bounds.maxy);
         else if (bounds_known) fprintf(stderr, " bounds full");
         else if (p->desc.vertex->bounds) fprintf(stderr, " bounds ? (%s)", vmg_bounds_why());
