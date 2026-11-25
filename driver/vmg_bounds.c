@@ -315,7 +315,16 @@ static bool eval_alu(eval_ctx *e, nir_alu_instr *alu)
         case nir_op_f2u32: r = (uint32_t)F(s[0]); break;
         case nir_op_u2u8: case nir_op_u2u16: case nir_op_u2u32: r = mask_bits(s[0], MIN2(sb[0], bits)); break;
         case nir_op_i2i8: case nir_op_i2i16: case nir_op_i2i32: r = (uint32_t)sext(s[0], sb[0]); break;
-        default: g_why = nir_op_infos[alu->op].name; RF;
+        // Panfrost's NIR options turn u2u32(u2u16(vertex_id)) into extract_u16 (CoreAnimation's path_blit_vert: the
+        // clip-mask clears of every frame had no bounds)
+        case nir_op_extract_u8: case nir_op_extract_i8: case nir_op_extract_u16: case nir_op_extract_i16: {
+            unsigned w = alu->op == nir_op_extract_u8 || alu->op == nir_op_extract_i8 ? 8 : 16, sh = (s[1] & 3) * w;
+            if (sh + w > 32) RF;
+            uint32_t f = (s[0] >> sh) & ((1u << w) - 1);
+            r = alu->op == nir_op_extract_i8 || alu->op == nir_op_extract_i16 ? (uint32_t)sext(f, w) : f;
+            break;
+        }
+        default: FAIL(nir_op_infos[alu->op].name);
         }
         // 1-bit results are stored as 0/1; 32-bit booleans would be ~0: none of the ops above produce those.
         dst[c] = mask_bits(r, bits);
@@ -379,7 +388,7 @@ static bool eval_intrinsic(eval_ctx *e, nir_intrinsic_instr *in, unsigned vertex
     case nir_intrinsic_load_base_vertex: dst[0] = e->base_vertex; return true;
     case nir_intrinsic_load_instance_id: dst[0] = 0; return true;
     case nir_intrinsic_load_base_instance: dst[0] = e->base_instance; return true;
-    default: g_why = nir_intrinsic_infos[in->intrinsic].name; RF;
+    default: FAIL(nir_intrinsic_infos[in->intrinsic].name);
     }
 }
 

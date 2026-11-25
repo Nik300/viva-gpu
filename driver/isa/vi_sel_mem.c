@@ -457,9 +457,25 @@ static bool store_words(S *t, sv *p, vi_ref value, unsigned words, unsigned extr
 // Sub-word access (8/16-bit scalars): read-modify-write of the containing word for stores; extraction for loads.
 static vi_ref load_sub(S *t, sv *p, unsigned bits, unsigned extra)
 {
-    // load the aligned word and shift
     vi_ref off = sv_word(t, p->off, 0);
     if (extra) off = off.kind == VI_IMM ? vi_imm(off.value + extra) : sel_iadd_imm(t, off, (int32_t)extra);
+    // 16-bit from a buffer, the constant pool or the push window: LD_PKA.i16 into the low half (as Mesa's 16-bit
+    // loads), instead of the aligned word + mask + shift (4 instructions for a half table lookup with a computed
+    // index: CoreAnimation's harmony/p3_clamp). VMG_ISA_NO_LD16=1: the word and shift.
+    bool pka = (p->space == SP_SSBO && !(p->slot < 0 && p->slot_mask)) || p->space == SP_POOL ||
+               (p->space == SP_PUSH && (off.kind != VI_IMM || getenv("VMG_ISA_PUSH_LD")));
+    if (bits == 16 && pka && !getenv("VMG_ISA_NO_LD16") && (off.kind != VI_IMM || !(off.value & 1))) {
+        vi_ref d = sel_tmp(t);
+        vi_instr *I = E(t, VA_LD_PKA_I16);
+        I->sw = d;
+        I->src[0] = off.kind == VI_IMM ? sel_mov32(t, off) : off;
+        I->src[1] = p->space == SP_SSBO ? sel_ssbo_handle(t, p) : vi_imm(p->space == SP_POOL ? VI_UBO_POOL : VI_UBO_CB0);
+        vi_set(I, VAF_lane, VA_LOAD_LANE_16_M_H0);
+        if (p->space == SP_SSBO) I->memory = true;
+        else t->ubo_mask |= 1u << (p->space == SP_POOL ? VI_UBO_POOL : VI_UBO_CB0);
+        return d;
+    }
+    // load the aligned word and shift
     sv q = *p;
     sv o2 = { .kind = SV_VAL, .bits = 32, .ncomp = 1 };
     vi_ref aligned, shift;

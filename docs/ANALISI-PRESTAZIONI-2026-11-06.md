@@ -7,7 +7,7 @@
 | P1 boost CPU per l'interfaccia | kernel 0183 (`viva_cpufreq.c`, `VivaGT9896.cpp`, `SweetFramebuffer.cpp`, `gpu kv`) | fatto, compilato in CI; **non provato sul telefono** | `vivacpuboostms=0`, `vivacpuboost=MHz`, link `cpu boost on\|off` |
 | P2 pool di pagine contigue | kernel 0184 (`SweetSurface.cpp`, `SweetFramebuffer.cpp`) | fatto, compilato; non provato | `vivafbpool=N` (0 = come prima) |
 | P3 chi aspetta in SwapWait | kernel 0184: contatori per motivo in `disp` / `disp kv` | contatori fatti; la misura e le leve (a)-(c) richiedono il telefono | `disp lat reset` |
-| P4 scissor dai vertici | driver `vmg_bounds.c` (gpu db7e512) | fatto; sul Mac identico bit per bit con/senza (`tests/bounds.m`) | `VMG_NO_DRAW_BOUNDS=1` |
+| P4 scissor dai vertici | driver `vmg_bounds.c` (gpu db7e512) | fatto; sul Mac identico bit per bit con/senza (`tests/bounds.m`). 2026-11-25: `extract_u8/u16` (le opzioni NIR di Panfrost ne fanno da `u2u32(u2u16(vertex_id))`): i clear del clip mask di CA (`path_blit_vert` + `attachment_clear`, 2,2 schermate per frame dello swipe) non avevano bounds | `VMG_NO_DRAW_BOUNDS=1` |
 | P5 primo draw costante → clear | driver `vmg_bounds.c` / `vmg_exec.c` | fatto, ma il trace mostra che `attachment_clear` di CA è a metà pass con mask 0 su c0 (azzera solo c1): su CA scatterà di rado | `VMG_NO_CLEAR_DRAW=1` |
 | P6 pitch dei client a 64 | kernel 0184 (`sweet_surface_layout`) | fatto, compilato; non provato | `vivasurfpitch=0` |
 | P7 CRC sulle risorse importate | – | rimandato: il buffer CRC dovrebbe stare in una BO separata (l'offset è relativo al piano dell'IOSurface) e un CRC vecchio dopo una scrittura di un altro processo o della CPU salterebbe tile cambiati | – |

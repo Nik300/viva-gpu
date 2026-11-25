@@ -609,6 +609,30 @@ static void ref_C1(const isa_case *c, const double *g, double *out) {
     }
 }
 
+// 16-bit loads with a computed index (LD_PKA.i16; VMG_ISA_NO_LD16=1 for word + shift): device half table, constant
+// ushort table, half table of the program (constant pool), like CoreAnimation's harmony / p3_clamp lookups.
+static const char kC1h[] =
+    "constant half T[16] = { 0.5h, -1.25h, 3.0h, 7.75h, -0.125h, 2.5h, 9.0h, -6.5h, 1.0h, 0.0625h, -3.75h, 4.25h, 8.5h, -2.0h, 0.375h, 5.5h };\n"
+    "kernel void k(device float4 *o [[buffer(0)]], device const half *lut [[buffer(1)]], constant ushort *u [[buffer(2)]],\n"
+    "              uint2 p [[thread_position_in_grid]]) {\n"
+    "  uint i = (p.x * 3 + p.y) & 255;\n"
+    "  o[p.y * 64 + p.x] = float4(lut[i], float(u[(p.x ^ p.y) & 63]), T[(p.x + p.y) & 15], lut[255 - i] + lut[i ^ 1]); }\n";
+static float c1h_lut(int i) { return (float)(_Float16)(i * 0.25f - 20.0f); }
+static void setup_C1h(ISAInputs *in) {
+    _Float16 h[256]; uint16_t u[64];
+    for (int i = 0; i < 256; i++) h[i] = (_Float16)c1h_lut(i);
+    for (int i = 0; i < 64; i++) u[i] = (uint16_t)(i * 1000 + 7);
+    in.buffers[@1] = buf(in, h, sizeof h);
+    in.buffers[@2] = buf(in, u, sizeof u);
+}
+static void ref_C1h(const isa_case *c, const double *g, double *out) {
+    static const float T[16] = {0.5f, -1.25f, 3.0f, 7.75f, -0.125f, 2.5f, 9.0f, -6.5f, 1.0f, 0.0625f, -3.75f, 4.25f, 8.5f, -2.0f, 0.375f, 5.5f};
+    PIX(c) {
+        int i = (x * 3 + y) & 255;
+        set4(OUT(x, y), c1h_lut(i), ((x ^ y) & 63) * 1000 + 7, T[(x + y) & 15], (float)(_Float16)(c1h_lut(255 - i) + c1h_lut(i ^ 1)));
+    }
+}
+
 static const char kC2[] = FS_VS
     "struct P { float4 scale; float2 off; uint n; float k; };\n"
     "fragment float4 fs(V v [[stage_in]], constant float4 &c [[buffer(0)]], constant P &p [[buffer(1)]]) {\n"
@@ -1819,6 +1843,8 @@ const isa_case isa_cases[] = {
     {CS(B11, ISA_OUT_F32), .title = "dispatchThreads non uniforme (guardia) 61×59", .gw = 61, .gh = 59, .vis_hi = 64},
     // C: memory
     {CS(C1, ISA_OUT_F32), .title = "Buffer device: aritmetica dei puntatori, select e phi", .setup = setup_C1, .vis_hi = 1000},
+    {CS(C1h, ISA_OUT_F32), .id = "C1", .title = "Load a 16 bit con indice calcolato: LD_PKA.i16 (VMG_ISA_NO_LD16)", .setup = setup_C1h,
+     .feats = "C2,C4,E3,E5,E10", .vis_lo = -20, .vis_hi = 64000},
     {FR(C2), .title = "Push window: buffer constant piccoli in FAU", .setup = setup_C2},
     {CS(C3, ISA_OUT_F32), .title = "Sysval: threads_per_grid, threadgroups_per_grid", .gh = 48, .groups = true, .vis_hi = 1000},
     {CS(C4, ISA_OUT_F32), .title = "Constant pool: tabelle globali costanti", .vis_lo = -10, .vis_hi = 40},

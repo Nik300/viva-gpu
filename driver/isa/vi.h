@@ -158,6 +158,7 @@ bool vi_fold(vi_shader *s);
 bool vi_fold_disabled(void);
 bool vi_fold_branches(vi_shader *s);
 void vi_drop_self_moves(vi_shader *s);               // after RA
+void vi_propagate_reg_copies(vi_shader *s);         // after RA: readers of MOV d = s read s (in the block)
 
 // Liveness of vregs (vi_ra.c), also used by the flow pass for helper analysis.
 void vi_liveness(vi_shader *s);

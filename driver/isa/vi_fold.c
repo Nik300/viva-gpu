@@ -257,7 +257,16 @@ static bool lane_origin(vi_shader *s, defmap *m, vi_ref r, unsigned lane, vi_ref
     static const enum va_field l01[] = { VAF_lane0, VAF_lane1, VAF_COUNT };
     vi_ref src;
     unsigned sl;
+    static const enum va_field nf[] = { VAF_COUNT };
+    uint32_t c1, c2;
     if (D->op == VA_U16_TO_U32 && lane == 0 && only_fields(D, l0)) { src = D->src[0]; sl = (unsigned)fval(D, VAF_lane0, 0); }
+    else if ((D->op == VA_RSHIFT_OR_I32 || D->op == VA_LSHIFT_OR_I32) && only_fields(D, nf) && cval(s, m, D->src[1], &c1) && c1 == 16 &&
+             cval(s, m, D->src[2], &c2) && c2 == 0) {
+        // x >> 16: lane 0 = x.h1, lane 1 = 0; x << 16: lane 0 = 0, lane 1 = x.h0
+        bool right = D->op == VA_RSHIFT_OR_I32;
+        if ((right && lane == 1) || (!right && lane == 0)) { *x = vi_imm(0); *xl = 0; return true; }
+        src = D->src[0]; sl = right ? 1 : 0;
+    }
     else if (D->op == VA_MKVEC_V2I16 && only_fields(D, l01)) {
         src = D->src[lane]; sl = (unsigned)fval(D, lane ? VAF_lane1 : VAF_lane0, 0);
     } else return false;
@@ -423,6 +432,12 @@ static unsigned zero_high(vi_shader *s, defmap *m, vi_ref r)
     case VA_MKVEC_V2I16:
         if (!only_fields(D, l01) || !cval(s, m, D->src[1], &c)) return 0;
         return lane16(c, (unsigned)fval(D, VAF_lane1, 0)) == 0 ? 16 : 0;
+    case VA_RSHIFT_OR_I32: {
+        static const enum va_field nf[] = { VAF_COUNT };
+        if (!only_fields(D, nf) || !cval(s, m, D->src[1], &c) || c > 31 || !cval(s, m, D->src[2], &c2) || c2 != 0) return 0;
+        unsigned z = c + (D->src[0].kind == VI_VREG ? (D->src[0].value != r.value ? zero_high(s, m, D->src[0]) : 0) : 0);
+        return z >= 24 ? 24 : z >= 16 ? 16 : 0;
+    }
     case VA_AND_I32: case VA_LSHIFT_AND_I32: case VA_RSHIFT_AND_I32: {
         static const enum va_field ok[] = { VAF_lanes1, VAF_COUNT };
         if (!only_fields(D, ok) || fval(D, VAF_lanes1, 0) != 0 || !cval(s, m, D->src[2], &c)) return 0;
@@ -526,6 +541,17 @@ static bool more_peepholes(vi_shader *s, defmap *m, vi_instr *I)
         lane16(a, (unsigned)fval(I, VAF_lane1, 0)) == 0 && I->src[0].kind == VI_VREG && zero_high(s, m, I->src[0]) >= 16) {
         make_mov(I, I->src[0]);
         return true;
+    }
+    // shifts by 0 combined with 0 (OR / XOR) or ~0 (AND): the value itself
+    if (I->op == VA_LSHIFT_OR_I32 || I->op == VA_RSHIFT_OR_I32 || I->op == VA_LSHIFT_XOR_I32 || I->op == VA_RSHIFT_XOR_I32 ||
+        I->op == VA_LSHIFT_AND_I32 || I->op == VA_RSHIFT_AND_I32) {
+        static const enum va_field nf[] = { VAF_COUNT };
+        bool and_ = I->op == VA_LSHIFT_AND_I32 || I->op == VA_RSHIFT_AND_I32;
+        if (only_fields(I, nf) && (I->src[1].kind == VI_NONE || (cval(s, m, I->src[1], &a) && a == 0)) && cval(s, m, I->src[2], &b) &&
+            b == (and_ ? 0xffffffffu : 0u) && I->src[0].kind != VI_NONE && (I->src[0].kind != VI_VREG || stable(s, m, I->src[0]))) {
+            make_mov(I, I->src[0]);
+            return true;
+        }
     }
     // x + -0 = x; x * 1 + -0 = x (exact for every x, signed zeros and NaNs included)
     if (I->op == VA_FADD_F32 && I->src[0].kind == VI_VREG) {
@@ -717,4 +743,77 @@ void vi_drop_self_moves(vi_shader *s)
         if (I->op != VA_MOV_I32 || I->flow || I->target || I->is_nop || I->f.set[VAF_dest_width]) continue;
         if (I->dest.kind == VI_REG && I->src[0].kind == VI_REG && I->dest.value == I->src[0].value) list_del(&I->link);
     }
+}
+
+// ---- Copies after register allocation ------------------------------------------------------------------------------------
+// `MOV d = s` left by RA (words of split message results, phi copies, operands kept apart): within the block, the
+// readers of d read s instead while s still holds the value, and the MOV goes away; d must not be live at the end of
+// the block unless it is written again first. Whole-register single-word reads only (vector and staging operands
+// keep their registers). Liveness: a backward pass over physical registers. VMG_ISA_NO_REGCOPY=1 turns it off.
+
+static uint64_t reg_mask(const vi_ref *r)
+{
+    if (r->kind != VI_REG) return 0;
+    unsigned n = r->count ? r->count : 1;
+    uint64_t m = 0;
+    for (unsigned w = 0; w < n && r->value + w < 64; w++) m |= 1ull << (r->value + w);
+    return m;
+}
+
+static uint64_t instr_reads(const vi_instr *I)
+{
+    return reg_mask(&I->src[0]) | reg_mask(&I->src[1]) | reg_mask(&I->src[2]) | reg_mask(&I->src[3]) | reg_mask(&I->sr);
+}
+
+static uint64_t instr_writes(const vi_instr *I) { return reg_mask(&I->dest) | reg_mask(&I->sw) | I->clobber; }
+
+void vi_propagate_reg_copies(vi_shader *s)
+{
+    if (vi_fold_disabled() || getenv("VMG_ISA_NO_REGCOPY")) return;
+    unsigned nb = 0;
+    vi_foreach_block(s, b) nb = MAX2(nb, b->index + 1);
+    uint64_t *use = calloc(nb + 1, 8), *def = calloc(nb + 1, 8), *in = calloc(nb + 1, 8), *out = calloc(nb + 1, 8);
+    vi_foreach_block(s, b) {
+        uint64_t u = 0, d = 0;
+        vi_foreach_instr(b, I) { u |= instr_reads(I) & ~d; d |= instr_writes(I); }
+        use[b->index] = u; def[b->index] = d;
+    }
+    for (bool changed = true; changed;) {
+        changed = false;
+        vi_foreach_block_rev(s, b) {
+            uint64_t o = 0;
+            for (unsigned k = 0; k < 2; k++) if (b->succ[k]) o |= in[b->succ[k]->index];
+            uint64_t i = use[b->index] | (o & ~def[b->index]);
+            if (o != out[b->index] || i != in[b->index]) { out[b->index] = o; in[b->index] = i; changed = true; }
+        }
+    }
+    vi_foreach_block(s, b) vi_foreach_instr_safe(b, M) {
+        if (M->op != VA_MOV_I32 || M->flow || M->target || M->is_nop || M->dest.kind != VI_REG || M->src[0].kind != VI_REG) continue;
+        if ((M->dest.count && M->dest.count != 1) || (M->src[0].count && M->src[0].count != 1)) continue;
+        bool other = false;
+        for (unsigned f = 0; f < VAF_COUNT; f++) if (M->f.set[f]) other = true;
+        if (other) continue;
+        unsigned dr = M->dest.value, sr = M->src[0].value;
+        uint64_t dm = 1ull << dr, sm = 1ull << sr;
+        if (dr == sr || (s->reserved_regs & dm) || dr == 48) continue;
+        vi_ref *reads[256];
+        unsigned nr = 0;
+        bool ok = true, s_gone = false, ended = false;
+        for (struct list_head *l = M->link.next; l != &b->instrs && ok && !ended; l = l->next) {
+            vi_instr *J = list_entry(l, vi_instr, link);
+            vi_ref *rs[5] = { &J->src[0], &J->src[1], &J->src[2], &J->src[3], &J->sr };
+            for (unsigned k = 0; k < 5 && ok; k++) {
+                if (!(reg_mask(rs[k]) & dm)) continue;
+                if (s_gone || k == 4 || (rs[k]->count && rs[k]->count != 1) || nr == 256) { ok = false; break; }
+                reads[nr++] = rs[k];
+            }
+            uint64_t w = instr_writes(J);
+            if (w & dm) ended = true;
+            if (w & sm) s_gone = true;
+        }
+        if (!ok || (!ended && (out[b->index] & dm))) continue;
+        for (unsigned k = 0; k < nr; k++) { reads[k]->value = sr; reads[k]->last = false; }
+        list_del(&M->link);
+    }
+    free(use); free(def); free(in); free(out);
 }

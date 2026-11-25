@@ -227,3 +227,16 @@ AddressSanitizer; `isatest -mode nir` 110 casi, 0 falliti. I toggle sono nella c
 Da verificare sul telefono (`isatest` E4/E5/E6 con e senza toggle, giro di misure). Resta sopra Mesa RenderBox: copie
 ai punti di giunzione dei phi e spill di `uber_vertex` (allocatore lineare). `VMG_ISA_CHECK=1` segnala già prima di
 queste modifiche una lettura prima della definizione in `uber_vertex` (v30/v31).
+
+### Secondo giro (2026-11-25 notte)
+
+| Modifica | File | Toggle (comportamento vecchio) |
+|---|---|---|
+| Copie dopo l'allocazione: i lettori di `MOV d = s` nel blocco leggono s finché s tiene il valore (parole delle split dei messaggi, copie dei phi); liveness dei registri fisici all'indietro | `vi_fold.c` (`vi_propagate_reg_copies`) | `VMG_ISA_NO_REGCOPY=1` |
+| Load a 16 bit da buffer / pool / push window con LD_PKA.i16 (prima: parola + maschera + shift; tabelle half di `harmony`/`p3_clamp`) (test `isatest` C1 "Load a 16 bit") | `vi_sel_mem.c` | `VMG_ISA_NO_LD16=1` |
+| Shift per 0 con OR/XOR 0 o AND ~0 = il valore; metà a 16 bit attraverso `>> 16` / `<< 16` (metà alte delle uniform half: niente più `MOV r, 0` + shift + MKVEC); bit alti a zero dopo shift a destra | `vi_fold.c` | `VMG_ISA_NO_FOLD=1` |
+
+Risultati (istruzioni ISA / Mesa): corpus reale **1,061 → 1,014**, QuartzCore **1,007 → 0,941**, RenderBox **1,485 →
+1,407**; `harmony` 2,28 → 1,44, `p3_clamp` 1,75 → 1,36, `display_overdrive` 1,78 → 1,28. Le letture prima della
+definizione segnalate da `VMG_ISA_CHECK=1` in `uber_vertex`, `stroke_lines_vertex` e `siriChipVert` c'erano già in
+840e905 (da indagare a parte).
