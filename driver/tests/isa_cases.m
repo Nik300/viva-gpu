@@ -584,6 +584,59 @@ static void ref_B11(const isa_case *c, const double *g, double *out) {
     PIX(c) { if (x < 61 && y < 59) set4(OUT(x, y), x, y, 61, 59); else set4(OUT(x, y), 0, 0, 0, 0); }
 }
 
+// RenderBox's path fill: signed coverage summed into colour 1 (RG16Float, memoryless) with ADD one+one and write mask G,
+// then read back with framebuffer fetch (Settings > Battery's bars: strokes, which use MAX, showed; fills did not).
+static const char kB9a[] = FS_VS
+    "struct Cov { half2 c [[color(1)]]; };\n"
+    "fragment Cov acc(V v [[stage_in]], constant float4 &k [[buffer(0)]]) {\n"
+    "  float2 q = floor(v.p.xy); bool in = (k.z == 0 ? q.x : q.y) < k.w;\n"
+    "  Cov o; o.c = half2(7.0h, in ? half(k.x) : half(k.y)); return o; }\n"
+    "struct Out { float4 c0 [[color(0)]]; half2 c1 [[color(1)]]; };\n"
+    "fragment Out fs(V v [[stage_in]], half2 cov [[color(1)]]) { Out o; o.c0 = float4(cov.y, cov.x, 0, 1); o.c1 = half2(0); return o; }\n";
+static id extra_B9a(ISAInputs *in, NSError **err) {
+    MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
+    d.vertexFunction = [in.library newFunctionWithName:@"vs"];
+    d.fragmentFunction = [in.library newFunctionWithName:@"acc"];
+    d.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA32Float;
+    d.colorAttachments[0].writeMask = MTLColorWriteMaskNone;
+    d.colorAttachments[1].pixelFormat = MTLPixelFormatRG16Float;
+    d.colorAttachments[1].writeMask = MTLColorWriteMaskGreen;
+    d.colorAttachments[1].blendingEnabled = YES;
+    d.colorAttachments[1].rgbBlendOperation = d.colorAttachments[1].alphaBlendOperation = MTLBlendOperationAdd;
+    d.colorAttachments[1].sourceRGBBlendFactor = d.colorAttachments[1].destinationRGBBlendFactor = MTLBlendFactorOne;
+    d.colorAttachments[1].sourceAlphaBlendFactor = d.colorAttachments[1].destinationAlphaBlendFactor = MTLBlendFactorOne;
+    return [in.device newRenderPipelineStateWithDescriptor:d error:err];
+}
+static void pipe_B9a(MTLRenderPipelineDescriptor *d) { d.colorAttachments[1].pixelFormat = MTLPixelFormatRG16Float; }
+static void pass_B9a(MTLRenderPassDescriptor *p, ISAInputs *in) {
+    MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRG16Float width:64 height:64 mipmapped:NO];
+    td.usage = MTLTextureUsageRenderTarget;
+#if TARGET_OS_IPHONE
+    td.storageMode = MTLStorageModeMemoryless;
+#else
+    td.storageMode = MTLStorageModePrivate;
+#endif
+    p.colorAttachments[1].texture = [in.device newTextureWithDescriptor:td];
+    p.colorAttachments[1].loadAction = MTLLoadActionClear;
+    p.colorAttachments[1].clearColor = MTLClearColorMake(0, 0, 0, 0);
+    p.colorAttachments[1].storeAction = MTLStoreActionDontCare;
+}
+static void draw_B9a(id<MTLRenderCommandEncoder> e, ISAInputs *in, const isa_case *c, int n) {
+    for (int i = 0; i < n; i++) {
+        float k[3][4] = { { 0.25f, 0.25f, 0, 64 }, { 0.75f, 0, 0, 40 }, { -0.5f, 0, 1, 32 } };
+        [e setRenderPipelineState:in.extra];
+        for (int j = 0; j < 3; j++) {
+            [e setFragmentBytes:k[j] length:sizeof k[j] atIndex:0];
+            [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        }
+        [e setRenderPipelineState:in.pipeline];
+        [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    }
+}
+static void ref_B9a(const isa_case *c, const double *g, double *out) {
+    PIX(c) set4(OUT(x, y), 0.25 + (x < 40 ? 0.75 : 0) - (y < 32 ? 0.5 : 0), 0, 0, 1);
+}
+
 // ==== C: memory ===========================================================================================================
 
 static const char kC1[] =
@@ -1867,6 +1920,8 @@ const isa_case isa_cases[] = {
     {FR(B8), .title = "discard_fragment", CLEAR},
     {.id = "B9", .title = "Framebuffer fetch: [[color(0)]] in ingresso", .kind = ISA_FRAG, .out = ISA_OUT_RGBA8, .w = 64, .h = 64,
      .msl = kB9, .ref = ref_pattern_swap, .prep_fs = "prep", .tol = 0.006},
+    {FR(B9a), .id = "B9", .title = "Copertura con segno in colour 1 (RG16F): blend ADD one+one, maschera G, framebuffer fetch",
+     .extra = extra_B9a, .pipe = pipe_B9a, .pass = pass_B9a, .draw = draw_B9a, .feats = "E5,B7", .tol = 2e-3, .vis_hi = 1},
     {CS(B10, ISA_OUT_U32), .title = "Valori di sistema compute (griglia, gruppi, simdgroup, quad)", .groups = true},
     {CS(B11, ISA_OUT_F32), .title = "dispatchThreads non uniforme (guardia) 61×59", .gw = 61, .gh = 59, .vis_hi = 64},
     // C: memory

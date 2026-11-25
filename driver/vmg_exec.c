@@ -7,6 +7,7 @@
 #include <string.h>
 #include "util/hash_table.h"
 #include "util/u_inlines.h"
+#include "util/u_upload_mgr.h"
 #include "util/u_math.h"
 #include "util/u_gen_mipmap.h"
 #include "util/format/u_format.h"
@@ -626,9 +627,20 @@ static void bind_stage(vmg_device *dev, enum vmg_stage stage, vmg_shader *sh, co
         for (unsigned i = 0; i < count; i++)
             fprintf(stderr, "vmg: stage %d ssbo %u res %p off %u size %u base %u\n", stage, i, (void *)ssbo[i].buffer,
                     ssbo[i].buffer_offset, ssbo[i].buffer_size, header[16 + i]);
-    struct pipe_constant_buffer cb = { .buffer = NULL, .buffer_offset = 0,
-                                       .buffer_size = VMG_SYSVAL_HEADER + (r->push_slots ? VMG_PUSH_WINDOW : 0), .user_buffer = header };
+    // Uploaded per draw: drivers keep a user_buffer pointer and may read it after the next draw rewrote dev->sysvals
+    // (llvmpipe's fragment constants; every draw then saw the last draw's setBytes: RenderBox's path fills, whose
+    // per-draw parameters come through setFragmentBytes, lost their coverage). VMG_CB0_USER_BUFFER=1: the pointer.
+    static int user_cb = -1;
+    if (user_cb < 0) user_cb = getenv("VMG_CB0_USER_BUFFER") != NULL;
+    unsigned cb_size = VMG_SYSVAL_HEADER + (r->push_slots ? VMG_PUSH_WINDOW : 0);
+    struct pipe_constant_buffer cb = { .buffer = NULL, .buffer_offset = 0, .buffer_size = cb_size, .user_buffer = header };
+    if (!user_cb && pipe->const_uploader) {
+        cb.user_buffer = NULL;
+        u_upload_data_ref(pipe->const_uploader, 0, cb_size, 16, header, &cb.buffer_offset, &cb.buffer);
+        if (!cb.buffer) { cb.user_buffer = header; cb.buffer_offset = 0; }
+    }
     pipe->set_constant_buffer(pipe, gs, 0, &cb);
+    pipe_resource_reference(&cb.buffer, NULL);
     if (sh->pool_buffer) {
         struct pipe_constant_buffer pc = { .buffer = sh->pool_buffer, .buffer_offset = 0, .buffer_size = sh->pool_buffer->width0 };
         pipe->set_constant_buffer(pipe, gs, 1, &pc);
