@@ -594,6 +594,11 @@ static const char kB9a[] = FS_VS
     "struct Out { float4 c0 [[color(0)]]; half2 c1 [[color(1)]]; };\n"
     "fragment Out fs(V v [[stage_in]], half2 cov [[color(1)]]) { Out o; o.c0 = float4(cov.y, cov.x, 0, 1); o.c1 = half2(0); return o; }\n"
     "fragment float4 fs_ro(V v [[stage_in]], half2 cov [[color(1)]]) { return float4(cov.y, cov.x, 0, 1); }\n"
+    "struct Cov4 { half4 c [[color(1)]]; };\n"
+    "fragment Cov4 acc4(V v [[stage_in]], constant float4 &k [[buffer(0)]]) {\n"
+    "  float2 q = floor(v.p.xy); bool in = (k.z == 0 ? q.x : q.y) < k.w;\n"
+    "  Cov4 o; o.c = half4(0.0h, in ? half(k.x) : half(k.y), 0.0h, 1.0h); return o; }\n"
+    "fragment float4 fs4(V v [[stage_in]], half4 cov [[color(1)]]) { return float4(cov.y, cov.x, 0, 1); }\n"
     "struct Both { float4 c0 [[color(0)]]; half2 c1 [[color(1)]]; };\n"
     "fragment Both acc2(V v [[stage_in]], constant float4 &k [[buffer(0)]]) {\n"
     "  float2 q = floor(v.p.xy); bool in = (k.z == 0 ? q.x : q.y) < k.w;\n"
@@ -601,18 +606,20 @@ static const char kB9a[] = FS_VS
 // variants: 0 = ADD one+one mask G (RenderBox), 1 = ADD mask RG, 2 = ADD on RGBA16Float mask G, 3 = MAX mask G, 4 = no blending,
 // 5 = no blending into RGBA8Unorm (CoreAnimation's clip mask format), 6 = as 4 with a private (not memoryless) colour 1,
 // 7 = as 4, resolve does not write colour 1 (fs_ro), 8 = as 4, the accumulating shader also writes colour 0 (acc2),
-// 9 = as 0 with colour 0 in RGBA8Unorm (RenderBox: BGRA8 + RG16F), 10 = as 4 with colour 0 in RGBA8Unorm
+// 9 = as 0 with colour 0 in RGBA8Unorm (RenderBox: BGRA8 + RG16F), 10 = as 4 with colour 0 in RGBA8Unorm,
+// 11 = as 10 with half4 colour 1 (acc4/fs4, as CoreAnimation's clip mask), 12 = as 11 with colour 1 RGBA8Unorm
 static int g_b9_variant;
-static MTLPixelFormat b9_format(void) { return g_b9_variant == 2 ? MTLPixelFormatRGBA16Float : g_b9_variant == 5 ? MTLPixelFormatRGBA8Unorm : MTLPixelFormatRG16Float; }
+static MTLPixelFormat b9_format(void) { return g_b9_variant == 2 ? MTLPixelFormatRGBA16Float : (g_b9_variant == 5 || g_b9_variant == 12) ? MTLPixelFormatRGBA8Unorm : MTLPixelFormatRG16Float; }
 static bool b9_blend(void) { return g_b9_variant < 4 || g_b9_variant == 9; }
 static id extra_B9v(ISAInputs *in, NSError **err) {
     MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
     d.vertexFunction = [in.library newFunctionWithName:@"vs"];
-    d.fragmentFunction = [in.library newFunctionWithName:g_b9_variant == 8 ? @"acc2" : @"acc"];
+    d.fragmentFunction = [in.library newFunctionWithName:g_b9_variant == 8 ? @"acc2" : g_b9_variant >= 11 ? @"acc4" : @"acc"];
     d.colorAttachments[0].pixelFormat = g_b9_variant >= 9 ? MTLPixelFormatRGBA8Unorm : MTLPixelFormatRGBA32Float;
+    d.colorAttachments[1].writeMask = MTLColorWriteMaskAll;
     d.colorAttachments[0].writeMask = MTLColorWriteMaskNone;
     d.colorAttachments[1].pixelFormat = b9_format();
-    d.colorAttachments[1].writeMask = g_b9_variant == 1 ? (MTLColorWriteMaskRed | MTLColorWriteMaskGreen) : MTLColorWriteMaskGreen;
+    d.colorAttachments[1].writeMask = g_b9_variant == 1 ? (MTLColorWriteMaskRed | MTLColorWriteMaskGreen) : g_b9_variant >= 11 ? MTLColorWriteMaskAll : MTLColorWriteMaskGreen;
     d.colorAttachments[1].blendingEnabled = b9_blend();
     MTLBlendOperation op = g_b9_variant == 3 ? MTLBlendOperationMax : MTLBlendOperationAdd;
     d.colorAttachments[1].rgbBlendOperation = d.colorAttachments[1].alphaBlendOperation = op;
@@ -631,6 +638,8 @@ static id extra_B9h(ISAInputs *in, NSError **err) { g_b9_variant = 7; return ext
 static id extra_B9i(ISAInputs *in, NSError **err) { g_b9_variant = 8; return extra_B9v(in, err); }
 static id extra_B9j(ISAInputs *in, NSError **err) { g_b9_variant = 9; return extra_B9v(in, err); }
 static id extra_B9k(ISAInputs *in, NSError **err) { g_b9_variant = 10; return extra_B9v(in, err); }
+static id extra_B9l(ISAInputs *in, NSError **err) { g_b9_variant = 11; return extra_B9v(in, err); }
+static id extra_B9m(ISAInputs *in, NSError **err) { g_b9_variant = 12; return extra_B9v(in, err); }
 static void pipe_B9a(MTLRenderPipelineDescriptor *d) { d.colorAttachments[1].pixelFormat = b9_format(); }
 static void pass_B9a(MTLRenderPassDescriptor *p, ISAInputs *in) {
     MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:b9_format() width:64 height:64 mipmapped:NO];
@@ -688,6 +697,8 @@ static void ref_B9e(const isa_case *c, const double *g, double *out) {   // the 
 #define kB9j kB9a
 #define kB9k kB9a
 #define ref_B9k ref_B9e
+#define ref_B9l ref_B9e
+#define ref_B9m ref_B9e
 static void ref_B9j(const isa_case *c, const double *g, double *out) {   // RGBA8 colour 0: clamped
     PIX(c) { double v = 0.25 + (x < 40 ? 0.75 : 0) - (y < 32 ? 0.5 : 0); set4(OUT(x, y), v < 0 ? 0 : v > 1 ? 1 : v, 0, 0, 1); }
 }
@@ -1999,6 +2010,12 @@ const isa_case isa_cases[] = {
      .tol = 0.01},
     {.id = "B9", .title = "Diagnosi B9a: colour 0 RGBA8 + colour 1 RG16F, senza blending", .kind = ISA_FRAG, .out = ISA_OUT_RGBA8,
      .w = 64, .h = 64, .msl = kB9a, .ref = ref_B9k, .extra = extra_B9k, .pipe = pipe_B9a, .pass = pass_B9a, .draw = draw_B9a, .feats = "E5,B7",
+     .tol = 0.01},
+    {.id = "B9", .title = "Diagnosi B9a: come B9k con half4 in colour 1", .kind = ISA_FRAG, .out = ISA_OUT_RGBA8, .w = 64, .h = 64,
+     .msl = kB9a, .fs = "fs4", .ref = ref_B9l, .extra = extra_B9l, .pipe = pipe_B9a, .pass = pass_B9a, .draw = draw_B9a, .feats = "E5,B7", .tol = 0.01,
+     .skip_llvmpipe = true, .mac_note = "llvmpipe: crash in LLVM compilando il fetch half4 da RG16F"},
+    {.id = "B9", .title = "Diagnosi B9a: half4 in colour 1 RGBA8 (come il clip mask di CA)", .kind = ISA_FRAG, .out = ISA_OUT_RGBA8, .w = 64,
+     .h = 64, .msl = kB9a, .fs = "fs4", .ref = ref_B9m, .extra = extra_B9m, .pipe = pipe_B9a, .pass = pass_B9a, .draw = draw_B9a, .feats = "E5,B7",
      .tol = 0.01},
     {CS(B10, ISA_OUT_U32), .title = "Valori di sistema compute (griglia, gruppi, simdgroup, quad)", .groups = true},
     {CS(B11, ISA_OUT_F32), .title = "dispatchThreads non uniforme (guardia) 61×59", .gw = 61, .gh = 59, .vis_hi = 64},
