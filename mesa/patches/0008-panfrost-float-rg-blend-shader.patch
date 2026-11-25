@@ -1,0 +1,30 @@
+Viva: also a blend shader for blending that reads a float render target of fewer than 4 channels (RG16F ADD mask RG, isatest B9).
+diff --git a/src/gallium/drivers/panfrost/pan_context.c b/src/gallium/drivers/panfrost/pan_context.c
+--- a/src/gallium/drivers/panfrost/pan_context.c
++++ b/src/gallium/drivers/panfrost/pan_context.c
+@@ -175,17 +175,21 @@
+ 
+    /* Viva: on Valhall (Mali-G57) fixed-function blending of a float render
+     * target with a partial colour mask writes the wrong channels (RG16F with
+-    * mask G stores the G output into R, ADD gives NaN): blend shader instead.
+-    * VMG_PAN_FLOAT_MASK_FF=1 keeps fixed function. */
++    * mask G stores the G output into R, ADD gives NaN), and so does blending
++    * that reads a float target of fewer than 4 channels (RG16F ADD mask RG):
++    * blend shader instead (isatest B9). VMG_PAN_FLOAT_MASK_FF=1 keeps fixed
++    * function. */
+    static int float_mask_ff = -1;
+    if (float_mask_ff < 0) {
+       const char *e = getenv("VMG_PAN_FLOAT_MASK_FF");
+       float_mask_ff = e && *e && *e != '0';
+    }
+    if (fixed_function && is_float && !float_mask_ff) {
+-      unsigned comp = util_format_colormask(util_format_description(fmt));
++      const struct util_format_description *desc = util_format_description(fmt);
++      unsigned comp = util_format_colormask(desc);
+       unsigned mask = blend->pan.rts[rti].equation.color_mask;
+-      if (mask && (mask & comp) != comp)
++      if (mask && ((mask & comp) != comp ||
++                   (info.load_dest && desc->nr_channels < 4)))
+          fixed_function = false;
+    }
+ 
