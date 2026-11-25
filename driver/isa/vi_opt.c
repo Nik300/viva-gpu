@@ -1105,11 +1105,39 @@ static bool if_convert_one(vi_shader *s, vi_block *h)
             if (e == nsel) { if (nsel == 64) return false; sel[nsel].v = w[q]->value; sel[nsel].word = w[q]->word; sel[nsel].nz = sel[nsel].z = vi_none(); nsel++; }
         }
     }
+    // A side may read a phi register after writing it: after an inner if-conversion its join select is in the side and
+    // the inner join's code reads it (RenderBox's stroke_lines_vertex / uber_vertex: positions read the register before
+    // its only write, garbage geometry: Settings > Battery charts empty). Those reads take the side's temporary; a
+    // multi-word read of such a word cannot, and the branch stays.
+    for (unsigned sidx = 0; sidx < 2; sidx++) {
+        bool written[64] = { false };
+        for (unsigned k = 0; k < ns[sidx]; k++) vi_foreach_instr(sides[sidx][k], I) {
+            vi_ref *rs[5] = { &I->src[0], &I->src[1], &I->src[2], &I->src[3], &I->sr };
+            for (unsigned q = 0; q < 5; q++) {
+                if (rs[q]->kind != VI_VREG) continue;
+                unsigned c = rs[q]->count ? rs[q]->count : 1;
+                for (unsigned e = 0; e < nsel; e++)
+                    if (written[e] && sel[e].v == rs[q]->value && sel[e].word >= rs[q]->word && sel[e].word < rs[q]->word + c && (c != 1 || q == 4)) return false;
+            }
+            vi_ref *w[2] = { &I->dest, &I->sw };
+            for (unsigned q = 0; q < 2; q++)
+                for (unsigned e = 0; e < nsel; e++) if (w[q]->kind == VI_VREG && sel[e].v == w[q]->value && sel[e].word == w[q]->word) written[e] = true;
+        }
+    }
     // rename side writes of those registers to temporaries (the last write of each side wins)
     vi_builder b = { s, h, br };
     for (unsigned sidx = 0; sidx < 2; sidx++) for (unsigned k = 0; k < ns[sidx]; k++) {
         vi_foreach_instr_safe(sides[sidx][k], I) {
             if (I->op == VA_BRANCH) { list_del(&I->link); continue; }
+            // reads of a register this side already wrote read the side's temporary
+            vi_ref *rs[4] = { &I->src[0], &I->src[1], &I->src[2], &I->src[3] };
+            for (unsigned q = 0; q < 4; q++) {
+                if (rs[q]->kind != VI_VREG || (rs[q]->count && rs[q]->count != 1)) continue;
+                for (unsigned e = 0; e < nsel; e++) {
+                    vi_ref cur = sidx == 0 ? sel[e].nz : sel[e].z;
+                    if (cur.kind && sel[e].v == rs[q]->value && sel[e].word == rs[q]->word) { rs[q]->value = cur.value; rs[q]->word = cur.word; break; }
+                }
+            }
             vi_ref *w[2] = { &I->dest, &I->sw };
             for (unsigned q = 0; q < 2; q++) {
                 if (w[q]->kind != VI_VREG || !vi_vreg_get(s, w[q]->value)->multi_def) continue;
@@ -1124,8 +1152,7 @@ static bool if_convert_one(vi_shader *s, vi_block *h)
             list_addtail(&I->link, &br->link);
         }
     }
-    // (reads of phi registers inside a side see the value before the branch: sides only write them through copies
-    //  at their end, which the selector emits last, so no side reads its own write)
+    // (reads of phi registers in a side before the side writes them see the value before the branch)
     for (unsigned e = 0; e < nsel; e++) {
         vi_ref old = vi_vreg(sel[e].v, sel[e].word, 1);
         vi_ref x = sel[e].nz.kind ? sel[e].nz : old, y = sel[e].z.kind ? sel[e].z : old;

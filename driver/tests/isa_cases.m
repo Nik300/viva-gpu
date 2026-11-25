@@ -633,6 +633,32 @@ static void ref_C1h(const isa_case *c, const double *g, double *out) {
     }
 }
 
+// Nested if-conversion: an inner if/else inside an outer branch writes a value that the outer branch then reads
+// (RenderBox's stroke_lines_vertex: the outer conversion moved the inner phi's write after its read, so line
+// geometry read an unwritten register: Settings > Battery charts empty).
+static const char kA2n[] =
+    "kernel void k(device float4 *o [[buffer(0)]], uint2 p [[thread_position_in_grid]]) {\n"
+    "  float a = float(p.x) * 0.25 + 1.0, b = float(p.y) * 0.5 + 2.0, r, q;\n"
+    "  bool c1 = (p.x + p.y) % 3 != 0, c2 = (p.x & 1) != 0;\n"
+    "  if (c1) {\n"
+    "    float t, u;\n"
+    "    if (c2 || a > 9.0) { t = -a; u = (a + b) / (a * b + 1.0); } else { t = -a; u = (a - b) / (b + 3.0) + 0.5; }\n"
+    "    float v = (p.y & 2) ? t : a;\n"
+    "    r = v * b + u; q = u * 2.0 + dot(float2(a, b), float2(u, v));\n"
+    "  } else { float s = rsqrt(a * a + b * b); r = a * s + b; q = (a - b) * s; }\n"
+    "  o[p.y * 64 + p.x] = float4(r, q, a, b); }\n";
+static void ref_A2n(const isa_case *c, const double *g, double *out) {
+    PIX(c) {
+        double a = x * 0.25 + 1.0, b = y * 0.5 + 2.0, r, q;
+        if ((x + y) % 3 != 0) {
+            double t = -a, u = ((x & 1) || a > 9.0) ? (a + b) / (a * b + 1.0) : (a - b) / (b + 3.0) + 0.5;
+            double v = (y & 2) ? t : a;
+            r = v * b + u; q = u * 2.0 + a * u + b * v;
+        } else { double s = 1.0 / sqrt(a * a + b * b); r = a * s + b; q = (a - b) * s; }
+        set4(OUT(x, y), r, q, a, b);
+    }
+}
+
 static const char kC2[] = FS_VS
     "struct P { float4 scale; float2 off; uint n; float k; };\n"
     "fragment float4 fs(V v [[stage_in]], constant float4 &c [[buffer(0)]], constant P &p [[buffer(1)]]) {\n"
@@ -1784,6 +1810,8 @@ static void ref_E2s(const isa_case *c, const double *g, double *out) {
 const isa_case isa_cases[] = {
     // A: infrastructure (VMG_ISA_ONLY left unset)
     {FR(A2), .title = "Flusso di controllo: if/else, cicli con break/continue, ritorno anticipato"},
+    {CS(A2n, ISA_OUT_F32), .id = "A2", .title = "If annidati convertiti: valore del ramo interno letto nel ramo esterno", .feats = "E6",
+     .tol = 1e-4, .rel = 1e-4, .vis_lo = -40, .vis_hi = 120},
     {FR(A3), .title = "Pressione sui registri: 32 valori vivi", .tol = 1e-4, .vis_hi = 4},
     {FR(A6), .title = "Costanti: immediati, tabella costanti, FAU"},
     {FR(A11), .title = "Fast math: costante NaN = 0 (mix con copertura)"},

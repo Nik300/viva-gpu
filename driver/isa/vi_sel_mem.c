@@ -466,9 +466,10 @@ static vi_ref load_sub(S *t, sv *p, unsigned bits, unsigned extra)
                (p->space == SP_PUSH && (off.kind != VI_IMM || getenv("VMG_ISA_PUSH_LD")));
     if (bits == 16 && pka && !getenv("VMG_ISA_NO_LD16") && (off.kind != VI_IMM || !(off.value & 1))) {
         vi_ref d = sel_tmp(t);
+        vi_ref o = off.kind == VI_IMM ? sel_mov32(t, off) : off;   // (emitted before the load that reads it)
         vi_instr *I = E(t, VA_LD_PKA_I16);
         I->sw = d;
-        I->src[0] = off.kind == VI_IMM ? sel_mov32(t, off) : off;
+        I->src[0] = o;
         I->src[1] = p->space == SP_SSBO ? sel_ssbo_handle(t, p) : vi_imm(p->space == SP_POOL ? VI_UBO_POOL : VI_UBO_CB0);
         vi_set(I, VAF_lane, VA_LOAD_LANE_16_M_H0);
         if (p->space == SP_SSBO) I->memory = true;
